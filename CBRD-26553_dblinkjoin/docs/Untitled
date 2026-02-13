@@ -1,0 +1,21 @@
+DBLINK 조인 최적화 — 요약
+상세 내용은 dblink_join_optimization_work.md 참고.
+
+한 줄 요약
+리모트 테이블 전체를 가져와 로컬에서 조인하는 대신, prepare + 조인 키 binding으로 조인 조건을 만족하는 행만 원격에서 가져오도록 변경.
+
+현재 vs 목표
+구분	현재	목표
+원격 실행	cci_execute 1회 → 결과셋 전체 확보	prepare 1회, outer 행마다 rebind → execute
+데이터량	원격 테이블 전체(또는 푸시된 WHERE만)	조인 조건 만족 행만
+조인 조건	로컬에서 evaluation (correlated라 푸시 안 함)	remote.key = ? 로 푸시, ?에 로컬 조인 키 binding
+핵심 변경 포인트
+Parser: 조인 조건(원격 컬럼 = 로컬 컬럼)을 ? 로 푸시 가능하도록 식별·치환 (WHERE만; ON 조건은 현재 미푸시).
+Executor: dblink open 시 prepare만, outer 행 바뀔 때마다 vd로 rebind 후 execute → fetch.
+주요 파일
+푸시 조건: src/parser/view_transform.c
+dblink 스펙/ host_var: src/parser/xasl_generation.c, src/query/xasl.h
+스캔/실행: src/query/dblink_scan.c, src/query/scan_manager.c
+주의
+푸시 조건을 보수적으로 정의하고, 불명확하면 기존 방식(전체 fetch) 유지.
+Oracle/MySQL Gateway 경유 조인에도 동일 최적화 적용 시 이득 있음.
