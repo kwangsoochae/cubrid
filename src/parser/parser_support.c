@@ -11138,18 +11138,33 @@ pt_mk_spec_derived_dblink_table (PARSER_CONTEXT * parser, PT_NODE * from_tbl)
 
   parser->custom_print |= PT_PRINT_SUPPRESS_FOR_DBLINK;
 
-  derived_spec->info.dblink_table.remote_table_name = NULL;
-  if (class_spec_info->entity_name->info.name.resolved)
-    {
-      derived_spec->info.dblink_table.remote_table_name =
-	pt_append_string (parser, derived_spec->info.dblink_table.remote_table_name,
-			  class_spec_info->entity_name->info.name.resolved);
-      derived_spec->info.dblink_table.remote_table_name =
-	pt_append_string (parser, derived_spec->info.dblink_table.remote_table_name, ".");
-    }
-  derived_spec->info.dblink_table.remote_table_name =
-    pt_append_string (parser, derived_spec->info.dblink_table.remote_table_name,
-		      class_spec_info->entity_name->info.name.original);
+  /* Use entity_name->original as-is if it contains schema (user explicitly specified),
+   * otherwise strip schema for default schema. Do not use entity_name->resolved
+   * (e.g. "public") which would produce "public.emp" when user didn't specify schema. */
+  {
+    const char *orig =
+      (class_spec_info->entity_name->info.name.original)
+      ? (const char *) class_spec_info->entity_name->info.name.original : "";
+    const char *table_name_for_remote;
+    if (strchr (orig, '.'))
+      {
+	/* Schema explicitly specified (e.g., from synonym "public.emp@cubrid_conn") - preserve it */
+	table_name_for_remote = orig;
+      }
+    else
+      {
+	/* No schema specified - use unqualified name for default schema */
+	table_name_for_remote = sm_remove_qualifier_name (orig);
+	if (!table_name_for_remote)
+	  table_name_for_remote = orig;
+      }
+    derived_spec->info.dblink_table.remote_table_name =
+      pt_append_string (parser, NULL, table_name_for_remote);
+    class_spec_info->entity_name->info.name.original =
+      pt_append_string (parser, NULL, table_name_for_remote);
+    /* Avoid resolved schema being used elsewhere (e.g. pt_remake_dblink_select_list uses original). */
+    class_spec_info->entity_name->info.name.resolved = NULL;
+  }
 
   parser->custom_print &= ~PT_PRINT_SUPPRESS_FOR_DBLINK;
 
@@ -11675,7 +11690,27 @@ pt_convert_dblink_synonym (PARSER_CONTEXT * parser, PT_NODE * spec, void *is_ins
 	    }
 
 	  *r = 0;
-	  spec->info.spec.entity_name->info.name.original = pt_append_string (parser, NULL, class_name);
+	  /* If user explicitly specified schema in synonym target (e.g., "public.emp@cubrid_conn"),
+	   * preserve it for remote SQL. Otherwise, use unqualified name (default schema). */
+	  {
+	    const char *class_name_for_remote;
+	    if (strchr (class_name, '.'))
+	      {
+		/* Schema explicitly specified by user - preserve it */
+		class_name_for_remote = class_name;
+	      }
+	    else
+	      {
+		/* No schema specified - use unqualified name for default schema */
+		class_name_for_remote = sm_remove_qualifier_name (class_name);
+		if (!class_name_for_remote)
+		  class_name_for_remote = class_name;
+	      }
+	    spec->info.spec.entity_name->info.name.original =
+	      pt_append_string (parser, NULL, class_name_for_remote);
+	    /* Clear resolved to avoid "public.emp" being reconstructed from resolved + original */
+	    spec->info.spec.entity_name->info.name.resolved = NULL;
+	  }
 	  spec->info.spec.remote_server_name = parser_new_node (parser, PT_NAME);
 	  spec->info.spec.remote_server_name->info.name.original = pt_append_string (parser, NULL, r + 1);
 

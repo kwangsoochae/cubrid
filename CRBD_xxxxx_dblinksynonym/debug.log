@@ -1,0 +1,22 @@
+pt_convert_dblink_synonym: original=emp, resolved=(null), class_name=emp
+pt_mk_spec_derived_dblink_table BEFORE: original=emp, resolved=(null), table_name_for_remote=emp
+pt_mk_spec_derived_dblink_table AFTER: original=emp, resolved=(null)
+pt_remake_dblink_select_list: tbl_name=public.emp, tbl_resolved=(null), tbl_for_remote=public.emp
+pt_convert_dblink_synonym: original=emp, resolved=(null), class_name=emp
+pt_mk_spec_derived_dblink_table BEFORE: original=emp, resolved=(null), table_name_for_remote=emp
+pt_mk_spec_derived_dblink_table AFTER: original=emp, resolved=(null)
+pt_mk_spec_derived_dblink_table: qstr set, qstr->original=emp, qstr->resolved=(null)
+pt_remake_dblink_select_list: tbl_name=public.emp, tbl_resolved=(null), tbl_for_remote=public.emp
+pt_convert_dblink_synonym: original=emp, resolved=(null), class_name=emp
+pt_mk_spec_derived_dblink_table BEFORE: original=emp, resolved=(null), table_name_for_remote=emp
+pt_mk_spec_derived_dblink_table AFTER: original=emp, resolved=(null)
+pt_mk_spec_derived_dblink_table: qstr set, qstr->original=emp, qstr->resolved=(null)
+pt_remake_dblink_select_list: tbl_name=public.emp, tbl_resolved=(null), tbl_for_remote=public.emp
+pt_convert_dblink_synonym: original=emp, resolved=(null), class_name=emp
+pt_mk_spec_derived_dblink_table BEFORE: original=emp, resolved=(null), table_name_for_remote=emp
+pt_mk_spec_derived_dblink_table AFTER: original=emp, resolved=(null)
+pt_mk_spec_derived_dblink_table: qstr set, qstr->original=emp, qstr->resolved=(null)
+pt_convert_dblink_synonym: original=public.emp, resolved=(null), class_name=public.emp
+pt_mk_spec_derived_dblink_table BEFORE: original=public.emp, resolved=(null), table_name_for_remote=public.emp
+pt_mk_spec_derived_dblink_table AFTER: original=public.emp, resolved=(null)
+pt_mk_spec_derived_dblink_table: qstr set, qstr->original=public.emp, qstr->resolved=(null)

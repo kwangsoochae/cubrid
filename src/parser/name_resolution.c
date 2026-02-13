@@ -5332,7 +5332,27 @@ pt_remake_dblink_select_list (PARSER_CONTEXT * parser, PT_SPEC_INFO * class_spec
       var_buf = pt_append_nulstring (parser, var_buf, " FROM ");
     }
 
-  var_buf = pt_append_varchar (parser, var_buf, pt_print_bytes (parser, entity_name));
+  /* Use remote_table_name set in pt_mk_spec_derived_dblink_table; it is not overwritten
+   * by name resolution (unlike qstr->original which can become "public.emp"). */
+  {
+    const char *tbl_for_remote =
+      (dblink_table->remote_table_name && *dblink_table->remote_table_name)
+      ? (const char *) dblink_table->remote_table_name : "";
+    if (!tbl_for_remote && entity_name && entity_name->node_type == PT_NAME && entity_name->info.name.original)
+      {
+	/* Fallback if remote_table_name not set (e.g. dblink(server, 'select...')) */
+	const char *tbl_name = (const char *) entity_name->info.name.original;
+	if (strchr (tbl_name, '.'))
+	  tbl_for_remote = tbl_name;
+	else
+	  {
+	    tbl_for_remote = sm_remove_qualifier_name (tbl_name);
+	    if (!tbl_for_remote)
+	      tbl_for_remote = tbl_name;
+	  }
+      }
+    var_buf = pt_append_nulstring (parser, var_buf, tbl_for_remote ? tbl_for_remote : "");
+  }
 
   // table alias : ~ from tbl@srv t
   if (range_var)

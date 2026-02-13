@@ -1,0 +1,14 @@
+---
+description: DBLINK + synonym 관련 수정 시 참고할 문서와 코드 위치
+globs: 
+alwaysApply: false
+---
+
+# DBLINK + Synonym 관련 작업 시 참고
+
+- **문서:** `.cursor/presentation_summary.md`, `.cursor/code_review_dblink_synonym.md` 에 이전 수정 요약·코드 리뷰가 있음. 관련 작업 시 위 문서를 참고할 것.
+- **정책:** dblink 사용 시 원격 서버에는 **unqualified 클래스명만** 전달 (스키마 없이 테이블명만).
+- **관련 코드 위치:**
+  - `src/parser/parser_support.c`: `pt_mk_spec_derived_dblink_table`, `pt_convert_dblink_synonym`
+  - `src/parser/name_resolution.c`: `pt_remake_dblink_select_list`
+  - `src/query/execute_statement.c`: `server_find` (_db_server 조회, user_name/owner)

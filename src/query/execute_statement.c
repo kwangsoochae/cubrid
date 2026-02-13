@@ -21870,6 +21870,62 @@ server_find (PT_NODE * node_server, PT_NODE * node_owner)
   else if (error == 0)
     {
       error = ER_DBLINK_SERVER_NOT_FOUND;
+      /* When no owner specified, try finding by link_name only (server may be owned by another user). */
+      if (node_owner == NULL)
+	{
+	  db_query_end (query_result);
+	  sprintf (query,
+		   "SELECT [_db_server], [user_name] FROM [_db_server] WHERE [link_name] = '%s'",
+		   server_name_lwr);
+	  error = db_compile_and_execute_local (query, &query_result, &query_error);
+	  if (error > 0)
+	    {
+	      error = db_query_first_tuple (query_result);
+	      if (error == DB_CURSOR_SUCCESS)
+		{
+		  do
+		    {
+		      error = db_query_get_tuple_value (query_result, 0, &values[0]);
+		      if (error != NO_ERROR)
+			{
+			  goto err;
+			}
+		      server_obj = db_get_object (&values[0]);
+		      db_make_null (&owner_val);
+		      error = db_get (server_obj, SERVER_ATTR_OWNER, &owner_val);
+		      if (error == NO_ERROR && au_is_server_authorized_user (&owner_val))
+			rec_cnt++;
+		      else
+			server_obj = NULL;
+		      db_value_clear (&values[0]);
+		      pr_clear_value (&owner_val);
+		      if (rec_cnt > 1)
+			break;
+		    }
+		  while (db_query_next_tuple (query_result) == DB_CURSOR_SUCCESS);
+		  if (rec_cnt == 1)
+		    {
+		      error = NO_ERROR;
+		    }
+		  else if (rec_cnt == 0)
+		    {
+		      error = ER_DBLINK_SERVER_NOT_FOUND;
+		    }
+		  else
+		    {
+		      error = ER_DBLINK_SERVER_MULTIPLE_FOUND;
+		    }
+		}
+	      else
+		{
+		  error = ER_DBLINK_SERVER_NOT_FOUND;
+		}
+	    }
+	  else if (error == 0)
+	    {
+	      error = ER_DBLINK_SERVER_NOT_FOUND;
+	    }
+	}
     }
   else
     {
@@ -21939,6 +21995,7 @@ err:
     {
       db_value_clear (&values[0]);
       db_value_clear (&values[1]);
+      pr_clear_value (&owner_val);
     }
 
 clear_and_return:
