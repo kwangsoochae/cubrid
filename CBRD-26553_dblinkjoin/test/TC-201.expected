@@ -1,0 +1,11 @@
+           id  name                  name                
+=========================================================
+            1  'local_1'             'remote_a1'         
+            2  'local_2'             'remote_b1'         
+            2  'local_2'             'remote_b2'         
+            3  'local_3'             'remote_c1'         
+            5  'local_5'             'remote_e1'         
+            5  'local_5'             'remote_e2'         
+            5  'local_5'             'remote_e3'         
+
+7 rows selected.

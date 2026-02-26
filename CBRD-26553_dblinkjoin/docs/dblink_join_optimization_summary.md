@@ -1,11 +1,13 @@
 # DBLINK 조인 최적화 — 요약
 
-상세 내용은 [dblink_join_optimization_work.md](dblink_join_optimization_work.md) 참고.
+상세 내용은 [dblink_join_optimization_work.md](dblink_join_optimization_work.md) 참고. 구현 단계·자료 구조는 [dblink_join_optimization_plan.md](dblink_join_optimization_plan.md) 참고.
 
 ---
 
 ## 한 줄 요약
 리모트 테이블 **전체**를 가져와 로컬에서 조인하는 대신, **prepare + 조인 키 binding**으로 **조인 조건을 만족하는 행만** 원격에서 가져오도록 변경.
+
+**적용 조건**: Nested loop에서 **inner가 dblink인 경우에만** 적용. dblink가 outer이면 기존 방식(1회 execute 후 fetch) 유지.
 
 ---
 
@@ -22,6 +24,7 @@
 ## 핵심 변경 포인트
 - **Parser**: 조인 조건(원격 컬럼 = 로컬 컬럼)을 `?` 로 푸시 가능하도록 식별·치환 (WHERE만; ON 조건은 현재 미푸시).
 - **Executor**: dblink open 시 prepare만, **outer 행 바뀔 때마다** vd로 rebind 후 execute → fetch.
+- **추가된 자료 구조**: PT(`join_key_local_refs`), XASL(`join_key_count`, `join_key_regu_list`), 실행기(scan_info에 `join_key_count`·`join_key_regus` 복사). 상세는 [dblink_join_optimization_plan.md](dblink_join_optimization_plan.md) 참고.
 
 ---
 
@@ -33,5 +36,5 @@
 ---
 
 ## 주의
-- 푸시 조건을 보수적으로 정의하고, 불명확하면 **기존 방식(전체 fetch)** 유지.
+- 푸시 조건이 불명확하면 **기존 방식(전체 fetch)** 유지.
 - Oracle/MySQL Gateway 경유 조인에도 동일 최적화 적용 시 이득 있음.

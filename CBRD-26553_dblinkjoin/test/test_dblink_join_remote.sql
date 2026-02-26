@@ -2,12 +2,21 @@
 -- 원격 DB에서 실행. dblink 조인 테스트용 스키마 및 데이터.
 -- 사용법: csql -S -u cubrid -p cubrid <원격DB명> -i test_dblink_join_remote.sql
 
+
+call login('dba', '') on CLASS db_user;
+create user cubrid password 'cubrid';
+call login('cubrid', 'cubrid') on CLASS db_user;
+
+
+
 -- 스키마: 로컬과 조인할 테이블 (id 기준)
 DROP TABLE IF EXISTS remote_t;
 CREATE TABLE remote_t (
     id INT,
     name VARCHAR(32)
 );
+
+truncate table remote_t;
 
 -- 기준 데이터: 0건/1건/N건 매칭이 나오도록 구성
 -- id=1: 1건

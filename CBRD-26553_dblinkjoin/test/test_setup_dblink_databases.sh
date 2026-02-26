@@ -82,6 +82,8 @@ start_database_server() {
 
 # 데이터베이스 처리 함수 (존재 확인, 생성, 서버 시작)
 process_database() {
+    cubrid service start
+    sleep 2 
     local dbname=$1
     echo ""
     echo "=== DB ($dbname) 확인 ==="
