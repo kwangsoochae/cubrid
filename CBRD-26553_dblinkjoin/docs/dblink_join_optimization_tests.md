@@ -30,12 +30,19 @@
 | TC-101 | FR-7 | T5-1 | 푸시 가능 | WHERE local.id = remote.id 결과 일치 |
 | TC-102 | FR-7 | T5-1 | 푸시 가능 | 0건 매칭(inner join) |
 | TC-103 | FR-7 | T5-1 | 푸시 가능 | 1:N 매칭 행 수 일치 |
+| TC-104 | FR-7 | T5-1 | 푸시 가능 | outer 조인 키가 NULL — execute 스킵, 결과 제외 |
 | TC-201 | FR-6, NFR-1 | T5-2 | regression | 푸시 불가 쿼리 기존 동작 |
 | TC-202 | FR-6, NFR-1 | T5-2 | regression | 단일 dblink(조인 없음) 기존 동작 |
 | TC-203 | NFR-2 | T5-2 | regression | 앱 `?` 있는 predicate 시 조인 키 푸시 미적용·기존 방식 |
 | TC-204 | FR-6 | T5-2 | regression | LEFT JOIN(ON 조건) 푸시 미적용·기존 동작 |
+| TC-205 | FR-6 | T5-2 | regression | 복합 조인 키(AND) — 1차 미지원, 기존 방식으로 올바른 결과 |
 | TC-301 | NFR-3 | T3-2 | 에러 | reset 구간 rebind/execute 실패 시 에러 전파 |
 | TC-401 | — | T5-3 | 성능(선택) | 원격 전송 행 수 감소·실행 계획 반영 |
+| TC-501 | PRD 3.2 효과1 | T5-3 | 기대 효과 측정 | 원격 전송 행 수 감소 (실행 시간) |
+| TC-502 | PRD 3.2 효과2 | T5-3 | 기대 효과 측정 | 로컬 필터 부담 감소 — zero-match (실행 시간) |
+| TC-503 | PRD 3.2 효과3 | T5-3 | 기대 효과 측정 | 원격 execute 횟수 변화 (statdump) |
+| TC-601 | — | — | worst case | 고선택도: After가 fetch 10배, execute 100배 증가 |
+| TC-602 | — | — | worst case | 다수 outer + 소규모 remote: execute round-trip 1,000배 증가 |
 
 ---
 
@@ -71,6 +78,17 @@
 | Given | 한 로컬 id에 대해 원격에 여러 행이 매칭됨 |
 | When | 푸시 적용된 조인 쿼리 실행 |
 | Then | 행 수가 기존(전체 fetch 후 로컬 조인)과 동일하다. |
+
+### TC-104: outer 조인 키가 NULL인 경우
+
+| 항목 | 내용 |
+|------|------|
+| PRD | FR-7 |
+| TASK | T5-1 |
+| Given | `local_null_key_t`에 id=NULL 행 포함. 기존 `remote_t` 사용. |
+| When | `WHERE l.id = r.id` 푸시 적용 쿼리 실행 |
+| Then | Before: NULL = any → false → 결과 제외. After: join_key_regus[0] 평가 결과 NULL → execute 스킵(no_result=true) → S_END. **두 경우 모두 NULL key 행은 결과에 없어야 함.** 총 3행 (id=1: 1행, id=2: 2행). |
+| 전제 | `setup_edge_cases_local.sql` (로컬) |
 
 ---
 
@@ -116,6 +134,18 @@
 | When | 실행 |
 | Then | 기존 동작 유지. 푸시 적용되지 않음, regression 없음. |
 
+### TC-205: 복합 조인 키 (AND) — 1차 미지원 경계 검증
+
+| 항목 | 내용 |
+|------|------|
+| PRD | FR-6 |
+| TASK | T5-2 |
+| Given | `local_compound_t(id, code)`, `remote_compound_t(id, code)`. id만 같고 code가 다른 행 포함. |
+| When | `WHERE l.id = r.id AND l.code = r.code` 실행 |
+| Then | push 미적용(기존 방식) 또는 id만 push 후 code 로컬 필터 — 어느 경우든 결과 2행 일치. remote execute count = 1 (push 미적용 확인). |
+| 검증 포인트 | id만 매칭되는 행(rc_1C, rc_2D)이 code 조건에 걸려 최종 결과에서 제외되는지 |
+| 전제 | `setup_edge_cases_local.sql` (로컬), `setup_edge_cases_remote.sql` (원격) |
+
 ---
 
 ## 3. 에러 처리 (NFR-3 ↔ T3-2)
@@ -143,6 +173,80 @@
 | Given | 푸시 가능 조인 쿼리, 원격에 많은 행 존재 |
 | When | 푸시 적용된 경로로 실행 |
 | Then | (선택) 원격으로 전송·수신되는 행 수가 기존(전체 fetch) 대비 감소함. 실행 계획 또는 트레이스에 rebind/execute 반영 여부 확인 가능. |
+
+---
+
+## 5. 기대 효과 측정 (PRD 3.2)
+
+소규모 데이터(7행)로는 측정 불가. 대용량 셋업 후 Before/After 비교로 측정한다.
+
+**전제**: `test/setup_large_data_remote.sql`(원격 DB), `test/setup_large_data_local.sql`(로컬 DB) 실행 완료.
+원격: `remote_large_t` 10,000행 (id 1-10,000). 로컬: `local_small_t` 10행 (id 1-10), `local_nomatch_t` 10행 (id 10,001-10,010).
+
+### TC-501: 원격 전송 행 수 감소 (효과 1)
+
+| 항목 | 내용 |
+|------|------|
+| PRD | PRD 3.2 효과 1 |
+| 시나리오 | outer 10행 (id 1-10), remote 10,000행 → 10건 매칭 (선택도 0.1%) |
+| Before | remote_large_t 10,000행 전체 fetch → 로컬 predicate → 10행 반환. **전송: 10,000행** |
+| After | outer 행마다 1 execute × 1행 반환. **전송: 10행** |
+| 측정 | `\timing on` 후 실행 시간 비교 (Before vs After). 결과 행 수 = 10행 (정확성) |
+| 기대 | 실행 시간 대폭 감소 (전송 행 수 1/1,000) |
+
+### TC-502: 로컬 필터 부담 감소 — zero-match (효과 2)
+
+| 항목 | 내용 |
+|------|------|
+| PRD | PRD 3.2 효과 2 |
+| 시나리오 | outer 10행 (id 10,001-10,010), remote 10,000행 (id 1-10,000) → **매칭 0건** |
+| Before | 10,000행 fetch → outer 10행 × 10,000행 predicate 평가 → 전부 실패. **총 100,000회 로컬 평가** |
+| After | 10 execute × 0행 반환 → 즉시 S_END. **로컬 predicate 평가 0회** |
+| 측정 | `\timing on` 후 실행 시간 비교. 결과 0행 (정확성) |
+| 기대 | 가장 극적인 개선. After는 fetch 자체가 없으므로 거의 즉시 완료 |
+
+### TC-503: 원격 execute 횟수 변화 (효과 3)
+
+| 항목 | 내용 |
+|------|------|
+| PRD | PRD 3.2 효과 3 |
+| 시나리오 | outer 5행 (local_t), remote 7행 (remote_t) — 기존 소규모 데이터 사용 |
+| Before | remote_t에서 SELECT **1회** 실행 → cursor reset 5회 |
+| After | outer 행마다 execute → remote_t에서 SELECT **5회** 실행 |
+| 측정 | 쿼리 전·후 `cubrid statdump -c <remote_db> \| grep Num_query_executions` 비교. delta = Before: 1, After: 5 |
+| 기대 | execute 횟수 증가 (1 → 5)하되, 각 execute당 반환 행 수 감소로 총 전송량 감소 |
+
+---
+
+## 6. Worst Case 시나리오
+
+최적화가 **오히려 불리**해지는 조건을 측정한다. 결과 정확성은 동일하지만 실행 시간이 Before보다 증가하는 케이스다.
+
+**핵심 조건**: `outer_count × avg_matching > remote_count` 이거나 `outer_count`가 매우 클 때.
+
+**전제**: `test/setup_worst_case_remote.sql`(원격 DB), `test/setup_worst_case_local.sql`(로컬 DB) 실행 완료.
+
+### TC-601: 고선택도 — fetch 증가 (outer_count × avg_matching >> remote_count)
+
+| 항목 | 내용 |
+|------|------|
+| 시나리오 | outer 100행 (id 1-10, 10개씩), remote 1,000행 (id 1-10, 100개씩) |
+| avg_matching | 100행/outer (선택도 100%) |
+| Before | 1 execute + **1,000행 fetch** (전체 1회) + 100,000번 로컬 평가 |
+| After | 100 executes + **10,000행 fetch** (Before의 **10배**) + 100회 execute 오버헤드 |
+| 측정 | `\timing on` 실행 시간 비교. COUNT = 10,000 (정확성) |
+| 시사점 | avg_matching이 높을수록 After가 오히려 더 많은 행을 전송. cost 기반 최적화 적용 판단 근거 |
+
+### TC-602: 다수 outer + 소규모 remote — execute round-trip 오버헤드
+
+| 항목 | 내용 |
+|------|------|
+| 시나리오 | outer 1,000행 (id 1-1,000), remote 5행 (id 1-5) |
+| avg_matching | 0.005행/outer (id 1-5만 매칭, 나머지 995행은 0건) |
+| Before | 1 execute + **5행 fetch** + 5,000번 로컬 평가 |
+| After | **1,000 executes** (Before의 **1,000배**) + 5행 fetch |
+| 측정 | `\timing on` 실행 시간 비교. statdump `Num_query_executions` delta: Before +1, After +1,000. 결과 5행 (정확성) |
+| 시사점 | remote가 작아 전체 fetch가 이미 빠를 때, execute round-trip이 지배적 비용이 됨. 고지연 WAN 환경에서 더욱 심각 |
 
 ---
 

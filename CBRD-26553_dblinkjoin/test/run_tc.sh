@@ -2,20 +2,25 @@
 # TC 단위 실행 스크립트 (PRD/TESTS 문서의 TC-101 ~ TC-401)
 # 전제: test_setup_dblink_databases.sh 후 test_run_dblink_join.sh 로 원격·로컬 스키마/데이터 적재 완료.
 # 사용법:
-#   ./run_tc.sh all              # TC 실행 후 각 정답지(TC-xxx.expected)와 비교
-#   ./run_tc.sh TC-101 [TC-102]  # 지정 TC만 실행·비교
-#   ./run_tc.sh --no-compare all # 비교 없이 실행만
+#   ./run_tc.sh all                   # TC 실행 후 각 정답지(TC-xxx.expected)와 비교
+#   ./run_tc.sh TC-101 [TC-102]       # 지정 TC만 실행·비교
+#   ./run_tc.sh --no-compare all      # 비교 없이 실행만
+#   ./run_tc.sh --gen-expected all    # 실제 출력을 expected 파일로 저장(정답지 생성)
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOCAL_DB="${CUBRID_DBLINK_LOCAL_DB:-testdb}"
 CSQL_OPTS="${CSQL_OPTS:--u cubrid -p cubrid}"
 NO_COMPARE=0
+GEN_EXPECTED=0
 
-# 인자에서 --no-compare 제거
+# 인자에서 플래그 제거
 ARGS=()
 for a in "$@"; do
   if [ "$a" = "--no-compare" ]; then
+    NO_COMPARE=1
+  elif [ "$a" = "--gen-expected" ]; then
+    GEN_EXPECTED=1
     NO_COMPARE=1
   else
     ARGS+=("$a")
@@ -29,7 +34,7 @@ extract_result() {
     /\[KS_DBLINK_DEBUG\]/ { next }
     /=== <Result of SELECT/ { in_result=1; skip_blank=1; next }
     in_result {
-      if (/rows selected/) {
+      if (/row.* selected/) {
         sub(/[[:space:]]*\([0-9.]* sec\).*$/, "")
         print
         in_result=0
@@ -61,6 +66,18 @@ run_one() {
   out=$(csql $CSQL_OPTS "$LOCAL_DB" -i "$sqlf" 2>&1)
   echo "$out" | grep -v 'KS_DBLINK_DEBUG' || true
 
+  if [ $GEN_EXPECTED -eq 1 ]; then
+    result=$(echo "$out" | extract_result)
+    if [ -z "$result" ]; then
+      echo "[WARN] $tc — Result 블록을 추출하지 못함, expected 파일 생성 생략"
+    else
+      printf '%s\n' "$result" > "$expf"
+      echo "[GEN] $tc.expected 생성 완료"
+    fi
+    echo ""
+    return 0
+  fi
+
   if [ $NO_COMPARE -eq 1 ]; then
     echo ""
     return 0
@@ -79,11 +96,11 @@ run_one() {
     return 1
   fi
 
-  if diff -q <(echo "$result") "$expf" >/dev/null 2>&1; then
+  if diff -q <(printf '%s\n' "$result") "$expf" >/dev/null 2>&1; then
     echo "[PASS] $tc"
   else
     echo "[FAIL] $tc — 정답지와 불일치"
-    diff <(echo "$result") "$expf" || true
+    diff <(printf '%s\n' "$result") "$expf" || true
     rc=1
   fi
   echo ""
@@ -94,12 +111,12 @@ FAIL_COUNT=0
 RESULT_LINES=()
 
 if [ ${#ARGS[@]} -eq 0 ]; then
-  echo "사용법: $0 [--no-compare] all | TC-101 [TC-102 ...]" >&2
+  echo "사용법: $0 [--no-compare|--gen-expected] all | TC-101 [TC-102 ...]" >&2
   exit 1
 fi
 
 if [ "${ARGS[0]}" = "all" ]; then
-  for tc in TC-101 TC-102 TC-103 TC-201 TC-202 TC-203 TC-204 TC-401; do
+  for tc in TC-101 TC-102 TC-103 TC-104 TC-201 TC-202 TC-203 TC-204 TC-205 TC-401; do
     if run_one "$tc"; then
       RESULT_LINES+=("  $tc: PASS")
     else

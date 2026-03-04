@@ -14,6 +14,7 @@
 - [9. 생명주기·메모리](#9-생명주기메모리)
 - [10. 참조 모듈 목록](#10-참조-모듈-목록)
 - [11. 정리](#11-정리)
+- [12. DBLink/원격 조인에서 REGU 활용](#12-dblink원격-조인에서-regu-활용)
 
 ---
 
@@ -446,4 +447,69 @@ REGU는 파서의 packing buffer에서 할당되며, XASL과 함께 한 번에 �
 - **Regular variable**의 **역할**은 XASL 상의 "값/표현"을 나타내는 공통 표현이며, regulator(계획 생성)와 XASL interpreter(실행)가 같은 구조를 공유한다. 단일 타입(`regu_variable_node`)과 `REGU_DATATYPE`/`value` union으로 상수·속성·산술·함수·서브쿼리·SP 등을 하나의 인터페이스로 다룬다.
 - **설계 배경:** 파스 트리(PT_NODE)와 실행(DB_VALUE) 사이에서 "한 번 정의해 두 단계가 공유"하도록 하기 위함이다. 계획용·실행용 표현을 분리하면 변환과 중복이 생기므로, REGU 하나로 통일한 설계이다.
 - **생성**은 파서의 `pt_to_regu_variable`/`pt_make_regu_*`와 `xasl_regu_alloc`의 `regu_alloc`/`regu_init`에서 이루어지고, **실행 시 값**은 `fetch_peek_dbval`로 평가되며, **정리**는 `clear_xasl`/`clear_xasl_local`과 실행부의 `qexec_clear_regu_var` 등과 연동된다.
-- dblink/원격 조인 등에서 "로컬/원격 피연산자"를 구분하거나, 실행 계획을 분석할 때는 이 REGU 트리와 `type`/`xasl`/`flags`를 따라가면 "어디서 값이 오는지"를 추적할 수 있다.
+- dblink/원격 조인 등에서 "로컬/원격 피연산자"를 구분하거나, 실행 계획을 분석할 때는 이 REGU 트리와 `type`/`xasl`/`flags`를 따라가면 "어디서 값이 오는지"를 추적할 수 있다. 자세한 내용은 [12. DBLink/원격 조인에서 REGU 활용](#12-dblink원격-조인에서-regu-활용) 참조.
+
+---
+
+## 12. DBLink/원격 조인에서 REGU 활용
+
+DBLink join push-down(CBRD-26553) 구현 시, 조인 조건의 각 피연산자가 **로컬에서 오는 값**인지 **원격에서 오는 값**인지 판단해야 한다. 이 판단은 `type` / `xasl` / `flags` 세 필드를 조합해 수행한다.
+
+### 12.1 배경 쿼리 예시
+
+```sql
+SELECT * FROM local_t, DBLINK(...) AS remote_t
+WHERE remote_t.col = local_t.id;
+```
+
+이 조건을 REGU 트리로 표현하면 두 `TYPE_ATTR_ID` 노드가 나타나는데, 겉으로는 동일해 보여도 출처가 다르다.
+
+### 12.2 `type` 으로 1차 구분
+
+| type | 의미 |
+|------|------|
+| `TYPE_ATTR_ID` | 현재 scan 중인 테이블의 컬럼 — 로컬 또는 원격 모두 가능 |
+| `TYPE_DBVAL` | 리터럴 상수 — scan 전에 즉시 사용 가능 |
+| `TYPE_CONSTANT` | 호스트 변수/서브쿼리 결과 캐시 |
+| `TYPE_INARITH` 등 | 복합식 — 자식 노드를 재귀 추적해야 출처 확인 가능 |
+
+`TYPE_ATTR_ID`라도 **어느 access_spec에 속하는 `attr_id`인지**를 봐야 로컬/원격이 구분된다.
+
+### 12.3 `xasl` 필드로 2차 구분
+
+```c
+struct regu_variable_node {
+    xasl_node *xasl;   // NULL이면 현재 plan 내 값, 비NULL이면 서브쿼리/원격 XASL
+    ...
+};
+```
+
+- `xasl == NULL` → 현재 실행 중인 plan 내의 값 (로컬 컬럼, 상수)
+- `xasl != NULL` → 해당 XASL을 먼저 실행해야 얻을 수 있는 값 (서브쿼리, 원격 dblink XASL)
+
+DBLink 원격 쿼리의 XASL이 `regu->xasl`에 연결된 경우 → 원격에서 오는 값.
+
+### 12.4 `flags` 로 3차 구분
+
+| 플래그 | 의미 |
+|--------|------|
+| `REGU_VARIABLE_CORRELATED` (0x800) | outer 쿼리 row에 의존 → outer row가 바뀔 때마다 재평가 필요 |
+| `REGU_VARIABLE_FETCH_ALL_CONST` (0x40) | 전체가 상수 → scan 전 한 번만 계산 가능 |
+| `REGU_VARIABLE_FETCH_NOT_CONST` (0x80) | 상수 아님 → row마다 재계산 필요 |
+
+`REGU_VARIABLE_CORRELATED`가 설정된 REGU는 **outer 루프(로컬 테이블)에서 공급**되는 값임을 의미 → push-down 시 bind parameter 후보.
+
+### 12.5 세 필드 조합 판단 예시
+
+```
+조인 조건:  remote_t.col = local_t.id
+
+lhs: TYPE_ATTR_ID, xasl = dblink_xasl, flags = 0
+     → 원격 테이블 컬럼, dblink scan 결과에서 옴
+
+rhs: TYPE_ATTR_ID, xasl = NULL, flags = REGU_VARIABLE_CORRELATED
+     → 로컬 테이블 컬럼, outer row에서 공급
+     → push-down bind parameter 후보
+```
+
+**결론:** `xasl == NULL` + `REGU_VARIABLE_CORRELATED` 조합 = 로컬에서 오는 값 = 원격 쿼리의 `WHERE` bind parameter로 내려보낼 수 있다.
