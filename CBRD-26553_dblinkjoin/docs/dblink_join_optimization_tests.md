@@ -191,7 +191,7 @@
 | 시나리오 | outer 10행 (id 1-10), remote 10,000행 → 10건 매칭 (선택도 0.1%) |
 | Before | remote_large_t 10,000행 전체 fetch → 로컬 predicate → 10행 반환. **전송: 10,000행** |
 | After | outer 행마다 1 execute × 1행 반환. **전송: 10행** |
-| 측정 | `\timing on` 후 실행 시간 비교 (Before vs After). 결과 행 수 = 10행 (정확성) |
+| 측정 | `;time on` 후 실행 시간 비교 (Before vs After). 결과 행 수 = 10행 (정확성) |
 | 기대 | 실행 시간 대폭 감소 (전송 행 수 1/1,000) |
 
 ### TC-502: 로컬 필터 부담 감소 — zero-match (효과 2)
@@ -202,7 +202,7 @@
 | 시나리오 | outer 10행 (id 10,001-10,010), remote 10,000행 (id 1-10,000) → **매칭 0건** |
 | Before | 10,000행 fetch → outer 10행 × 10,000행 predicate 평가 → 전부 실패. **총 100,000회 로컬 평가** |
 | After | 10 execute × 0행 반환 → 즉시 S_END. **로컬 predicate 평가 0회** |
-| 측정 | `\timing on` 후 실행 시간 비교. 결과 0행 (정확성) |
+| 측정 | `;time on` 후 실행 시간 비교. 결과 0행 (정확성) |
 | 기대 | 가장 극적인 개선. After는 fetch 자체가 없으므로 거의 즉시 완료 |
 
 ### TC-503: 원격 execute 횟수 변화 (효과 3)
@@ -213,7 +213,7 @@
 | 시나리오 | outer 5행 (local_t), remote 7행 (remote_t) — 기존 소규모 데이터 사용 |
 | Before | remote_t에서 SELECT **1회** 실행 → cursor reset 5회 |
 | After | outer 행마다 execute → remote_t에서 SELECT **5회** 실행 |
-| 측정 | 쿼리 전·후 `cubrid statdump -c <remote_db> \| grep Num_query_executions` 비교. delta = Before: 1, After: 5 |
+| 측정 | 쿼리 전·후 `cubrid broker status -b` SELECT 컬럼 delta 비교. delta = Before: +1, After: +5 (예상). ※ After 측정값은 구현 완료 후 검증 필요 (rebind+re-execute가 cci_execute 단위로 처리되는지 확인) |
 | 기대 | execute 횟수 증가 (1 → 5)하되, 각 execute당 반환 행 수 감소로 총 전송량 감소 |
 
 ---
@@ -234,7 +234,7 @@
 | avg_matching | 100행/outer (선택도 100%) |
 | Before | 1 execute + **1,000행 fetch** (전체 1회) + 100,000번 로컬 평가 |
 | After | 100 executes + **10,000행 fetch** (Before의 **10배**) + 100회 execute 오버헤드 |
-| 측정 | `\timing on` 실행 시간 비교. COUNT = 10,000 (정확성) |
+| 측정 | `;time on` 실행 시간 비교. COUNT = 10,000 (정확성) |
 | 시사점 | avg_matching이 높을수록 After가 오히려 더 많은 행을 전송. cost 기반 최적화 적용 판단 근거 |
 
 ### TC-602: 다수 outer + 소규모 remote — execute round-trip 오버헤드
@@ -245,7 +245,7 @@
 | avg_matching | 0.005행/outer (id 1-5만 매칭, 나머지 995행은 0건) |
 | Before | 1 execute + **5행 fetch** + 5,000번 로컬 평가 |
 | After | **1,000 executes** (Before의 **1,000배**) + 5행 fetch |
-| 측정 | `\timing on` 실행 시간 비교. statdump `Num_query_executions` delta: Before +1, After +1,000. 결과 5행 (정확성) |
+| 측정 | `;time on` 실행 시간 비교. statdump `Num_query_selects` delta: Before +1, After +1,000. 결과 5행 (정확성) |
 | 시사점 | remote가 작아 전체 fetch가 이미 빠를 때, execute round-trip이 지배적 비용이 됨. 고지연 WAN 환경에서 더욱 심각 |
 
 ---

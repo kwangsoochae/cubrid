@@ -3,7 +3,7 @@
 | 항목 | 내용 |
 |------|------|
 | 이슈 | CBRD-26553 |
-| 관련 문서 | [PRD](dblink_join_optimization_prd.md), [요약](dblink_join_optimization_summary.md), [작업 설명서](dblink_join_optimization_work.md), [구현 계획](dblink_join_optimization_plan.md) |
+| 관련 문서 | [PRD](dblink_join_optimization_prd.md), [요약](dblink_join_optimization_summary.md), [작업 설명서](dblink_join_optimization_work.md), [구현 계획](dblink_join_optimization_plan.md), [T0-1 검증](T0-1_verification.md) |
 
 **의존 관계**: Step 1 → Step 2 → Step 3. Step 0은 병렬 가능. Step 4는 2·3과 병행. Step 5는 3 완료 후.
 
@@ -27,8 +27,8 @@
 
 | ID | 작업 | 파일/위치 | 완료 |
 |----|------|-----------|:----:|
-| T0-1 | "원격 컬럼 = 로컬 컬럼" 조건이 correlated로 제외되는지 `view_transform.c`에서 코드로 확인 | `src/parser/view_transform.c`, `pt_check_pushable_term()` | [ ] |
-| T0-2 | `xasl.h`의 `dblink_node`에 `host_var_count`, `host_var_index` 등 확인; `join_key_count` (int), `join_key_regu_list` (REGU_VARIABLE_LIST) 추가, 직렬화/역직렬화 반영 | `src/query/xasl.h`, `xasl_to_stream.c`, `stream_to_xasl.c` | [ ] |
+| T0-1 | "원격 컬럼 = 로컬 컬럼" 조건이 correlated로 제외되는지 `view_transform.c`에서 코드로 확인 | `src/parser/view_transform.c`, `pt_check_pushable_term()` | [x] |
+| T0-2 | `xasl.h`의 `dblink_node`에 `host_var_count`, `host_var_index` 등 확인; `join_key_count` (int), `join_key_regu_list` (REGU_VARIABLE_LIST) 추가, 직렬화/역직렬화 반영 | `src/query/xasl.h`, `xasl_to_stream.c`, `stream_to_xasl.c` | [x] |
 
 ---
 

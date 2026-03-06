@@ -840,6 +840,8 @@ struct dblink_spec_node
   REGU_VARIABLE_LIST dblink_regu_list_rest;	/* regu list for rest of attrs */
   int host_var_count;		/* host variable count for dblink spec */
   int *host_var_index;		/* host variable indexes for dblink spec */
+  int join_key_count;		/* join key count for dblink spec (remote.col = local.col push) */
+  REGU_VARIABLE_LIST join_key_regu_list;	/* regu list for join keys (outer val_list refs) */
   char *conn_url;		/* connection URL for remote DB server */
   char *conn_user;		/* user name for remote DB server */
   char *conn_password;		/* password for remote user */

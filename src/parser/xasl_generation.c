@@ -5356,6 +5356,8 @@ pt_make_dblink_access_spec (ACCESS_METHOD access,
       spec->s.dblink_node.conn_sql = sql;
       spec->s.dblink_node.host_var_count = host_var_count;
       spec->s.dblink_node.host_var_index = host_var_index;
+      spec->s.dblink_node.join_key_count = 0;
+      spec->s.dblink_node.join_key_regu_list = NULL;
     }
 
   return spec;
