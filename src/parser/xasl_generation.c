@@ -13052,19 +13052,72 @@ pt_to_dblink_table_spec_list (PARSER_CONTEXT * parser, PT_NODE * spec, PT_NODE *
 				       (char *) pdblink->pwd->info.value.data_value.str->bytes,
 				       pdblink->host_vars.count, pdblink->host_vars.index, (char *) sql);
 
-  /* T2-1: Fill join_key_count, join_key_regu_list when join keys pushed and no app ? (PT_HOST_VAR) */
+  /* T2-1/T4-1: Fill join_key_count, join_key_regu_list when join keys pushed and no app ? (PT_HOST_VAR).
+   * Use pt_to_position_regu_variable_list with outer table's value_list so vfetch_to points to outer val_list
+   * slots; dblink_scan_reset can then read current outer row values for rebind. */
   if (access && pdblink->join_key_local_ref_count > 0 && count == 0)
     {
       PT_NODE *node_list = NULL;
+      PT_NODE *attr_node;
+      TABLE_INFO *outer_tbl_info = NULL;
+      UINTPTR outer_spec_id = 0;
+      int *attr_offsets = NULL;
       int i;
+      bool use_position_regu = false;
 
-      for (i = 0; i < pdblink->join_key_local_ref_count; i++)
+      /* Get outer spec from first join_key_local_ref (e.g. l.id -> l's spec_id) */
+      attr_node = (pdblink->join_key_local_refs[0]->node_type == PT_DOT_)
+	? pdblink->join_key_local_refs[0]->info.dot.arg2 : pdblink->join_key_local_refs[0];
+      if (attr_node && attr_node->node_type == PT_NAME)
 	{
-	  node_list = parser_append_node (pdblink->join_key_local_refs[i], node_list);
+	  outer_spec_id = attr_node->info.name.spec_id;
+	  outer_tbl_info = pt_find_table_info (outer_spec_id, parser->symbols->table_info);
 	}
-      access->s.dblink_node.join_key_count = pdblink->join_key_local_ref_count;
-      access->s.dblink_node.join_key_regu_list =
-	pt_to_regu_variable_list (parser, node_list, UNBOX_AS_VALUE, NULL, NULL);
+
+      if (outer_tbl_info != NULL && outer_tbl_info->value_list != NULL
+	  && outer_tbl_info->attribute_list != NULL)
+	{
+	  attr_offsets = (int *) parser_alloc (parser, pdblink->join_key_local_ref_count * sizeof (int));
+	  if (attr_offsets != NULL)
+	    {
+	      use_position_regu = true;
+	      for (i = 0; i < pdblink->join_key_local_ref_count; i++)
+		{
+		  attr_node = (pdblink->join_key_local_refs[i]->node_type == PT_DOT_)
+		    ? pdblink->join_key_local_refs[i]->info.dot.arg2 : pdblink->join_key_local_refs[i];
+		  attr_offsets[i] = pt_find_attribute (parser, attr_node, outer_tbl_info->attribute_list);
+		  if (attr_offsets[i] < 0)
+		    {
+		      use_position_regu = false;
+		      break;
+		    }
+		}
+	    }
+	}
+
+      if (use_position_regu && attr_offsets != NULL)
+	{
+	  /* Build node_list in same order as join_key_local_refs (refs[0], refs[1], ...)
+	   * so that node_list[i] matches attr_offsets[i] in pt_to_position_regu_variable_list */
+	  for (i = 0; i < pdblink->join_key_local_ref_count; i++)
+	    {
+	      node_list = parser_append_node (pdblink->join_key_local_refs[i], node_list);
+	    }
+	  access->s.dblink_node.join_key_count = pdblink->join_key_local_ref_count;
+	  access->s.dblink_node.join_key_regu_list =
+	    pt_to_position_regu_variable_list (parser, node_list, outer_tbl_info->value_list, attr_offsets);
+	}
+      else
+	{
+	  /* Fallback: no outer value_list or attr not found */
+	  for (i = 0; i < pdblink->join_key_local_ref_count; i++)
+	    {
+	      node_list = parser_append_node (pdblink->join_key_local_refs[i], node_list);
+	    }
+	  access->s.dblink_node.join_key_count = pdblink->join_key_local_ref_count;
+	  access->s.dblink_node.join_key_regu_list =
+	    pt_to_regu_variable_list (parser, node_list, UNBOX_AS_VALUE, NULL, NULL);
+	}
     }
 
   return access;
