@@ -4567,7 +4567,7 @@ scan_reset_scan_block (THREAD_ENTRY * thread_p, SCAN_ID * s_id)
       break;
 
     case S_DBLINK_SCAN:
-      status = dblink_scan_reset (&s_id->s.dblid.scan_info);
+      status = dblink_scan_reset (&s_id->s.dblid.scan_info, s_id->vd);
       break;
 
     default:
