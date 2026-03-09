@@ -97,6 +97,16 @@ typedef struct find_id_info
   } out;
 } FIND_ID_INFO;
 
+/* Used by pt_find_dblink_side_refs to classify refs in one side of equality (remote.col = local.col). */
+typedef struct pt_dblink_side_refs
+{
+  UINTPTR dblink_spec_id;
+  PT_NODE *others_spec_list;
+  bool has_dblink_ref;
+  bool has_outer_ref;
+  bool has_others;
+} PT_DBLINK_SIDE_REFS;
+
 typedef struct mq_bump_core_info
 {
   int match_level;
@@ -235,6 +245,11 @@ static PT_NODE *pt_check_pushable (PARSER_CONTEXT * parser, PT_NODE * tree, void
 static bool pt_check_pushable_subquery_select_list (PARSER_CONTEXT * parser, PT_NODE * query, int pos);
 static PT_NODE *pt_find_only_name_id (PARSER_CONTEXT * parser, PT_NODE * tree, void *arg, int *continue_walk);
 static bool pt_check_pushable_term (PARSER_CONTEXT * parser, PT_NODE * term, FIND_ID_INFO * infop);
+static PT_NODE *pt_find_dblink_side_refs_walk (PARSER_CONTEXT * parser, PT_NODE * tree, void *arg, int *continue_walk);
+static void pt_find_dblink_side_refs (PARSER_CONTEXT * parser, PT_NODE * node, UINTPTR dblink_spec_id,
+				     PT_NODE * others_spec_list, bool *has_dblink_ref, bool *has_outer_ref,
+				     bool *has_others);
+static bool pt_is_dblink_join_key_equality (PARSER_CONTEXT * parser, PT_NODE * term, FIND_ID_INFO * infop);
 static PUSHABLE_TYPE mq_is_pushable_subquery (PARSER_CONTEXT * parser, PT_NODE * subquery, PT_NODE * mainquery,
 					      PT_NODE * class_spec, bool is_vclass, PT_NODE * order_by,
 					      PT_NODE * class_);
@@ -4011,6 +4026,163 @@ pt_find_only_name_id (PARSER_CONTEXT * parser, PT_NODE * tree, void *arg, int *c
 }
 
 /*
+ * pt_find_dblink_side_refs_walk() - walk callback to classify name refs in a subtree
+ *   (dblink spec only, others spec only, or subquery/method etc.)
+ */
+static PT_NODE *
+pt_find_dblink_side_refs_walk (PARSER_CONTEXT * parser, PT_NODE * tree, void *arg, int *continue_walk)
+{
+  PT_DBLINK_SIDE_REFS *refs = (PT_DBLINK_SIDE_REFS *) arg;
+  PT_NODE *spec, *node = tree;
+
+  (void) parser;
+  if (!tree || *continue_walk == PT_STOP_WALK)
+    {
+      return tree;
+    }
+  *continue_walk = PT_CONTINUE_WALK;
+
+  switch (node->node_type)
+    {
+    case PT_SELECT:
+    case PT_UNION:
+    case PT_DIFFERENCE:
+    case PT_INTERSECTION:
+      refs->has_others = true;
+      break;
+
+    case PT_METHOD_CALL:
+      refs->has_others = true;
+      break;
+
+    case PT_DOT_:
+      /* Keep PT_CONTINUE_WALK so parser_walk_tree descends to PT_NAME children (for spec_id). */
+      break;
+
+    case PT_NAME:
+      if (PT_IS_OID_NAME (node))
+	{
+	  break;
+	}
+      if (node->info.name.spec_id == refs->dblink_spec_id)
+	{
+	  refs->has_dblink_ref = true;
+	}
+      else
+	{
+	  for (spec = refs->others_spec_list; spec; spec = spec->next)
+	    {
+	      if (node->info.name.spec_id == spec->info.spec.id)
+		{
+		  refs->has_outer_ref = true;
+		  break;
+		}
+	    }
+	  if (!spec)
+	    {
+	      refs->has_others = true;	/* correlated or other */
+	    }
+	}
+      break;
+
+    case PT_EXPR:
+      if (node->info.expr.op == PT_ROWNUM || node->info.expr.op == PT_INST_NUM
+	  || node->info.expr.op == PT_ORDERBY_NUM)
+	{
+	  refs->has_others = true;
+	}
+      break;
+
+    case PT_FUNCTION:
+      if (node->info.function.function_type == PT_GROUPBY_NUM)
+	{
+	  refs->has_others = true;
+	}
+      break;
+
+    case PT_HOST_VAR:
+      /* App ? bind variable: not a join key (local.col). Do not treat as join-key equality. */
+      refs->has_others = true;
+      break;
+
+    default:
+      break;
+    }
+
+  return tree;
+}
+
+/*
+ * pt_find_dblink_side_refs() - classify refs in the given subtree
+ */
+static void
+pt_find_dblink_side_refs (PARSER_CONTEXT * parser, PT_NODE * node, UINTPTR dblink_spec_id,
+			  PT_NODE * others_spec_list, bool *has_dblink_ref, bool *has_outer_ref, bool *has_others)
+{
+  PT_DBLINK_SIDE_REFS refs;
+
+  *has_dblink_ref = false;
+  *has_outer_ref = false;
+  *has_others = false;
+  if (node == NULL)
+    {
+      return;
+    }
+
+  refs.dblink_spec_id = dblink_spec_id;
+  refs.others_spec_list = others_spec_list;
+  refs.has_dblink_ref = false;
+  refs.has_outer_ref = false;
+  refs.has_others = false;
+
+  /* Use parser_walk_tree so we descend into PT_DOT (e.g. l.id, r.id) and visit PT_NAME nodes that have spec_id. */
+  parser_walk_tree (parser, node, pt_find_dblink_side_refs_walk, &refs, NULL, NULL);
+
+  *has_dblink_ref = refs.has_dblink_ref;
+  *has_outer_ref = refs.has_outer_ref;
+  *has_others = refs.has_others;
+}
+
+/*
+ * pt_is_dblink_join_key_equality() - true if term is single equality "remote.col = local.col"
+ *   (one side only dblink refs, other side only outer/others_spec refs, no subquery/method)
+ */
+static bool
+pt_is_dblink_join_key_equality (PARSER_CONTEXT * parser, PT_NODE * term, FIND_ID_INFO * infop)
+{
+  bool has_dblink_1, has_outer_1, has_others_1;
+  bool has_dblink_2, has_outer_2, has_others_2;
+  PT_NODE *arg1, *arg2;
+
+  if (term == NULL || term->node_type != PT_EXPR || term->info.expr.op != PT_EQ)
+    {
+      return false;
+    }
+  arg1 = term->info.expr.arg1;
+  arg2 = term->info.expr.arg2;
+  if (arg1 == NULL || arg2 == NULL || infop->in.spec == NULL || infop->in.others_spec_list == NULL)
+    {
+      return false;
+    }
+
+  pt_find_dblink_side_refs (parser, arg1, infop->in.spec->info.spec.id, infop->in.others_spec_list,
+			    &has_dblink_1, &has_outer_1, &has_others_1);
+  pt_find_dblink_side_refs (parser, arg2, infop->in.spec->info.spec.id, infop->in.others_spec_list,
+			    &has_dblink_2, &has_outer_2, &has_others_2);
+
+  /* One side only dblink ref, other side only outer ref, no others (subquery/method). */
+  if (has_dblink_1 && !has_outer_1 && !has_others_1 && has_outer_2 && !has_dblink_2 && !has_others_2)
+    {
+      return true;
+    }
+  if (has_dblink_2 && !has_outer_2 && !has_others_2 && has_outer_1 && !has_dblink_1 && !has_others_1)
+    {
+      return true;
+    }
+  return false;
+}
+
+/*
  * pt_check_pushable_term() -
  *   return:
  *   parser(in):
@@ -4055,7 +4227,46 @@ pt_check_pushable_term (PARSER_CONTEXT * parser, PT_NODE * term, FIND_ID_INFO * 
 	}
     }
 
-  return PT_PUSHABLE_TERM (infop) && !is_correlated_with_agg && !is_correlated_with_dblink;
+  if (PT_PUSHABLE_TERM (infop) && !is_correlated_with_agg && !is_correlated_with_dblink)
+    {
+      return true;
+    }
+
+  /* Allow push for "remote.col = local.col" single equality (join key) to dblink.
+   * Predicate push runs after mq_rewrite_dblink_as_subquery, so derived is already
+   * PT_SELECT (wrapper); inner from->derived_table is PT_DBLINK_TABLE. */
+  if (infop->in.spec)
+    {
+      bool is_dblink_spec = false;
+      PT_NODE *inner_from;
+
+      derived = infop->in.spec->info.spec.derived_table;
+      if (derived == NULL)
+	{
+	  /* skip */
+	}
+      else if (derived->node_type == PT_DBLINK_TABLE)
+	{
+	  is_dblink_spec = true;
+	}
+      else if (derived->node_type == PT_SELECT)
+	{
+	  inner_from = derived->info.query.q.select.from;
+	  if (inner_from != NULL && inner_from->info.spec.derived_table != NULL
+	      && inner_from->info.spec.derived_table->node_type == PT_DBLINK_TABLE)
+	    {
+	      is_dblink_spec = true;
+	    }
+	}
+
+      if (is_dblink_spec && term->node_type == PT_EXPR && term->info.expr.op == PT_EQ
+	  && pt_is_dblink_join_key_equality (parser, term, infop))
+	{
+	  return true;
+	}
+    }
+
+  return false;
 }
 
 /*
