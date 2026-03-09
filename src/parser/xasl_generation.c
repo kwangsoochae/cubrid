@@ -13052,6 +13052,21 @@ pt_to_dblink_table_spec_list (PARSER_CONTEXT * parser, PT_NODE * spec, PT_NODE *
 				       (char *) pdblink->pwd->info.value.data_value.str->bytes,
 				       pdblink->host_vars.count, pdblink->host_vars.index, (char *) sql);
 
+  /* T2-1: Fill join_key_count, join_key_regu_list when join keys pushed and no app ? (PT_HOST_VAR) */
+  if (access && pdblink->join_key_local_ref_count > 0 && count == 0)
+    {
+      PT_NODE *node_list = NULL;
+      int i;
+
+      for (i = 0; i < pdblink->join_key_local_ref_count; i++)
+	{
+	  node_list = parser_append_node (pdblink->join_key_local_refs[i], node_list);
+	}
+      access->s.dblink_node.join_key_count = pdblink->join_key_local_ref_count;
+      access->s.dblink_node.join_key_regu_list =
+	pt_to_regu_variable_list (parser, node_list, UNBOX_AS_VALUE, NULL, NULL);
+    }
+
   return access;
 }
 
