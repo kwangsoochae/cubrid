@@ -748,6 +748,19 @@ dblink_open_scan (THREAD_ENTRY * thread_p, DBLINK_SCAN_INFO * scan_info, struct 
       return ER_DBLINK;
     }
 
+  /* T3-1: Copy join_key_count, join_key_regu_list from spec to scan_info */
+  scan_info->join_key_count = spec->s.dblink_node.join_key_count;
+  scan_info->join_key_regu_list = spec->s.dblink_node.join_key_regu_list;
+
+  if (scan_info->join_key_count > 0)
+    {
+      /* Join key push: prepare only; bind+execute deferred to reset (T3-2) */
+      scan_info->col_info = NULL;
+      scan_info->col_cnt = 0;
+      scan_info->cursor = CCI_CURSOR_FIRST;
+      return NO_ERROR;
+    }
+
   if (host_vars->count > 0)
     {
       if ((ret = dblink_bind_param (scan_info->stmt_handle, vd, host_vars)) < 0)

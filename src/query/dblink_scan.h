@@ -58,6 +58,9 @@ struct dblink_scan_info
   int col_cnt;			/* column count of dblink query result */
   char cursor;			/* cursor position T_CCI_CURSOR_POS */
   void *col_info;		/* column information T_CCI_COL_INFO */
+  /* join key push: when > 0, open does prepare only; reset does bind+execute */
+  int join_key_count;
+  struct regu_variable_list_node *join_key_regu_list;
 };
 
 #define MAX_LEN_CONNECTION_URL 512
