@@ -101,7 +101,7 @@ typedef struct find_id_info
 typedef struct pt_dblink_side_refs
 {
   UINTPTR dblink_spec_id;
-  PT_NODE *others_spec_list;
+  PT_NODE *from_spec_list;	/* full FROM list; used to identify outer refs (spec_id in this list → has_outer_ref) */
   bool has_dblink_ref;
   bool has_outer_ref;
   bool has_others;
@@ -247,7 +247,7 @@ static PT_NODE *pt_find_only_name_id (PARSER_CONTEXT * parser, PT_NODE * tree, v
 static bool pt_check_pushable_term (PARSER_CONTEXT * parser, PT_NODE * term, FIND_ID_INFO * infop);
 static PT_NODE *pt_find_dblink_side_refs_walk (PARSER_CONTEXT * parser, PT_NODE * tree, void *arg, int *continue_walk);
 static void pt_find_dblink_side_refs (PARSER_CONTEXT * parser, PT_NODE * node, UINTPTR dblink_spec_id,
-				     PT_NODE * others_spec_list, bool *has_dblink_ref, bool *has_outer_ref,
+				     PT_NODE * from_spec_list, bool *has_dblink_ref, bool *has_outer_ref,
 				     bool *has_others);
 static bool pt_is_dblink_join_key_equality (PARSER_CONTEXT * parser, PT_NODE * term, FIND_ID_INFO * infop);
 static PUSHABLE_TYPE mq_is_pushable_subquery (PARSER_CONTEXT * parser, PT_NODE * subquery, PT_NODE * mainquery,
@@ -255,7 +255,7 @@ static PUSHABLE_TYPE mq_is_pushable_subquery (PARSER_CONTEXT * parser, PT_NODE *
 					      PT_NODE * class_);
 static PUSHABLE_TYPE mq_is_removable_select_list (PARSER_CONTEXT * parser, PT_NODE * subquery, PT_NODE * mainquery);
 static void pt_copypush_terms (PARSER_CONTEXT * parser, PT_NODE * spec, PT_NODE * query, PT_NODE * term_list,
-			       FIND_ID_TYPE type);
+			       FIND_ID_TYPE type, FIND_ID_INFO * infop);
 static int mq_copypush_sargable_terms_dblink (PARSER_CONTEXT * parser, PT_NODE * statement, PT_NODE * spec,
 					      PT_NODE * new_query, FIND_ID_INFO * infop);
 static int mq_copypush_sargable_terms_helper (PARSER_CONTEXT * parser, PT_NODE * statement, PT_NODE * spec,
@@ -4070,7 +4070,7 @@ pt_find_dblink_side_refs_walk (PARSER_CONTEXT * parser, PT_NODE * tree, void *ar
 	}
       else
 	{
-	  for (spec = refs->others_spec_list; spec; spec = spec->next)
+	  for (spec = refs->from_spec_list; spec; spec = spec->next)
 	    {
 	      if (node->info.name.spec_id == spec->info.spec.id)
 		{
@@ -4117,7 +4117,7 @@ pt_find_dblink_side_refs_walk (PARSER_CONTEXT * parser, PT_NODE * tree, void *ar
  */
 static void
 pt_find_dblink_side_refs (PARSER_CONTEXT * parser, PT_NODE * node, UINTPTR dblink_spec_id,
-			  PT_NODE * others_spec_list, bool *has_dblink_ref, bool *has_outer_ref, bool *has_others)
+			  PT_NODE * from_spec_list, bool *has_dblink_ref, bool *has_outer_ref, bool *has_others)
 {
   PT_DBLINK_SIDE_REFS refs;
 
@@ -4130,7 +4130,7 @@ pt_find_dblink_side_refs (PARSER_CONTEXT * parser, PT_NODE * node, UINTPTR dblin
     }
 
   refs.dblink_spec_id = dblink_spec_id;
-  refs.others_spec_list = others_spec_list;
+  refs.from_spec_list = from_spec_list;
   refs.has_dblink_ref = false;
   refs.has_outer_ref = false;
   refs.has_others = false;
@@ -4165,6 +4165,9 @@ pt_is_dblink_join_key_equality (PARSER_CONTEXT * parser, PT_NODE * term, FIND_ID
       return false;
     }
 
+  /* others_spec_list is the full outer FROM list (includes dblink spec itself).
+   * dblink spec_id is checked first in pt_find_dblink_side_refs_walk (has_dblink_ref path),
+   * so its presence in others_spec_list does not cause has_outer_ref misclassification. */
   pt_find_dblink_side_refs (parser, arg1, infop->in.spec->info.spec.id, infop->in.others_spec_list,
 			    &has_dblink_1, &has_outer_1, &has_others_1);
   pt_find_dblink_side_refs (parser, arg2, infop->in.spec->info.spec.id, infop->in.others_spec_list,
@@ -4307,14 +4310,66 @@ pt_remove_cast_wrap_for_dblink (PARSER_CONTEXT * parser, PT_NODE * old_node, voi
  * Note:
  *  assumes cnf conversion is done
  */
+/*
+ * pt_get_remote_side_of_join_key() - for join key equality (remote.col = local.col),
+ *   return remote side node. *local_side_out receives the local side. Returns NULL if not join key.
+ */
+static PT_NODE *
+pt_get_remote_side_of_join_key (PARSER_CONTEXT * parser, PT_NODE * term, UINTPTR dblink_spec_id,
+				PT_NODE * from_spec_list, PT_NODE ** local_side_out)
+{
+  bool has_dblink_1, has_outer_1, has_others_1;
+  bool has_dblink_2, has_outer_2, has_others_2;
+  PT_NODE *arg1, *arg2;
+
+  *local_side_out = NULL;
+  if (term == NULL || term->node_type != PT_EXPR || term->info.expr.op != PT_EQ)
+    {
+      return NULL;
+    }
+  arg1 = term->info.expr.arg1;
+  arg2 = term->info.expr.arg2;
+  if (arg1 == NULL || arg2 == NULL || from_spec_list == NULL)
+    {
+      return NULL;
+    }
+
+  pt_find_dblink_side_refs (parser, arg1, dblink_spec_id, from_spec_list,
+			   &has_dblink_1, &has_outer_1, &has_others_1);
+  pt_find_dblink_side_refs (parser, arg2, dblink_spec_id, from_spec_list,
+			   &has_dblink_2, &has_outer_2, &has_others_2);
+
+  if (has_dblink_1 && !has_outer_1 && !has_others_1 && has_outer_2 && !has_dblink_2 && !has_others_2)
+    {
+      *local_side_out = arg2;
+      return arg1;
+    }
+  if (has_dblink_2 && !has_outer_2 && !has_others_2 && has_outer_1 && !has_dblink_1 && !has_others_1)
+    {
+      *local_side_out = arg1;
+      return arg2;
+    }
+  return NULL;
+}
+
+/*
+ * pt_copypush_terms() - push sargable term into the derived subquery
+ *   infop: optional, for dblink join key: rewritten gets "remote.col = ?", join_key_local_refs set
+ */
 static void
-pt_copypush_terms (PARSER_CONTEXT * parser, PT_NODE * spec, PT_NODE * query, PT_NODE * term_list, FIND_ID_TYPE type)
+pt_copypush_terms (PARSER_CONTEXT * parser, PT_NODE * spec, PT_NODE * query, PT_NODE * term_list,
+		   FIND_ID_TYPE type, FIND_ID_INFO * infop)
 {
   PT_NODE *push_term_list;
   PARSER_VARCHAR *rewritten = NULL;
   PARSER_VARCHAR *pushed_pred, *query_str, *col_list;
   unsigned int save_custom;
   int max_pred_order;
+  PT_NODE *inner_spec, *dblink_table;
+  PT_NODE *term, *remote_side, *local_side;
+  PARSER_VARCHAR *join_key_pred = NULL;
+  int join_key_cnt = 0;
+  PT_NODE **join_key_refs = NULL;
 
   if (query == NULL || term_list == NULL)
     {
@@ -4324,7 +4379,70 @@ pt_copypush_terms (PARSER_CONTEXT * parser, PT_NODE * spec, PT_NODE * query, PT_
   switch (query->node_type)
     {
     case PT_SELECT:
-      /* copy terms */
+      /* T1-2: If wrapper contains dblink, push join-key terms to dblink with "remote.col = ?" */
+      inner_spec = query->info.query.q.select.from;
+      if (inner_spec != NULL && inner_spec->next == NULL
+	  && inner_spec->info.spec.derived_table != NULL
+	  && inner_spec->info.spec.derived_table->node_type == PT_DBLINK_TABLE
+	  && infop != NULL && infop->in.spec != NULL && infop->in.others_spec_list != NULL)
+	{
+	  dblink_table = inner_spec->info.spec.derived_table;
+	  UINTPTR dblink_spec_id = infop->in.spec->info.spec.id;
+
+	  /* Single pass: allocate upper bound (term_list length), then fill in one loop */
+	  join_key_cnt = pt_length_of_list (term_list);
+	  if (join_key_cnt > 0)
+	    {
+	      join_key_refs = (PT_NODE **) parser_alloc (parser, join_key_cnt * sizeof (PT_NODE *));
+	      if (join_key_refs != NULL)
+		{
+		  int idx = 0;
+		  save_custom = parser->custom_print;
+		  parser->custom_print |=
+		    PT_CONVERT_RANGE | PT_SUPPRESS_RESOLVED | PT_PRINT_NO_HOST_VAR_INDEX | PT_PRINT_SUPPRESS_FOR_DBLINK;
+		  for (term = term_list; term != NULL; term = term->next)
+		    {
+		      remote_side = pt_get_remote_side_of_join_key (parser, term, dblink_spec_id,
+								  infop->in.others_spec_list, &local_side);
+		      if (remote_side != NULL && local_side != NULL)
+			{
+			  PARSER_VARCHAR *r_str = pt_print_bytes (parser, remote_side);
+			  if (join_key_pred != NULL)
+			    {
+			      join_key_pred = pt_append_bytes (parser, join_key_pred, " AND ", 5);
+			    }
+			  join_key_pred = pt_append_varchar (parser, join_key_pred, r_str);
+			  join_key_pred = pt_append_bytes (parser, join_key_pred, " = ?", 4);
+			  join_key_refs[idx++] = parser_copy_tree (parser, local_side);
+			}
+		    }
+		  join_key_cnt = idx;	/* actual count (may be less than list length) */
+		  parser->custom_print = save_custom;
+		  if (join_key_cnt > 0)
+		    {
+		      dblink_table->info.dblink_table.join_key_local_ref_count = join_key_cnt;
+		      dblink_table->info.dblink_table.join_key_local_refs = join_key_refs;
+		    }
+		  /* Build rewritten with "remote.col = ?" for dblink only if we have join keys */
+		  if (join_key_cnt > 0 && join_key_pred != NULL)
+		    {
+		      rewritten = pt_append_bytes (parser, rewritten, "SELECT * FROM (", 15);
+		      query_str = dblink_table->info.dblink_table.qstr->info.value.data_value.str;
+		      rewritten = pt_append_varchar (parser, rewritten, query_str);
+		      rewritten = pt_append_bytes (parser, rewritten, ") cublink", 9);
+		      rewritten = pt_append_bytes (parser, rewritten, " WHERE ", 7);
+		      rewritten = pt_append_varchar (parser, rewritten, join_key_pred);
+		      dblink_table->info.dblink_table.rewritten = rewritten;
+		    }
+		}
+	    }
+	}
+
+      /* copy terms into wrapper WHERE.
+       * Join-key terms (remote.col = local.col) are intentionally kept here even when dblink rewritten is set.
+       * - push-down path (T3-2): remote already filters via "?", so this eval is always true (minor redundancy).
+       * - non-push-down fallback: wrapper WHERE acts as a safety filter ensuring correct results.
+       * TODO(T3-3): once push-down path is confirmed stable, skip join-key terms here to avoid redundant eval. */
       push_term_list = parser_copy_tree_list (parser, term_list);
 
       /* substitute as_attr_list's columns for select_list's columns in search condition */
@@ -4407,8 +4525,8 @@ pt_copypush_terms (PARSER_CONTEXT * parser, PT_NODE * spec, PT_NODE * query, PT_
     case PT_UNION:
     case PT_DIFFERENCE:
     case PT_INTERSECTION:
-      (void) pt_copypush_terms (parser, spec, query->info.query.q.union_.arg1, term_list, type);
-      (void) pt_copypush_terms (parser, spec, query->info.query.q.union_.arg2, term_list, type);
+      (void) pt_copypush_terms (parser, spec, query->info.query.q.union_.arg1, term_list, type, NULL);
+      (void) pt_copypush_terms (parser, spec, query->info.query.q.union_.arg2, term_list, type, NULL);
       break;
 
     default:
@@ -4718,7 +4836,7 @@ mq_copypush_sargable_terms_dblink (PARSER_CONTEXT * parser, PT_NODE * statement,
   if (push_cnt)
     {
       /* copy and push term in new_query's search condition */
-      (void) pt_copypush_terms (parser, spec, new_query, push_term_list, infop->type);
+      (void) pt_copypush_terms (parser, spec, new_query, push_term_list, infop->type, infop);
 
       /* free alloced */
       parser_free_tree (parser, push_term_list);
@@ -4937,7 +5055,7 @@ mq_copypush_sargable_terms_helper (PARSER_CONTEXT * parser, PT_NODE * statement,
   if (push_cnt)
     {
       /* copy and push term in new_query's search condition */
-      (void) pt_copypush_terms (parser, spec, subquery, push_term_list, infop->type);
+      (void) pt_copypush_terms (parser, spec, subquery, push_term_list, infop->type, infop);
 
       if (push_correlated_cnt)
 	{

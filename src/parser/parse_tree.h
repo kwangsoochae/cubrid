@@ -3388,6 +3388,10 @@ typedef struct pt_dblink_info
 
   void *remote_col_list;	/* remote table's column list */
 
+  /* T1-2: join key push-down. i-th ? in rewritten corresponds to join_key_local_refs[i]. */
+  int join_key_local_ref_count;
+  PT_NODE **join_key_local_refs;	/* local side nodes (e.g. l.id) for each ? in rewritten */
+
 } PT_DBLINK_INFO;
 
 typedef struct pt_create_server_info

@@ -19339,6 +19339,14 @@ pt_apply_dblink_table (PARSER_CONTEXT * parser, PT_NODE * p, void *arg)
   PT_APPLY_WALK (parser, p->info.dblink_table.cols, arg);
   PT_APPLY_WALK (parser, p->info.dblink_table.sel_list, arg);
   PT_APPLY_WALK (parser, p->info.dblink_table.owner_list, arg);
+  if (p->info.dblink_table.join_key_local_refs != NULL)
+    {
+      int i;
+      for (i = 0; i < p->info.dblink_table.join_key_local_ref_count; i++)
+	{
+	  PT_APPLY_WALK (parser, p->info.dblink_table.join_key_local_refs[i], arg);
+	}
+    }
 
   return p;
 }
