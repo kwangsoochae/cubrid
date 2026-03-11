@@ -24,13 +24,16 @@
 ## 핵심 변경 포인트
 - **Parser**: 조인 조건(원격 컬럼 = 로컬 컬럼)을 `?` 로 푸시 가능하도록 식별·치환 (WHERE만; ON 조건은 현재 미푸시).
 - **Executor**: dblink open 시 prepare만, **outer 행 바뀔 때마다** vd로 rebind 후 execute → fetch.
+- **Inner 판별 (T0-3)**: `is_generating_dblink_inner_scan` 플래그로 dblink가 NL/IDX inner일 때만 `join_key_count`·`rewritten` 적용. outer/hash/merge일 때는 기존 방식 유지.
+- **XASL 구조 변경 (T4-3)**: push-down 후보 dblink spec은 rewrite 생략 → `PT_DERIVED_DBLINK_TABLE` 유지 → dblink scan이 `scan_ptr`에 직접 위치 → reset 시 rebind+execute 가능.
 - **추가된 자료 구조**: PT(`join_key_local_refs`), XASL(`join_key_count`, `join_key_regu_list`), 실행기(scan_info에 `join_key_count`·`join_key_regus` 복사). 상세는 [dblink_join_optimization_plan.md](dblink_join_optimization_plan.md) 참고.
 
 ---
 
 ## 주요 파일
-- 푸시 조건: `src/parser/view_transform.c`
+- 푸시 조건·rewrite 건너뛰기 (T4-3): `src/parser/view_transform.c`
 - dblink 스펙/ host_var: `src/parser/xasl_generation.c`, `src/query/xasl.h`
+- inner 판별 플래그: `src/optimizer/plan_generation.c` (`gen_inner`), `src/parser/parse_tree.h`
 - 스캔/실행: `src/query/dblink_scan.c`, `src/query/scan_manager.c`
 
 ---

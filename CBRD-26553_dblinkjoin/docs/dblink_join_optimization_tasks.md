@@ -13,11 +13,11 @@
 
 ## 설계: XASL dblink spec 변경
 
-**root cause 분석 (코드 확인)**: dblink가 NL/IDX join inner일 때, 현재는 list(uncorrelated buildlist)로 감싸져 있어 `scan_reset_scan_block`이 dblink까지 전달되지 않음. 조인 키 푸시 시 outer 행마다 rebind+execute가 필요하나, list 구조에서는 이 경로가 없음.
 
-**root cause**: `mq_rewrite_dblink_as_subquery` (`view_transform.c:6936`, 호출 위치 `view_transform.c:8584`)가 optimizer/XASL 생성 **이전에** 실행되어, 모든 dblink spec의 `derived_table_type`을 `PT_DERIVED_DBLINK_TABLE` → `PT_IS_SUBQUERY`(wrapper PT_SELECT)로 변환한다.
 
-결과적으로 XASL 생성 시 `pt_to_spec_list`(`xasl_generation.c:13247`)가 `PT_IS_SUBQUERY` 분기인 `pt_to_subquery_table_spec_list`를 호출하여, dblink ACCESS_SPEC이 `aptr_list`(uncorrelated buildlist) 내부에 위치하게 된다. `scan_reset_scan_block`은 `scan_ptr` 체인만 순회하므로 `aptr_list` 내부 `dblink_scan`에 닿지 못한다.
+`mq_rewrite_dblink_as_subquery` (`view_transform.c:6936`, 호출 위치 `view_transform.c:8584`)가 optimizer/XASL 생성 **이전에** 실행되어, 모든 dblink spec의 `derived_table_type`을 `PT_DERIVED_DBLINK_TABLE` → `PT_IS_SUBQUERY`(wrapper PT_SELECT)로 변환한다.
+
+결과적으로 XASL 생성 시 `pt_to_spec_list`(`xasl_generation.c:13247`)가 `PT_IS_SUBQUERY` 분기인 `pt_to_subquery_table_spec_list`를 호출하여, dblink ACCESS_SPEC이 `aptr_list`(uncorrelated buildlist) 내부에 위치하게 된다. 
 
 > **참고**: `qo_scan_new`(`query_planner.c:1635`)는 모든 scan plan에 `well_rooted = true`를 설정하므로, NL join 내 `VALID_INNER(inner)` = true → SORT_TEMP는 dblink에 적용되지 않는다. list 구조의 원인은 SORT_TEMP가 아니라 `mq_rewrite_dblink_as_subquery`이다.
 
@@ -182,8 +182,8 @@ WHERE l.id = r.id;
 
 | ID | 작업 | 파일/위치 | 완료 |
 |----|------|-----------|:----:|
-| T4-3 | **rewrite 건너뜀**: `mq_rewrite_dblink_as_subquery`에서 push-down 후보 dblink spec은 `PT_IS_SUBQUERY` 변환 생략. 외부 SELECT의 WHERE 절에서 `pt_is_dblink_join_key_equality`로 join-key 등치 조건 탐지; 후보이면 rewrite 생략하여 spec의 `derived_table_type = PT_DERIVED_DBLINK_TABLE` 유지. 비후보는 기존 rewrite 수행 | `src/parser/view_transform.c` `mq_rewrite_dblink_as_subquery()` | [ ] |
-| T4-4 | **T1-1a 역할 검토**: T4-3 적용 후 push-down 후보 spec은 rewrite가 생략되므로 `pt_check_pushable_term`이 `PT_DERIVED_DBLINK_TABLE`을 직접 보게 됨 → T1-1의 원래 조건(`derived->node_type == PT_DBLINK_TABLE`)으로 충분한지 확인. T1-1a(wrapper PT_SELECT 구조 인식)는 비후보 spec에서 predicate push가 시도될 경우를 위한 fallback으로 유지 가능 | `src/parser/view_transform.c` `pt_check_pushable_term()` | [ ] |
+| T4-3 | **rewrite 건너뜀**: `mq_rewrite_dblink_as_subquery`에서 push-down 후보 dblink spec은 `PT_IS_SUBQUERY` 변환 생략. 외부 SELECT의 WHERE 절에서 `pt_is_dblink_join_key_equality`로 join-key 등치 조건 탐지; 후보이면 rewrite 생략하여 spec의 `derived_table_type = PT_DERIVED_DBLINK_TABLE` 유지. 비후보는 기존 rewrite 수행 | `src/parser/view_transform.c` `mq_rewrite_dblink_as_subquery()` | [x] |
+| T4-4 | **T1-1a 역할 검토**: T4-3 적용 후 push-down 후보 spec은 rewrite가 생략되므로 `pt_check_pushable_term`이 `PT_DERIVED_DBLINK_TABLE`을 직접 보게 됨 → T1-1의 원래 조건(`derived->node_type == PT_DBLINK_TABLE`)으로 충분한지 확인. T1-1a(wrapper PT_SELECT 구조 인식)는 비후보 spec에서 predicate push가 시도될 경우를 위한 fallback으로 유지 가능 | `src/parser/view_transform.c` `pt_check_pushable_term()` | [x] |
 | T4-5 | **end-to-end 검증**: T4-3 적용 후 push-down 경로에서 `scan_reset_scan_block(S_DBLINK_SCAN)` → `dblink_scan_reset()` → rebind+execute 흐름 동작 확인; 비후보(rewrite 유지) 경로에서 AS-IS 동작(cursor rewind) regression 없음 확인 | `src/query/scan_manager.c`, `src/query/query_executor.c` | [ ] |
 
 ### Step 4 점검
@@ -259,7 +259,7 @@ FROM local_t l LEFT JOIN
 - [ ] **Step 1** — T1-1 [x], T1-1a [x], T1-2 [x] (빌드·기존 테스트 통과)
 - [ ] **Step 2** — T2-1 [x]
 - [ ] **Step 3** — T3-1 [x], T3-2 [x], T3-3 [x]
-- [ ] **Step 4** — T4-1 [x], **T4-3, T4-4, T4-5 (XASL dblink spec 변경)**
+- [ ] **Step 4** — T4-1 [x], T4-3 [x], T4-4 [x], **T4-5 (XASL dblink spec 변경)**
 - [ ] **Step 5** — T5-1, T5-2(, T5-3)
 
 ---
