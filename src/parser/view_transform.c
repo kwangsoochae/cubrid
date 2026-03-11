@@ -6927,27 +6927,85 @@ mq_push_paths (PARSER_CONTEXT * parser, PT_NODE * statement, void *void_arg, int
 }
 
 /*
+ * mq_has_dblink_join_key_equality_term () - T4-3: check if any term in where is
+ *   "remote.col = local.col" for the given dblink spec (push-down candidate)
+ */
+static bool
+mq_has_dblink_join_key_equality_term (PARSER_CONTEXT * parser, PT_NODE * where, PT_NODE * spec,
+				      PT_NODE * from_list)
+{
+  PT_NODE *term;
+  FIND_ID_INFO info;
+
+  if (where == NULL || spec == NULL || from_list == NULL)
+    {
+      return false;
+    }
+
+  info.in.spec = spec;
+  info.in.others_spec_list = from_list;
+  info.in.attr_list = NULL;
+  info.in.subquery = NULL;
+
+  for (term = where; term; term = term->next)
+    {
+      if (term->node_type == PT_EXPR)
+	{
+	  if (term->info.expr.op == PT_AND)
+	    {
+	      if ((term->info.expr.arg1
+		   && mq_has_dblink_join_key_equality_term (parser, term->info.expr.arg1, spec, from_list))
+		  || (term->info.expr.arg2
+		      && mq_has_dblink_join_key_equality_term (parser, term->info.expr.arg2, spec, from_list)))
+		{
+		  return true;
+		}
+	    }
+	  else if (term->info.expr.op == PT_EQ && pt_is_dblink_join_key_equality (parser, term, &info))
+	    {
+	      return true;
+	    }
+	}
+    }
+  return false;
+}
+
+/*
  * mq_rewrite_dblink_as_subquery () - rewrite dblink as a subquery
  *   return: PT_NODE *
  *   parser(in): parser environment
  *   node(in): possible dblink query
+ *
+ * T4-3: Push-down candidate dblink specs (WHERE has "remote.col = local.col") skip
+ * rewrite to keep PT_DERIVED_DBLINK_TABLE; non-candidates use existing rewrite.
  */
 static PT_NODE *
 mq_rewrite_dblink_as_subquery (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int *walk)
 {
   PT_NODE *spec, *derived = NULL;
   PT_NODE *derived_table;
+  PT_NODE *from_list;
+  PT_NODE *where;
 
   if (node->node_type != PT_SELECT)
     {
       return node;
     }
 
-  for (spec = node->info.query.q.select.from; spec; spec = spec->next)
+  from_list = node->info.query.q.select.from;
+  where = node->info.query.q.select.where;
+
+  for (spec = from_list; spec; spec = spec->next)
     {
       if ((derived_table = spec->info.spec.derived_table)
 	  && spec->info.spec.derived_table_type == PT_DERIVED_DBLINK_TABLE)
 	{
+	  /* T4-3: Skip rewrite for push-down candidate (WHERE has join-key equality) */
+	  if (mq_has_dblink_join_key_equality_term (parser, where, spec, from_list))
+	    {
+	      continue;
+	    }
+
 	  derived = mq_rewrite_dblink_as_derived (parser, derived_table);
 	  if (derived == NULL)
 	    {
