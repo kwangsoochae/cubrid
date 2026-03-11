@@ -3871,6 +3871,9 @@ struct parser_context
     unsigned is_unloading_schema:1;
     unsigned is_parsing_trigger:1;
     unsigned is_skip_auto_parameterize:1;	/* set to 1 when skip auto parameterize, now only used for merge xasl generation */
+    unsigned is_generating_dblink_inner_scan:1;	/* set to 1 only while generating the inner scan spec for NL/IDX join;
+						 * used in pt_to_dblink_table_spec_list to guard join-key push-down so
+						 * that join_key_count is set only when dblink is the NL/IDX inner */
   } flag;
 };
 
