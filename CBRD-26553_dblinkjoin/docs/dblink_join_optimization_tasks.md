@@ -89,7 +89,7 @@ outer (class scan)
 |----|------|-----------|:----:|
 | T1-1 | "원격 컬럼 = 로컬 컬럼" 등치를 푸시 허용: `pt_find_dblink_side_refs`, `pt_is_dblink_join_key_equality` 추가, `pt_check_pushable_term()`에서 예외 처리 | `src/parser/view_transform.c` | [x] |
 | T1-1a | **T1-1 조건 보완**: predicate push가 dblink rewrite **이후**에 수행되므로, `derived->node_type == PT_DBLINK_TABLE`만으로는 한 번도 true가 되지 않음. rewrite 이후 구조(derived가 PT_SELECT이고 내부 from의 derived_table이 PT_DBLINK_TABLE인 경우)도 dblink로 인식하도록 조건 추가. 또는 predicate push를 dblink rewrite보다 먼저 수행하도록 실행 순서 변경 검토. | `src/parser/view_transform.c` `pt_check_pushable_term()` | [x] |
-| T1-2 | 푸시 시 rewritten에 `remote.col = ?` 반영, `PT_DBLINK_INFO`에 `join_key_local_ref_count`, `join_key_local_refs` 추가 및 매핑 | `src/parser/parse_tree.h`, `view_transform.c` `pt_copypush_terms()` | [x] |
+| T1-2 | 푸시 시 dblink 테이블(`PT_DBLINK_TABLE`)에 대해 join-key 등치(`remote.col = local.col`)를 식별하고, 원격 쿼리 rewritten에 `remote.col = ?`를 반영한다. `PT_DBLINK_INFO`에 `join_key_local_ref_count`, `join_key_local_refs`를 채워 XASL(`join_key_count`, `join_key_regu_list`)과 매핑한다. 래퍼 `PT_SELECT` 기반 푸시 초안은 폐기하고, 최종 설계는 PT_DBLINK_TABLE 기준으로 일원화한다. | `src/parser/parse_tree.h`, `view_transform.c` `pt_copypush_terms()` | [x] |
 
 ### Step 1 점검
 

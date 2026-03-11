@@ -4379,70 +4379,7 @@ pt_copypush_terms (PARSER_CONTEXT * parser, PT_NODE * spec, PT_NODE * query, PT_
   switch (query->node_type)
     {
     case PT_SELECT:
-      /* T1-2: If wrapper contains dblink, push join-key terms to dblink with "remote.col = ?" */
-      inner_spec = query->info.query.q.select.from;
-      if (inner_spec != NULL && inner_spec->next == NULL
-	  && inner_spec->info.spec.derived_table != NULL
-	  && inner_spec->info.spec.derived_table->node_type == PT_DBLINK_TABLE
-	  && infop != NULL && infop->in.spec != NULL && infop->in.others_spec_list != NULL)
-	{
-	  dblink_table = inner_spec->info.spec.derived_table;
-	  UINTPTR dblink_spec_id = infop->in.spec->info.spec.id;
-
-	  /* Single pass: allocate upper bound (term_list length), then fill in one loop */
-	  join_key_cnt = pt_length_of_list (term_list);
-	  if (join_key_cnt > 0)
-	    {
-	      join_key_refs = (PT_NODE **) parser_alloc (parser, join_key_cnt * sizeof (PT_NODE *));
-	      if (join_key_refs != NULL)
-		{
-		  int idx = 0;
-		  save_custom = parser->custom_print;
-		  parser->custom_print |=
-		    PT_CONVERT_RANGE | PT_SUPPRESS_RESOLVED | PT_PRINT_NO_HOST_VAR_INDEX | PT_PRINT_SUPPRESS_FOR_DBLINK;
-		  for (term = term_list; term != NULL; term = term->next)
-		    {
-		      remote_side = pt_get_remote_side_of_join_key (parser, term, dblink_spec_id,
-								  infop->in.others_spec_list, &local_side);
-		      if (remote_side != NULL && local_side != NULL)
-			{
-			  PARSER_VARCHAR *r_str = pt_print_bytes (parser, remote_side);
-			  if (join_key_pred != NULL)
-			    {
-			      join_key_pred = pt_append_bytes (parser, join_key_pred, " AND ", 5);
-			    }
-			  join_key_pred = pt_append_varchar (parser, join_key_pred, r_str);
-			  join_key_pred = pt_append_bytes (parser, join_key_pred, " = ?", 4);
-			  join_key_refs[idx++] = parser_copy_tree (parser, local_side);
-			}
-		    }
-		  join_key_cnt = idx;	/* actual count (may be less than list length) */
-		  parser->custom_print = save_custom;
-		  if (join_key_cnt > 0)
-		    {
-		      dblink_table->info.dblink_table.join_key_local_ref_count = join_key_cnt;
-		      dblink_table->info.dblink_table.join_key_local_refs = join_key_refs;
-		    }
-		  /* Build rewritten with "remote.col = ?" for dblink only if we have join keys */
-		  if (join_key_cnt > 0 && join_key_pred != NULL)
-		    {
-		      rewritten = pt_append_bytes (parser, rewritten, "SELECT * FROM (", 15);
-		      query_str = dblink_table->info.dblink_table.qstr->info.value.data_value.str;
-		      rewritten = pt_append_varchar (parser, rewritten, query_str);
-		      rewritten = pt_append_bytes (parser, rewritten, ") cublink", 9);
-		      rewritten = pt_append_bytes (parser, rewritten, " WHERE ", 7);
-		      rewritten = pt_append_varchar (parser, rewritten, join_key_pred);
-		      dblink_table->info.dblink_table.rewritten = rewritten;
-		    }
-		}
-	    }
-	}
-
-      /* copy terms into wrapper WHERE.
-       * Join-key terms (remote.col = local.col) are intentionally kept here even when dblink rewritten is set.
-       * - push-down path (T3-2): remote already filters via "?", so this eval is always true (minor redundancy).
-       * - non-push-down fallback: wrapper WHERE acts as a safety filter ensuring correct results.
-       * TODO(T3-3): once push-down path is confirmed stable, skip join-key terms here to avoid redundant eval. */
+      /* copy terms into wrapper WHERE. */
       push_term_list = parser_copy_tree_list (parser, term_list);
 
       /* substitute as_attr_list's columns for select_list's columns in search condition */
@@ -4475,15 +4412,77 @@ pt_copypush_terms (PARSER_CONTEXT * parser, PT_NODE * spec, PT_NODE * query, PT_
 	  return;
 	}
 
-      /* copy terms */
-      query->info.dblink_table.pushed_pred = parser_copy_tree_list (parser, term_list);
+      /* Split predicates: join-key terms vs others */
+      if (term_list != NULL && infop != NULL && infop->in.spec != NULL && infop->in.others_spec_list != NULL)
+	{
+	  PT_NODE *term, *remote_side, *local_side;
+	  UINTPTR dblink_spec_id = infop->in.spec->info.spec.id;
+	  PT_NODE *join_key_terms = NULL;
+	  PT_NODE *other_terms = NULL;
+
+	  join_key_cnt = pt_length_of_list (term_list);
+	  if (join_key_cnt > 0)
+	    {
+	      join_key_refs = (PT_NODE **) parser_alloc (parser, join_key_cnt * sizeof (PT_NODE *));
+	    }
+
+	  join_key_cnt = 0;
+	  for (term = term_list; term != NULL; term = term->next)
+	    {
+	      remote_side = pt_get_remote_side_of_join_key (parser, term, dblink_spec_id,
+							    infop->in.others_spec_list, &local_side);
+	      if (remote_side != NULL && local_side != NULL && join_key_refs != NULL)
+		{
+		  PARSER_VARCHAR *r_str;
+		  unsigned int save_custom_local;
+
+		  /* collect local side for binding */
+		  join_key_refs[join_key_cnt++] = parser_copy_tree (parser, local_side);
+
+		  /* build "remote.col = ?" predicate */
+		  /* use same print flags as pushed_pred so that dblink spec alias is suppressed */
+		  save_custom_local = parser->custom_print;
+		  parser->custom_print |=
+		    PT_CONVERT_RANGE | PT_SUPPRESS_RESOLVED | PT_PRINT_NO_HOST_VAR_INDEX | PT_PRINT_SUPPRESS_FOR_DBLINK;
+		  r_str = pt_print_bytes (parser, remote_side);
+		  parser->custom_print = save_custom_local;
+		  if (join_key_pred != NULL)
+		    {
+		      join_key_pred = pt_append_bytes (parser, join_key_pred, " AND ", 5);
+		    }
+		  join_key_pred = pt_append_varchar (parser, join_key_pred, r_str);
+		  join_key_pred = pt_append_bytes (parser, join_key_pred, " = ?", 4);
+
+		  /* do NOT keep join-key term in local WHERE; it will be evaluated remotely only */
+		}
+	      else
+		{
+		  /* keep non join-key terms for local/remote evaluation */
+		  other_terms = parser_append_node (parser_copy_tree (parser, term), other_terms);
+		}
+	    }
+
+	  if (join_key_cnt > 0 && join_key_refs != NULL)
+	    {
+	      query->info.dblink_table.join_key_local_ref_count = join_key_cnt;
+	      query->info.dblink_table.join_key_local_refs = join_key_refs;
+	    }
+
+	  /* copy non-join-key terms for pushed_pred printing below */
+	  query->info.dblink_table.pushed_pred = other_terms;
+	}
+      else
+	{
+	  /* no dblink context or no terms: nothing to split, just copy all terms */
+	  query->info.dblink_table.pushed_pred = parser_copy_tree_list (parser, term_list);
+	}
 
       /* remove the cast wrap from pushed predicate */
       query->info.dblink_table.pushed_pred =
 	parser_walk_tree (parser, query->info.dblink_table.pushed_pred, pt_remove_cast_wrap_for_dblink, NULL, NULL,
 			  NULL);
 
-      /* print the pushed predicates */
+      /* print the pushed (non join-key) predicates */
       save_custom = parser->custom_print;
       parser->custom_print |=
 	PT_CONVERT_RANGE | PT_SUPPRESS_RESOLVED | PT_PRINT_NO_HOST_VAR_INDEX | PT_PRINT_SUPPRESS_FOR_DBLINK;
@@ -4506,11 +4505,23 @@ pt_copypush_terms (PARSER_CONTEXT * parser, PT_NODE * spec, PT_NODE * query, PT_
 	  rewritten = pt_append_bytes (parser, rewritten, ")", 1);
 	}
 #endif
-      if (pushed_pred != NULL)
+      /* combine pushed_pred (non join-key) and join_key_pred (remote.col = ?) */
+      if (pushed_pred != NULL || (join_key_cnt > 0 && join_key_pred != NULL))
 	{
 	  /* where predicate */
 	  rewritten = pt_append_bytes (parser, rewritten, " WHERE ", 7);
-	  rewritten = pt_append_varchar (parser, rewritten, pushed_pred);
+	  if (pushed_pred != NULL)
+	    {
+	      rewritten = pt_append_varchar (parser, rewritten, pushed_pred);
+	    }
+	  if (join_key_cnt > 0 && join_key_pred != NULL)
+	    {
+	      if (pushed_pred != NULL)
+		{
+		  rewritten = pt_append_bytes (parser, rewritten, " AND ", 5);
+		}
+	      rewritten = pt_append_varchar (parser, rewritten, join_key_pred);
+	    }
 	}
 
       query->info.dblink_table.rewritten = rewritten;
