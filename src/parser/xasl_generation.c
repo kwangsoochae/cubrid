@@ -13025,7 +13025,8 @@ pt_to_dblink_table_spec_list (PARSER_CONTEXT * parser, PT_NODE * spec, PT_NODE *
   regu_attributes_pred =
     pt_to_regu_variable_list (parser, pred_attrs, UNBOX_AS_VALUE, tbl_info->value_list, pred_offsets);
 
-  if (pdblink->rewritten)
+  /* T0-3 Guard 2: Use rewritten (with ?) only when dblink is NL/IDX inner; else qstr to avoid unbound ? */
+  if (parser->flag.is_generating_dblink_inner_scan && pdblink->rewritten)
     {
       sql = pt_append_string (parser, "/* DBLINK SELECT */ ", (char *) pdblink->rewritten->bytes);
     }
@@ -13052,10 +13053,10 @@ pt_to_dblink_table_spec_list (PARSER_CONTEXT * parser, PT_NODE * spec, PT_NODE *
 				       (char *) pdblink->pwd->info.value.data_value.str->bytes,
 				       pdblink->host_vars.count, pdblink->host_vars.index, (char *) sql);
 
-  /* T2-1/T4-1: Fill join_key_count, join_key_regu_list when join keys pushed and no app ? (PT_HOST_VAR).
-   * Use pt_to_position_regu_variable_list with outer table's value_list so vfetch_to points to outer val_list
-   * slots; dblink_scan_reset can then read current outer row values for rebind. */
-  if (access && pdblink->join_key_local_ref_count > 0 && count == 0)
+  /* T2-1/T4-1/T0-3 Guard 1: Fill join_key_count, join_key_regu_list only when dblink is NL/IDX inner
+   * (is_generating_dblink_inner_scan). Use pt_to_position_regu_variable_list with outer table's value_list
+   * so vfetch_to points to outer val_list slots; dblink_scan_reset can then read current outer row values for rebind. */
+  if (access && parser->flag.is_generating_dblink_inner_scan && pdblink->join_key_local_ref_count > 0 && count == 0)
     {
       PT_NODE *node_list = NULL;
       PT_NODE *attr_node;

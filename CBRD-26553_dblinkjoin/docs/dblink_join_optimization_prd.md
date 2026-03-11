@@ -42,6 +42,7 @@
 
 - `view_transform.c`에서 **ON condition**은 푸시 대상에서 제외되며, **WHERE**에 있는 조건만 푸시 후보이다.
 - correlated term(조인 조건 등)은 원격으로 푸시되지 않아, 실행 시 원격 쿼리는 한 번만 실행되고 조인 조건은 로컬에서 평가된다.
+- **XASL 구조 제약**: `mq_rewrite_dblink_as_subquery`(`view_transform.c:8584`)가 optimizer/XASL 생성 이전에 실행되어 dblink spec을 `PT_DERIVED_DBLINK_TABLE` → `PT_IS_SUBQUERY`(wrapper PT_SELECT)로 변환한다. 결과적으로 dblink ACCESS_SPEC이 `aptr_list`(uncorrelated buildlist) 내부에 위치하게 되어 NL join 실행 중 `scan_reset_scan_block`이 dblink_scan에 닿지 못한다. 이를 해결하기 위해 push-down 후보 spec에 대해 rewrite를 우회하여 dblink spec을 `scan_ptr`에 직접 두어야 한다(XASL dblink spec 변경, FR-8).
 
 ---
 
@@ -101,6 +102,7 @@
 | FR-5 | reset 시 vd에서 조인 키 읽어 dblink_bind_param 후 cci_execute. dblink_scan_reset(scan_info, vd) vd 인자 추가. | Must |
 | FR-6 | 푸시 불가 또는 앱에서 `?` 가 포함된 쿼리를 사용한 경우는 기존 방식(open에서 bind+execute) 유지, regression 없음. | Must |
 | FR-7 | 푸시 조인 결과(행 수·값)가 기존 전체 fetch 후 로컬 조인과 동일. | Must |
+| FR-8 | **XASL dblink spec 변경**: push-down 후보 dblink가 NL inner일 때, outer 행 교체마다 dblink를 재실행할 수 있도록 dblink scan을 `scan_ptr` 체인에 직접 배치한다. 이를 위해 `mq_rewrite_dblink_as_subquery` 내에서 해당 spec의 `PT_IS_SUBQUERY` 변환을 생략하여 `PT_DERIVED_DBLINK_TABLE` 타입을 유지한다. 비후보(앱 `?` 혼합, 조인 키 없음 등)는 기존 변환 유지. | Must |
 
 ### 5.2 비기능 요구사항
 
@@ -127,6 +129,7 @@
 |------|------|------|
 | 푸시 조건 식별 오류 | 원격 쿼리 실행 실패 또는 **결과 불일치** | 푸시 가능 조건을 명확히 정의하고, 불명확한 경우 기존 방식(전체 fetch) 유지 |
 | outer vd 슬롯 매핑 오류 | 잘못된 값 바인딩 → 결과 오류 | 1차는 단일 조인 키, outer 첫 컬럼(vd 슬롯 0 만 사용)으로 제한; 향후 join_key_local_refs 기반으로 복합 조인 키 보완 |
+| `mq_rewrite_dblink_as_subquery` 우회 오판 | 비후보 spec이 rewrite 생략되어 **기존 경로 파손** | `pt_is_dblink_join_key_equality` 탐지 조건을 보수적으로 정의; 비후보는 반드시 기존 rewrite 수행; T5-2 regression 테스트로 검증 |
 
 ---
 
@@ -140,7 +143,7 @@
 | Step 1 | 푸시 조건 식별: “원격=로컬” 푸시 허용, rewritten에 `?` 반영 및 join_key_local_refs 매핑 |
 | Step 2 | XASL 반영: conn_sql·join_key_regu_list 채우기 (`join_key_count > 0`이 분기 조건) |
 | Step 3 | 실행기: Open(prepare만), Reset(rebind+execute), Next(fetch·predicate 유지) |
-| Step 4 | 플랜/스펙 검증: dblink inner + 조인 키 푸시 정보 유지 여부 확인 |
+| Step 4 | **XASL dblink spec 변경**: `mq_rewrite_dblink_as_subquery` 내에서 push-down 후보 spec의 `PT_IS_SUBQUERY` 변환을 생략하여 dblink scan을 `scan_ptr`에 직결; `gen_inner`에 `is_generating_dblink_inner_scan` 플래그 set/clear; 플랜/스펙 검증 |
 | Step 5 | 테스트·검증: 푸시 가능/불가/regression/성능 |
 
 
@@ -157,6 +160,7 @@
 ## 10. 참고 문서
 
 - [dblink_join_optimization_summary.md](dblink_join_optimization_summary.md) — 요약
+- [dblink_join_optimization_tasks.md](dblink_join_optimization_tasks.md) — 태스크 목록 및 점검 항목
 - [dblink_join_optimization_work.md](dblink_join_optimization_work.md) — 작업 설명서, 현재/목표 동작, 테스트 설계
 - [dblink_join_optimization_plan.md](dblink_join_optimization_plan.md) — 상세 구현 계획, 자료 구조, Step별 구현
 
@@ -167,3 +171,4 @@
 | 일자 | 작성/수정 | 내용 |
 |------|-----------|------|
 | TBD | TBD | PRD 초안 작성 |
+| TBD | TBD | XASL dblink spec 변경 반영: 2.3 구조적 제약 추가, FR-8 추가, 위험 항목 추가, Step 4 설명 업데이트, TASKS 참고 문서 추가 |

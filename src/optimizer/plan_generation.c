@@ -2782,7 +2782,21 @@ gen_inner (QO_ENV * env, QO_PLAN * plan, BITSET * predset, BITSET * subqueries, 
        */
       bitset_union (&(plan->sarged_terms), predset);
 
-      scan = init_class_scan_proc (env, scan, plan);
+      {
+	PARSER_CONTEXT *parser = QO_ENV_PARSER (env);
+	PT_NODE *spec = QO_NODE_ENTITY_SPEC (plan->plan_un.scan.node);
+
+	/* T0-3: Set flag so pt_to_dblink_table_spec_list knows we're generating NL/IDX inner dblink spec */
+	if (spec && spec->info.spec.derived_table_type == PT_DERIVED_DBLINK_TABLE)
+	  {
+	    parser->flag.is_generating_dblink_inner_scan = 1;
+	  }
+	scan = init_class_scan_proc (env, scan, plan);
+	if (spec && spec->info.spec.derived_table_type == PT_DERIVED_DBLINK_TABLE)
+	  {
+	    parser->flag.is_generating_dblink_inner_scan = 0;
+	  }
+      }
       scan = add_scan_proc (env, scan, inner_scans);
       scan = add_fetch_proc (env, scan, fetches);
       scan = add_subqueries (env, scan, &new_subqueries);
