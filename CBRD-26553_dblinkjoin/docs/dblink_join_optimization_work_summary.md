@@ -125,7 +125,7 @@
 | 파일 | 변경 내용 |
 |------|-----------|
 | `src/parser/parse_tree.h` | `PT_DBLINK_INFO`에 `int join_key_local_ref_count`, `PT_NODE **join_key_local_refs` 추가 |
-| `src/parser/view_transform.c` | `pt_get_remote_side_of_join_key()` 추가, `pt_copypush_terms()`에 dblink wrapper 감지 및 join key 처리 로직 추가 |
+| `src/parser/view_transform.c` | `pt_get_remote_side_of_join_key()` 추가, `pt_copypush_terms()`의 **case PT_DBLINK_TABLE**에서 join-key 식별·rewritten 생성 (래퍼 PT_SELECT 분기 제거) |
 | `src/parser/parse_tree_cl.c` | `pt_apply_dblink_table()`에서 `join_key_local_refs` walk 추가 |
 
 **추가·변경 내용**:
@@ -134,12 +134,13 @@
    - `remote.col = local.col` 형태의 조인 키 등치에서 원격 측/로컬 측 노드 식별.
    - 반환: 원격 측 노드. `*local_side_out`에 로컬 측 노드 저장.
 
-2. **`pt_copypush_terms()` 수정**
-   - `FIND_ID_INFO *infop` 파라미터 추가 (선택, NULL 가능).
-   - **PT_SELECT (dblink wrapper) 처리**: `from`이 단일 spec이고 `derived_table`이 `PT_DBLINK_TABLE`이면 dblink wrapper로 판단.
-   - 조인 키 등치만 추출하여 `"remote.col = ?"` 문자열 생성, `join_key_local_refs`에 로컬 측 노드 복사본 저장.
-   - `rewritten`에 `SELECT * FROM (원본쿼리) cublink WHERE id = ?` 형태로 설정.
-   - 호출부: `mq_copypush_sargable_terms_helper`에서 `infop` 전달.
+2. **`pt_copypush_terms()` 수정 — case PT_DBLINK_TABLE**
+   - `query->node_type == PT_DBLINK_TABLE`일 때만 join-key 푸시 수행 (래퍼 PT_SELECT 분기는 제거됨).
+   - `term_list`에서 `pt_get_remote_side_of_join_key()`로 join-key 등치 식별; join-key가 아닌 term은 `pushed_pred`로 분리.
+   - 조인 키 등치 → `"remote.col = ?"` 문자열 생성 (원격 WHERE에서 alias 없이 컬럼명만 사용하도록 print 플래그 적용), `join_key_local_refs`에 로컬 측 노드 저장.
+   - `rewritten`에 `SELECT * FROM (원본쿼리) cublink WHERE [기타 predicate AND] remote.col = ?` 형태로 설정.
+   - join-key term은 로컬 WHERE에 남기지 않음 (원격에서만 평가).
+   - `infop`로 dblink spec/others_spec_list 전달받아 사용.
 
 3. **`PT_DBLINK_INFO` 확장**
    - `join_key_local_ref_count`: i번째 `?`에 대응하는 조인 키 개수.
