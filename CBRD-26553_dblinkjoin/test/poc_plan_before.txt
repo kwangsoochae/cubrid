@@ -1,0 +1,144 @@
+========================================
+POC Plan Trace — BEFORE (develop branch)
+========================================
+Date: 2026-03-13
+Build: develop (최적화 전)
+Command: csql-debug --plan <file>
+
+공통 패턴: TABLE SCAN (_dbl) → NESTED LOOPS (inner join) → SUBQUERY (uncorrelated) + hash temp + MEMOIZE
+
+----------------------------------------
+POC-A: 고선택도 (0.01% — 10건 매칭 / remote 100k행)
+  TC: POCA_TC-501.sql
+  결과: 10 rows, 0.676000 sec
+
+  Query Plan:
+    TABLE SCAN (_dbl)
+    NESTED LOOPS (inner join)
+      TABLE SCAN (l)
+      TABLE SCAN (r)
+
+  Trace Statistics:
+    SELECT (time: 632, fetch: 6513, fetch_time: 12, ioread: 2)
+      SCAN (table: cubrid.local_small_t), (heap time: 0, fetch: 4, ioread: 1, readrows: 10, rows: 10)
+        SCAN (hash temp(h), build time: 52, time: 0, fetch: 0, ioread: 0, readrows: 100010, rows: 10)
+        MEMOIZE (time: 0, hit: 0, miss: 10, size: 3KB, enabled: true)
+      SUBQUERY (uncorrelated)
+        SELECT (time: 564, fetch: 4341, fetch_time: 4, ioread: 0)
+          SCAN (dblink time: 312, fetch: 0, ioread: 0)
+
+  분석:
+    - dblink: 1회 execute, 100,000행 전체 fetch (dblink time: 312ms)
+    - hash temp 빌드: 52ms
+    - MEMOIZE miss: 10 (outer 10행 × 각 1회 probe)
+    - 총 쿼리 시간의 89% = dblink fetch
+
+----------------------------------------
+POC-B: 제로 매칭 (outer id 100001-100010, remote에 없음)
+  TC: POCB_TC-502.sql
+  결과: 0 rows, 0.476000 sec
+
+  Query Plan:
+    TABLE SCAN (_dbl)
+    NESTED LOOPS (inner join)
+      TABLE SCAN (l)
+      TABLE SCAN (r)
+
+  Trace Statistics:
+    SELECT (time: 464, fetch: 6468, fetch_time: 12, ioread: 2)
+      SCAN (table: cubrid.local_nomatch_t), (heap time: 0, fetch: 4, ioread: 1, readrows: 10, rows: 10)
+        SCAN (hash temp(h), build time: 32, time: 0, fetch: 0, ioread: 0, readrows: 100000, rows: 0)
+        MEMOIZE (time: 0, hit: 0, miss: 10, size: 1KB, enabled: true)
+      SUBQUERY (uncorrelated)
+        SELECT (time: 416, fetch: 4296, fetch_time: 12, ioread: 0)
+          SCAN (dblink time: 272, fetch: 0, ioread: 0)
+
+  분석:
+    - dblink: 1회 execute, 100,000행 전체 fetch (매칭 0건인데도 동일 비용)
+    - hash temp 빌드: 32ms (rows: 0 — 조인 조건 매칭 없음)
+    - POC-A와 거의 동일한 시간 → Before는 매칭 여부 무관하게 항상 전체 fetch
+
+----------------------------------------
+POC-C: 고선택도 worst case (outer 100행, remote 1,000행, 100% 매칭)
+  TC: POCC_TC-601.sql
+  결과: COUNT=10000, 0.028000 sec
+
+  Query Plan:
+    TABLE SCAN (_dbl)
+    NESTED LOOPS (inner join)
+      TABLE SCAN (l)
+      TABLE SCAN (r)
+
+  Trace Statistics:
+    SELECT (time: 16, fetch: 24, fetch_time: 0, ioread: 2)
+      SCAN (table: cubrid.local_hiselectivity_t), (heap time: 0, fetch: 4, ioread: 1, readrows: 100, rows: 100)
+        SCAN (hash temp(m), build time: 0, time: 0, fetch: 0, ioread: 0, readrows: 2000, rows: 1000)
+        MEMOIZE (time: 4, hit: 90, miss: 10, size: 243KB, enabled: true)
+      SUBQUERY (uncorrelated)
+        SELECT (time: 12, fetch: 0, fetch_time: 0, ioread: 0)
+          SCAN (dblink time: 4, fetch: 0, ioread: 0)
+
+  분석:
+    - dblink: 1회 execute, 1,000행 fetch (remote 자체가 작음)
+    - MEMOIZE hit: 90, miss: 10 → outer 100행 중 id 종류 10개 → 10회 probe, 90회 캐시 히트
+    - Before에서 가장 유리한 케이스 (remote 작고 MEMOIZE 효과 큼)
+
+----------------------------------------
+POC-D: execute round-trip worst case (outer 1,000행, remote 5행)
+  TC: POCD_TC-602.sql
+  결과: 5 rows, 0.020000 sec
+
+  Query Plan:
+    TABLE SCAN (_dbl)
+    NESTED LOOPS (inner join)
+      TABLE SCAN (l)
+      TABLE SCAN (r)
+
+  Trace Statistics:
+    SELECT (time: 8, fetch: 36, fetch_time: 0, ioread: 5)
+      SCAN (table: cubrid.local_manyouter_t), (heap time: 0, fetch: 16, ioread: 4, readrows: 1000, rows: 1000)
+        SCAN (hash temp(m), build time: 0, time: 0, fetch: 0, ioread: 0, readrows: 10, rows: 5)
+        MEMOIZE (time: 0, hit: 0, miss: 1000, size: 146KB, enabled: true)
+      SUBQUERY (uncorrelated)
+        SELECT (time: 8, fetch: 0, fetch_time: 0, ioread: 0)
+          SCAN (dblink time: 0, fetch: 0, ioread: 0)
+
+  분석:
+    - dblink: 1회 execute, 5행만 fetch (remote 매우 작음 → fetch 거의 무비용)
+    - MEMOIZE miss: 1000 (outer 1000행, 전부 distinct id) — 캐시 효과 없음
+    - Before에서 유리: 1회 execute만으로 충분
+    - After에서는 1,000회 execute → round-trip 오버헤드 예상
+
+----------------------------------------
+POC-E: 손익분기 (outer 10행 × 10,000매칭 = remote 100,000행 전체)
+  TC: POCE.sql
+  결과: COUNT=100000, 0.276000 sec
+
+  Query Plan:
+    TABLE SCAN (_dbl)
+    NESTED LOOPS (inner join)
+      TABLE SCAN (l)
+      TABLE SCAN (r)
+
+  Trace Statistics:
+    SELECT (time: 256, fetch: 1752, fetch_time: 0, ioread: 2)
+      SCAN (table: cubrid.local_breakeven_t), (heap time: 0, fetch: 4, ioread: 1, readrows: 10, rows: 10)
+        SCAN (hash temp(m), build time: 40, time: 16, fetch: 0, ioread: 0, readrows: 200000, rows: 100000)
+        MEMOIZE (time: 12, hit: 0, miss: 1, size: 2048KB, enabled: false)
+      SUBQUERY (uncorrelated)
+        SELECT (time: 180, fetch: 1152, fetch_time: 0, ioread: 0)
+          SCAN (dblink time: 100, fetch: 0, ioread: 0)
+
+  분석:
+    - dblink: 1회 execute, 100,000행 fetch
+    - MEMOIZE miss: 1 (hash 크기 2048KB 초과로 enabled: false)
+    - 전송행 수는 After와 동일 → After는 10회 execute 오버헤드 추가 → Before가 유리
+
+========================================
+요약 (Before — NESTED LOOPS inner join + uncorrelated subquery 패턴 공통)
+  POC-A: dblink 1회 execute, 100k행 fetch  → 0.491s avg (bench)
+  POC-B: dblink 1회 execute, 100k행 fetch  → 0.481s avg (bench)  [매칭 0건인데도 동일]
+  POC-C: dblink 1회 execute,   1k행 fetch  → 0.023s avg (bench)  [MEMOIZE hit 90%]
+  POC-D: dblink 1회 execute,    5행 fetch  → 0.017s avg (bench)
+  POC-E: dblink 1회 execute, 100k행 fetch  → 0.228s avg (bench)
+========================================

@@ -1,0 +1,124 @@
+========================================
+POC Plan Trace — AFTER (dblink_join_improve branch)
+========================================
+Date: 2026-03-13
+Build: dblink_join_improve (조인 키 push-down 최적화 적용)
+Command: csql-debug --plan <file>
+
+공통 패턴: NESTED LOOPS → TABLE SCAN (l) + TABLE SCAN (r, dblink) → rewritten query WHERE id = ?
+
+----------------------------------------
+POC-A: 고선택도 (0.01% — 10건 매칭 / remote 100k행)
+  TC: POCA_TC-501.sql
+  결과: 10 rows, 0.060000 sec
+
+  Query Plan:
+    NESTED LOOPS (cross join)
+      TABLE SCAN (l)
+      TABLE SCAN (r)
+
+  rewritten query: select l.id, l.[name], r.val from [cubrid.local_small_t] l, DBLINK(cubrid_conn, 'SELECT * FROM (SELECT id, val FROM remote_large_t r) cublink WHERE id = ?') as r(id integer, val varchar(100))
+
+  Trace Statistics:
+    SELECT (time: 16, fetch: 24, fetch_time: 0, ioread: 2)
+      SCAN (table: cubrid.local_small_t), (heap time: 0, fetch: 4, ioread: 1, readrows: 10, rows: 10)
+        SCAN (dblink time: 0, fetch: 0, ioread: 0)
+
+  분석:
+    - hash temp / MEMOIZE / uncorrelated 구조 소멸
+    - outer 10행 × 1회 execute, 매칭 1행씩 즉시 반환 → 전송량 1/10,000
+
+----------------------------------------
+POC-B: 제로 매칭 (outer id 100001-100010, remote에 없음)
+  TC: POCB_TC-502.sql
+  결과: 0 rows, 0.020000 sec
+
+  Query Plan:
+    NESTED LOOPS (cross join)
+      TABLE SCAN (l)
+      TABLE SCAN (r)
+
+  rewritten query: select l.id, l.[name], r.val from [cubrid.local_nomatch_t] l, DBLINK(cubrid_conn, 'SELECT * FROM (SELECT id, val FROM remote_large_t r) cublink WHERE id = ?') as r(id integer, val varchar(100))
+
+  Trace Statistics:
+    SELECT (time: 8, fetch: 24, fetch_time: 0, ioread: 2)
+      SCAN (table: cubrid.local_nomatch_t), (heap time: 0, fetch: 4, ioread: 1, readrows: 10, rows: 10)
+        SCAN (dblink time: 0, fetch: 0, ioread: 0)
+
+  분석:
+    - 10회 execute, 각 0행 반환 → fetch 자체 없음
+    - Before는 매칭 없어도 100k행 전체 fetch 했음
+
+----------------------------------------
+POC-C: 고선택도 worst case (outer 100행, remote 1,000행, 100% 매칭)
+  TC: POCC_TC-601.sql
+  결과: COUNT=10000, 0.124000 sec
+
+  Query Plan:
+    NESTED LOOPS (cross join)
+      TABLE SCAN (l)
+      TABLE SCAN (r)
+
+  rewritten query: select count(*) from [cubrid.local_hiselectivity_t] l, DBLINK(cubrid_conn, 'SELECT * FROM (SELECT id FROM remote_hiselectivity_t r) cublink WHERE id = ?') as r(id integer)
+
+  Trace Statistics:
+    SELECT (time: 108, fetch: 24, fetch_time: 0, ioread: 2)
+      SCAN (table: cubrid.local_hiselectivity_t), (heap time: 0, fetch: 4, ioread: 1, readrows: 100, rows: 100)
+        SCAN (dblink time: 8, fetch: 0, ioread: 0)
+
+  분석:
+    - 100회 execute × 100행 fetch = 10,000행 (Before의 10배)
+    - Before의 MEMOIZE hit 90% 효과 소멸 → After가 4.1x 느림
+
+----------------------------------------
+POC-D: execute round-trip worst case (outer 1,000행, remote 5행)
+  TC: POCD_TC-602.sql
+  결과: 5 rows, 0.344000 sec
+
+  Query Plan:
+    NESTED LOOPS (cross join)
+      TABLE SCAN (l)
+      TABLE SCAN (r)
+
+  rewritten query: select l.id, l.[name], r.val from [cubrid.local_manyouter_t] l, DBLINK(cubrid_conn, 'SELECT * FROM (SELECT id, val FROM remote_smalltable_t r) cublink WHERE id = ?') as r(id integer, val varchar(100))
+
+  Trace Statistics:
+    SELECT (time: 328, fetch: 36, fetch_time: 4, ioread: 5)
+      SCAN (table: cubrid.local_manyouter_t), (heap time: 0, fetch: 16, ioread: 4, readrows: 1000, rows: 1000)
+        SCAN (dblink time: 8, fetch: 0, ioread: 0)
+
+  분석:
+    - 1,000회 execute × ~0행 fetch → round-trip이 지배적
+    - execute당 약 0.33ms (328ms / 1,000회)
+    - Before: 1회 execute + 5행 fetch ≈ 17ms → After가 15.8x 느림
+
+----------------------------------------
+POC-E: 손익분기 (outer 10행 × 10,000매칭 = remote 100,000행 전체)
+  TC: POCE.sql
+  결과: COUNT=100000, 0.544000 sec
+
+  Query Plan:
+    NESTED LOOPS (cross join)
+      TABLE SCAN (l)
+      TABLE SCAN (r)
+
+  rewritten query: select count(*) from [cubrid.local_breakeven_t] l, DBLINK(cubrid_conn, 'SELECT * FROM (SELECT id FROM remote_breakeven_t r) cublink WHERE id = ?') as r(id integer)
+
+  Trace Statistics:
+    SELECT (time: 532, fetch: 24, fetch_time: 4, ioread: 2)
+      SCAN (table: cubrid.local_breakeven_t), (heap time: 0, fetch: 4, ioread: 1, readrows: 10, rows: 10)
+        SCAN (dblink time: 76, fetch: 0, ioread: 0)
+
+  분석:
+    - 10회 execute × 10,000행 fetch = 100,000행 (Before와 동일 전송량)
+    - execute당 약 53ms (532ms / 10회)
+    - 동일 데이터를 10번에 나눠 전송 → 2.1x 오버헤드
+
+========================================
+요약 (After — NESTED LOOPS + per-row execute 패턴 공통)
+  POC-A (저선택도, 100k):  time: 16   → 0.018s avg (bench) ★ 26.7x 향상
+  POC-B (제로매칭, 100k):  time: 8    → 0.020s avg (bench) ★ 24.5x 향상
+  POC-C (100%매칭,   1k):  time: 108  → 0.095s avg (bench) ✗  4.1x 악화
+  POC-D (다수outer,  5행): time: 328  → 0.272s avg (bench) ✗ 15.8x 악화
+  POC-E (손익분기, 100k):  time: 532  → 0.481s avg (bench) ✗  2.1x 악화
+========================================

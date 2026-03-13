@@ -3,7 +3,6 @@
 | 항목 | 내용 |
 |------|------|
 | 이슈 | CBRD-26553 |
-| 관련 문서 | [PRD](dblink_join_optimization_prd.md), [요약](dblink_join_optimization_summary.md), [작업 설명서](dblink_join_optimization_work.md), [구현 계획](dblink_join_optimization_plan.md), [T0-1 검증](T0-1_verification.md), [작업 요약](dblink_join_optimization_work_summary.md) |
 
 **의존 관계**: Step 1 → Step 2 → Step 3. Step 0은 병렬 가능. Step 4는 2·3과 병행. **Step 4에 XASL dblink spec 변경 포함.** Step 5는 3·4 완료 후.
 
@@ -97,8 +96,8 @@ outer (class scan)
   ```sql
   -- 점검 쿼리 (push 후보 조건)
   SELECT l.id, l.name, r.name FROM local_t l, 
-DBLINK ('localhost:33000:testdb4dblink:cubrid:cubrid:','SELECT id, name from remote_t') AS r(id int, name varchar(32))
-WHERE l.id = r.id;
+  DBLINK ('localhost:33000:testdb4dblink:cubrid:cubrid:','SELECT id, name from remote_t') AS r(id int, name varchar(32))
+  WHERE l.id = r.id;
   ```
   - gdb: `pt_check_pushable_term`에 breakpoint → `l.id = r.id` term에서 `return true` 확인
   - gdb: `pt_is_dblink_join_key_equality` → `has_dblink_2=true`, `has_outer_1=true` 확인

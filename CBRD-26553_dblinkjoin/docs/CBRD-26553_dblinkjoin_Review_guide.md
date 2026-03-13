@@ -316,14 +316,3 @@ AS-IS에서는 `mq_rewrite_dblink_as_subquery()`가 모든 dblink spec을 `PT_IS
 
 - dblink outer, hash/merge join, 앱 `?` 포함 등 AS-IS fallback 케이스에서 `join_key_count == 0`이 보장되는지
 - `no_result` 플래그 초기화 위치 확인 (다음 outer 행으로 넘어갈 때 초기화되는지)
-
----
-
-## 7. 관련 문서
-
-| 문서 | 설명 |
-|------|------|
-| [PRD](dblink_join_optimization_prd.md) | 요구사항 및 적용 범위 |
-| [구현 계획](dblink_join_optimization_plan.md) | 상세 구현 계획 |
-| [작업 요약](dblink_join_optimization_work_summary.md) | 태스크별 완료 내용 |
-| [테스트](dblink_join_optimization_tests.md) | 테스트 케이스 전체 목록 |

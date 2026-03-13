@@ -135,8 +135,6 @@
 
 ## 8. 구현 단계 요약
 
-구현 상세는 [dblink_join_optimization_plan.md](dblink_join_optimization_plan.md) 참고.
-
 | 단계 | 내용 |
 |------|------|
 | Step 0 | 사전 확인: view_transform correlated+dblink 제외, xasl.h dblink_node 구조 및 `join_key_count`·`join_key_regu_list` 추가 |
@@ -154,15 +152,6 @@
 - **환경**: 로컬 DB, 원격 DB(또는 Gateway), dblink 연결 설정.
 - **케이스**: 푸시 가능 조인(결과 일치), 0건 매칭, 1:N 매칭, LEFT JOIN(기존 동작), 푸시 불가/단일 dblink(regression 없음).
 - **검증**: 원격 전송 행 수 감소, 실행 계획에 rebind/execute 반영 여부.
-
----
-
-## 10. 참고 문서
-
-- [dblink_join_optimization_summary.md](dblink_join_optimization_summary.md) — 요약
-- [dblink_join_optimization_tasks.md](dblink_join_optimization_tasks.md) — 태스크 목록 및 점검 항목
-- [dblink_join_optimization_work.md](dblink_join_optimization_work.md) — 작업 설명서, 현재/목표 동작, 테스트 설계
-- [dblink_join_optimization_plan.md](dblink_join_optimization_plan.md) — 상세 구현 계획, 자료 구조, Step별 구현
 
 ---
 

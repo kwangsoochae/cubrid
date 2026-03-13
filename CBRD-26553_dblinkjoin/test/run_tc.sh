@@ -6,6 +6,8 @@
 #   ./run_tc.sh TC-101 [TC-102]       # 지정 TC만 실행·비교
 #   ./run_tc.sh --no-compare all      # 비교 없이 실행만
 #   ./run_tc.sh --gen-expected all    # 실제 출력을 expected 파일로 저장(정답지 생성)
+#   ./run_tc.sh --plan all            # join order 포함 실행 계획 출력 (SET TRACE ON / SHOW TRACE)
+#   ./run_tc.sh --xasl TC-101        # XASL 구조 덤프 출력 (xasl_debug_dump=on)
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -13,6 +15,8 @@ LOCAL_DB="${CUBRID_DBLINK_LOCAL_DB:-testdb}"
 CSQL_OPTS="${CSQL_OPTS:--u cubrid -p cubrid}"
 NO_COMPARE=0
 GEN_EXPECTED=0
+PLAN_LEVEL=""   # "" = off, "on"
+XASL_DUMP=0
 
 # 인자에서 플래그 제거
 ARGS=()
@@ -22,6 +26,10 @@ for a in "$@"; do
   elif [ "$a" = "--gen-expected" ]; then
     GEN_EXPECTED=1
     NO_COMPARE=1
+  elif [ "$a" = "--plan" ]; then
+    PLAN_LEVEL="on"
+  elif [ "$a" = "--xasl" ]; then
+    XASL_DUMP=1
   else
     ARGS+=("$a")
   fi
@@ -49,10 +57,37 @@ extract_result() {
   '
 }
 
+# SQL 파일을 xasl_debug_dump=on/off 로 감싼 임시 파일 생성
+make_xasl_sql() {
+  local sqlf="$1"
+  local tmpf
+  tmpf=$(mktemp /tmp/run_tc_XXXXXX.sql)
+  printf "SET SYSTEM PARAMETERS 'xasl_debug_dump=on';\n" > "$tmpf"
+  cat "$sqlf" >> "$tmpf"
+  printf "\nSET SYSTEM PARAMETERS 'xasl_debug_dump=off';\n" >> "$tmpf"
+  echo "$tmpf"
+}
+
+
+# SQL 파일을 SET TRACE ON / SHOW TRACE 로 감싼 임시 파일 생성
+# CS 모드에서는 ;plan이 서버→클라이언트 전달이 안 되므로 TRACE 방식 사용
+# 반환: 임시 파일 경로 (호출자가 rm 책임)
+make_plan_sql() {
+  local sqlf="$1"
+  local tmpf
+  tmpf=$(mktemp /tmp/run_tc_XXXXXX.sql)
+  printf 'SET TRACE ON;\n' > "$tmpf"
+  cat "$sqlf" >> "$tmpf"
+  printf '\nSHOW TRACE;\n' >> "$tmpf"
+  echo "$tmpf"
+}
+
 run_one() {
-  local tc="$1"
-  local sqlf="$SCRIPT_DIR/$tc.sql"
+  local tc="${1%.*}"
+  local sqlf="$SCRIPT_DIR/$1"
   local expf="$SCRIPT_DIR/$tc.expected"
+  local run_sqlf="$sqlf"
+  local tmpf=""
   local out
   local result
   local rc=0
@@ -62,9 +97,23 @@ run_one() {
     return 0
   fi
 
+  if [ $XASL_DUMP -eq 1 ]; then
+    tmpf=$(make_xasl_sql "$sqlf")
+    run_sqlf="$tmpf"
+  elif [ -n "$PLAN_LEVEL" ]; then
+    tmpf=$(make_plan_sql "$sqlf")
+    run_sqlf="$tmpf"
+  fi
+
   echo "=== $tc ==="
-  out=$(csql $CSQL_OPTS "$LOCAL_DB" -i "$sqlf" 2>&1)
+  if [ $XASL_DUMP -eq 1 ]; then
+    out=$(csql -S $CSQL_OPTS "$LOCAL_DB" -i "$run_sqlf" 2>&1)
+  else
+    out=$(csql $CSQL_OPTS "$LOCAL_DB" -i "$run_sqlf" 2>&1)
+  fi
   echo "$out" | grep -v 'KS_DBLINK_DEBUG' || true
+
+  [ -n "$tmpf" ] && rm -f "$tmpf"
 
   if [ $GEN_EXPECTED -eq 1 ]; then
     result=$(echo "$out" | extract_result)
@@ -78,7 +127,7 @@ run_one() {
     return 0
   fi
 
-  if [ $NO_COMPARE -eq 1 ]; then
+  if [ $NO_COMPARE -eq 1 ] || [ -n "$PLAN_LEVEL" ] || [ $XASL_DUMP -eq 1 ]; then
     echo ""
     return 0
   fi
@@ -111,12 +160,17 @@ FAIL_COUNT=0
 RESULT_LINES=()
 
 if [ ${#ARGS[@]} -eq 0 ]; then
-  echo "사용법: $0 [--no-compare|--gen-expected] all | TC-101 [TC-102 ...]" >&2
+  echo "사용법: $0 [--no-compare|--gen-expected|--plan|--xasl] all | TC-101 [TC-102 ...]" >&2
   exit 1
 fi
 
 if [ "${ARGS[0]}" = "all" ]; then
-  for tc in TC-101 TC-102 TC-103 TC-104 TC-201 TC-202 TC-203 TC-204 TC-205 TC-401; do
+  for tc in TC-101.sql TC-102.sql TC-103.sql TC-104.sql \
+            TC-201.sql TC-202.sql TC-203.sql TC-204.sql TC-205.sql \
+            TC-401.sql \
+            TC-501.sql TC-502.sql TC-503.sql \
+            TC-601.sql TC-602.sql \
+            TC-POC-E.sql; do
     if run_one "$tc"; then
       RESULT_LINES+=("  $tc: PASS")
     else
@@ -124,13 +178,13 @@ if [ "${ARGS[0]}" = "all" ]; then
       FAIL_COUNT=$((FAIL_COUNT + 1))
     fi
   done
-  if [ $NO_COMPARE -eq 0 ]; then
+  if [ $NO_COMPARE -eq 0 ] && [ -z "$PLAN_LEVEL" ]; then
     echo "TC-301은 수동/스크립트 검증. test/TC-301.md 참고."
     echo ""
   fi
 else
   for t in "${ARGS[@]}"; do
-    if [ "$t" = "TC-301" ]; then
+    if [ "$t" = "TC-301" ] || [ "$t" = "TC-301.md" ]; then
       echo "TC-301은 SQL이 아닌 수동/스크립트 검증. test/TC-301.md 참고."
       echo ""
     else
@@ -146,8 +200,8 @@ fi
 
 echo "=== 완료 ==="
 
-# 결과 종합 출력 (비교 모드일 때만)
-if [ $NO_COMPARE -eq 0 ] && [ ${#RESULT_LINES[@]} -gt 0 ]; then
+# 결과 종합 출력 (비교 모드이고 plan 출력 아닐 때만)
+if [ $NO_COMPARE -eq 0 ] && [ -z "$PLAN_LEVEL" ] && [ $XASL_DUMP -eq 0 ] && [ ${#RESULT_LINES[@]} -gt 0 ]; then
   echo ""
   echo "========== 결과 종합 =========="
   for line in "${RESULT_LINES[@]}"; do
@@ -159,7 +213,7 @@ if [ $NO_COMPARE -eq 0 ] && [ ${#RESULT_LINES[@]} -gt 0 ]; then
   echo "======================================"
 fi
 
-if [ $NO_COMPARE -eq 1 ]; then
+if [ $NO_COMPARE -eq 1 ] || [ -n "$PLAN_LEVEL" ] || [ $XASL_DUMP -eq 1 ]; then
   exit 0
 fi
 if [ $FAIL_COUNT -gt 0 ]; then

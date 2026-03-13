@@ -11,15 +11,21 @@
 
 ## 1. 결과 요약
 
-| POC | 시나리오 | Before | After | 배율 | 판정 |
+Before/After 각 10회 실행 평균값. 상세 측정값:
+
+| POC | 시나리오 | Before (avg) | After (avg) | 배율 | 판정 |
 |-----|---------|--------|-------|------|------|
-| A | 낮은 선택도 (0.01%) | 0.491s | 0.018s | **26.7x 빠름** | ✅ 효과 |
-| B | 조인 결과 없음 | 0.481s | 0.020s | **24.5x 빠름** | ✅ 효과 |
+| A | 낮은 선택도 (0.01%) | 0.491s | 0.018s | 26.7x 빠름 | ✅ 효과 |
+| B | 조인 결과 없음 | 0.481s | 0.020s | 24.5x 빠름 | ✅ 효과 |
 | C | 높은 선택도 (100%) | 0.023s | 0.095s | 4.1x 느림 | ❌ 역효과 |
 | D | outer 많음, remote 작음 | 0.017s | 0.272s | 15.8x 느림 | ❌ 역효과 |
 | E | 전송행 동일 (손익분기) | 0.228s | 0.481s | 2.1x 느림 | ❌ 역효과 |
 
-낮은 선택도에서 좋은 효과. 높은 선택도/outer(local) 다수/remote 소규모에서 역효과 (좋은 성능의 경우도 있으나, 통계 기반 최적화 선택 등 추가 작업 없이 본작업 단순 적용은 좋은 선택으로 보이지 않음)
+낮은 선택도에서 좋은 효과. 높은 선택도/outer(local) 다수/remote 소규모에서 역효과
+
+좋은 성능의 경우도 있으나, 통계 기반 최적화 선택 등 추가 작업 없이 본작업 단순 적용은 무리 있어 보임.
+
+WAN 환경에서는 round-trip latency가 커지므로 POC-D  및 E 유형의 역효과가 더 심각해 질 것으로 보임.
 
 ---
 
@@ -36,8 +42,9 @@ POC-B: 100,000 - 10 × 0  = 100,000행 절약 → 24.5x 향상 (fetch 자체 없
 ### 역효과 케이스 (POC-C, D)
 
 ```
-POC-C: outer × avg_match (100 × 100 = 10,000) > remote_total (1,000)
-       → After 전송량이 Before의 10배. MEMOIZE hit 90% 효과도 소멸.
+POC-C: 선택도 = avg_match / remote_total = 100 / 1,000 = 10%
+       After 전송량 = outer_count × avg_match = 100 × 100 = 10,000행 > remote_total (1,000행)
+       → After 전송량이 Before의 10배.
 POC-D: remote가 이미 작아 1회 fetch가 최소 비용.
        After는 1,000회 execute → execute당 ~0.27ms × 1,000 = 270ms
 ```
@@ -56,23 +63,6 @@ After: 10회 execute + 100,000행 전송 = 481ms
 절약행 수 > 28ms / 2.28μs(행당 비용) ≈ 12,280행
 → outer 1행이 줄이는 전송량이 12,280행 이상일 때 After 유리
 ```
-
-### 향후 과제
-
-push-down 적용 조건 (안):
-
-유리한 조건: 절약 시간 > 추가 시간
-
-절약한 시간: 전송행이 줄어서 아낀 시간
-절약 전송행 수 = remote_total - outer_count × avg_match
-절약 시간     = 절약 전송행 수 × row_cost  (행 1개 전송·처리 비용)
-
-  - 추가로 든 시간: execute 횟수가 늘어서 생긴 round-trip 오버헤드
-    추가 round-trip = outer_count - 1  ≈  outer_count
-    추가 시간       = outer_count × round_trip_latency
-    (remote_total - outer_count × avg_match) × row_cost  >  outer_count × round_trip_latency
-
-WAN 환경에서는 round-trip latency가 커지므로 POC-D 유형의 역효과가 더 심각해진다.
 
 ---
 
@@ -152,22 +142,35 @@ WHERE l.id = r.id;
 | dblink execute | 1회 | 10회 | |
 | 전송 행 수 | 100,000행 | 10행 | 1/10,000 |
 
-**Before 실행 계획**
+**Before 실행 계획 및 실행 트레이스 통계**
 ```
-SELECT (time: 588ms, fetch: 6452)
-  SCAN (table: local_small_t, readrows: 10, rows: 10)
-    SCAN (hash temp(h), build time: 36ms, readrows: 100010, rows: 10)
-    MEMOIZE (hit: 0, miss: 10)
-  SUBQUERY (uncorrelated)
-    SELECT (time: 540ms)
-      SCAN (dblink time: 340ms)
+Query Plan:
+  TABLE SCAN (_dbl)
+  NESTED LOOPS (inner join)
+    TABLE SCAN (l)
+    TABLE SCAN (r)
+
+Trace Statistics:
+  SELECT (time: 632, fetch: 6513, fetch_time: 12, ioread: 2)
+    SCAN (table: cubrid.local_small_t), (heap time: 0, fetch: 4, ioread: 1, readrows: 10, rows: 10)
+      SCAN (hash temp(h), build time: 52, time: 0, fetch: 0, ioread: 0, readrows: 100010, rows: 10)
+      MEMOIZE (time: 0, hit: 0, miss: 10, size: 3KB, enabled: true)
+    SUBQUERY (uncorrelated)
+      SELECT (time: 564, fetch: 4341, fetch_time: 4, ioread: 0)
+        SCAN (dblink time: 312, fetch: 0, ioread: 0)
 ```
 
-**After 실행 계획**
+**After 실행 계획 및 실행 트레이스 통계**
 ```
-SELECT (time: 8ms, fetch: 8)
-  SCAN (table: local_small_t, readrows: 10, rows: 10)
-    SCAN (dblink time: 0ms)
+Query Plan:
+  NESTED LOOPS (cross join)
+    TABLE SCAN (l)
+    TABLE SCAN (r)
+
+Trace Statistics:
+  SELECT (time: 16, fetch: 24, fetch_time: 0, ioread: 2)
+    SCAN (table: cubrid.local_small_t), (heap time: 0, fetch: 4, ioread: 1, readrows: 10, rows: 10)
+      SCAN (dblink time: 0, fetch: 0, ioread: 0)
 ```
 hash temp / MEMOIZE / uncorrelated 구조 소멸. outer 10행 × 1회 execute, 매칭 1행씩 즉시 반환.
 
@@ -189,23 +192,36 @@ WHERE l.id = r.id;
 | dblink execute | 1회 | 10회 | |
 | 전송 행 수 | 100,000행 | 0행 | 0 |
 
-**Before 실행 계획**
+**Before 실행 계획 및 실행 트레이스 통계**
 ```
-SELECT (time: 476ms, fetch: 6452)
-  SCAN (table: local_nomatch_t, readrows: 10, rows: 10)
-    SCAN (hash temp(h), build time: 32ms, readrows: 100000, rows: 0)
-    MEMOIZE (hit: 0, miss: 10)
-  SUBQUERY (uncorrelated)
-    SELECT (time: 428ms)
-      SCAN (dblink time: 284ms)
+Query Plan:
+  TABLE SCAN (_dbl)
+  NESTED LOOPS (inner join)
+    TABLE SCAN (l)
+    TABLE SCAN (r)
+
+Trace Statistics:
+  SELECT (time: 464, fetch: 6468, fetch_time: 12, ioread: 2)
+    SCAN (table: cubrid.local_nomatch_t), (heap time: 0, fetch: 4, ioread: 1, readrows: 10, rows: 10)
+      SCAN (hash temp(h), build time: 32, time: 0, fetch: 0, ioread: 0, readrows: 100000, rows: 0)
+      MEMOIZE (time: 0, hit: 0, miss: 10, size: 1KB, enabled: true)
+    SUBQUERY (uncorrelated)
+      SELECT (time: 416, fetch: 4296, fetch_time: 12, ioread: 0)
+        SCAN (dblink time: 272, fetch: 0, ioread: 0)
 ```
 매칭 0건임에도 100,000행 전체 fetch. hash temp rows: 0.
 
-**After 실행 계획**
+**After 실행 계획 및 실행 트레이스 통계**
 ```
-SELECT (time: 8ms, fetch: 8)
-  SCAN (table: local_nomatch_t, readrows: 10, rows: 10)
-    SCAN (dblink time: 0ms)
+Query Plan:
+  NESTED LOOPS (cross join)
+    TABLE SCAN (l)
+    TABLE SCAN (r)
+
+Trace Statistics:
+  SELECT (time: 8, fetch: 24, fetch_time: 0, ioread: 2)
+    SCAN (table: cubrid.local_nomatch_t), (heap time: 0, fetch: 4, ioread: 1, readrows: 10, rows: 10)
+      SCAN (dblink time: 0, fetch: 0, ioread: 0)
 ```
 10회 execute, 각 0행 반환 → fetch 자체 없음.
 
@@ -227,29 +243,36 @@ WHERE l.id = r.id;
 | dblink execute | 1회 | 100회 | |
 | 전송 행 수 | 1,000행 | 10,000행 | 10배 증가 |
 
-**Before 실행 계획**
+**Before 실행 계획 및 실행 트레이스 통계**
 ```
-SELECT (time: 8ms, fetch: 8)
-  SCAN (table: local_hiselectivity_t, readrows: 100, rows: 100)
-    SCAN (hash temp(m), readrows: 2000, rows: 1000)
-    MEMOIZE (hit: 90, miss: 10)    ← id 10종류 → 10회 probe, 90회 캐시 히트
-  SUBQUERY (uncorrelated)
-    SELECT (time: 4ms)
-      SCAN (dblink time: 4ms)
+Query Plan:
+  TABLE SCAN (_dbl)
+  NESTED LOOPS (inner join)
+    TABLE SCAN (l)
+    TABLE SCAN (r)
+
+Trace Statistics:
+  SELECT (time: 16, fetch: 24, fetch_time: 0, ioread: 2)
+    SCAN (table: cubrid.local_hiselectivity_t), (heap time: 0, fetch: 4, ioread: 1, readrows: 100, rows: 100)
+      SCAN (hash temp(m), build time: 0, time: 0, fetch: 0, ioread: 0, readrows: 2000, rows: 1000)
+      MEMOIZE (time: 4, hit: 90, miss: 10, size: 243KB, enabled: true)
+    SUBQUERY (uncorrelated)
+      SELECT (time: 12, fetch: 0, fetch_time: 0, ioread: 0)
+        SCAN (dblink time: 4, fetch: 0, ioread: 0)
 ```
 MEMOIZE hit 90% — 동일 id 반복 outer에서 캐시 효과 극대화.
 
-**After 실행 계획**
+**After 실행 계획 및 실행 트레이스 통계**
 ```
 Query Plan:
   NESTED LOOPS (cross join)
     TABLE SCAN (l)
     TABLE SCAN (r)
-rewritten: SELECT * FROM (...) WHERE id = ?
 
-SELECT (time: 80ms, fetch: 8)
-  SCAN (table: local_hiselectivity_t, readrows: 100, rows: 100)
-    SCAN (dblink time: 0ms)
+Trace Statistics:
+  SELECT (time: 108, fetch: 24, fetch_time: 0, ioread: 2)
+    SCAN (table: cubrid.local_hiselectivity_t), (heap time: 0, fetch: 4, ioread: 1, readrows: 100, rows: 100)
+      SCAN (dblink time: 8, fetch: 0, ioread: 0)
 ```
 100회 execute × 100행 fetch = 10,000행 전송 (Before의 10배). MEMOIZE 효과 소멸.
 
@@ -271,30 +294,37 @@ WHERE l.id = r.id;
 | dblink execute | 1회 | 1,000회 | |
 | 전송 행 수 | 5행 | 5행 | 동일 |
 
-**Before 실행 계획**
+**Before 실행 계획 및 실행 트레이스 통계**
 ```
-SELECT (time: 8ms, fetch: 20)
-  SCAN (table: local_manyouter_t, readrows: 1000, rows: 1000)
-    SCAN (hash temp(m), readrows: 10, rows: 5)
-    MEMOIZE (hit: 0, miss: 1000)   ← outer 1000행 전부 distinct → 캐시 효과 없음
-  SUBQUERY (uncorrelated)
-    SELECT (time: 8ms)
-      SCAN (dblink time: 0ms)      ← remote 5행, 거의 무비용
+Query Plan:
+  TABLE SCAN (_dbl)
+  NESTED LOOPS (inner join)
+    TABLE SCAN (l)
+    TABLE SCAN (r)
+
+Trace Statistics:
+  SELECT (time: 8, fetch: 36, fetch_time: 0, ioread: 5)
+    SCAN (table: cubrid.local_manyouter_t), (heap time: 0, fetch: 16, ioread: 4, readrows: 1000, rows: 1000)
+      SCAN (hash temp(m), build time: 0, time: 0, fetch: 0, ioread: 0, readrows: 10, rows: 5)
+      MEMOIZE (time: 0, hit: 0, miss: 1000, size: 146KB, enabled: true)
+    SUBQUERY (uncorrelated)
+      SELECT (time: 8, fetch: 0, fetch_time: 0, ioread: 0)
+        SCAN (dblink time: 0, fetch: 0, ioread: 0)
 ```
 
-**After 실행 계획**
+**After 실행 계획 및 실행 트레이스 통계**
 ```
 Query Plan:
   NESTED LOOPS (cross join)
     TABLE SCAN (l)
     TABLE SCAN (r)
-rewritten: SELECT * FROM (...) WHERE id = ?
 
-SELECT (time: 492ms, fetch: 20)
-  SCAN (table: local_manyouter_t, readrows: 1000, rows: 1000)
-    SCAN (dblink time: 4ms)
+Trace Statistics:
+  SELECT (time: 328, fetch: 36, fetch_time: 4, ioread: 5)
+    SCAN (table: cubrid.local_manyouter_t), (heap time: 0, fetch: 16, ioread: 4, readrows: 1000, rows: 1000)
+      SCAN (dblink time: 8, fetch: 0, ioread: 0)
 ```
-1,000회 execute × ~0행. execute당 약 0.27ms — round-trip이 지배.
+1,000회 execute × ~0행. execute당 약 0.33ms — round-trip이 지배.
 
 ---
 
@@ -314,30 +344,37 @@ WHERE l.id = r.id;
 | dblink execute | 1회 | 10회 | |
 | 전송 행 수 | 100,000행 | 100,000행 | 동일 |
 
-**Before 실행 계획**
+**Before 실행 계획 및 실행 트레이스 통계**
 ```
-SELECT (time: 12ms, fetch: 48)
-  SCAN (table: local_breakeven_t, readrows: 10, rows: 10)
-    SCAN (hash temp(m), readrows: 2000, rows: 1000)
-    MEMOIZE (hit: 0, miss: 10)
-  SUBQUERY (uncorrelated)
-    SELECT (time: 8ms)
-      SCAN (dblink time: 4ms)
+Query Plan:
+  TABLE SCAN (_dbl)
+  NESTED LOOPS (inner join)
+    TABLE SCAN (l)
+    TABLE SCAN (r)
+
+Trace Statistics:
+  SELECT (time: 256, fetch: 1752, fetch_time: 0, ioread: 2)
+    SCAN (table: cubrid.local_breakeven_t), (heap time: 0, fetch: 4, ioread: 1, readrows: 10, rows: 10)
+      SCAN (hash temp(m), build time: 40, time: 16, fetch: 0, ioread: 0, readrows: 200000, rows: 100000)
+      MEMOIZE (time: 12, hit: 0, miss: 1, size: 2048KB, enabled: false)
+    SUBQUERY (uncorrelated)
+      SELECT (time: 180, fetch: 1152, fetch_time: 0, ioread: 0)
+        SCAN (dblink time: 100, fetch: 0, ioread: 0)
 ```
 
-**After 실행 계획**
+**After 실행 계획 및 실행 트레이스 통계**
 ```
 Query Plan:
   NESTED LOOPS (cross join)
     TABLE SCAN (l)
     TABLE SCAN (r)
-rewritten: SELECT * FROM (...) WHERE id = ?
 
-SELECT (time: 492ms, fetch: 8)
-  SCAN (table: local_breakeven_t, readrows: 10, rows: 10)
-    SCAN (dblink time: 76ms)
+Trace Statistics:
+  SELECT (time: 532, fetch: 24, fetch_time: 4, ioread: 2)
+    SCAN (table: cubrid.local_breakeven_t), (heap time: 0, fetch: 4, ioread: 1, readrows: 10, rows: 10)
+      SCAN (dblink time: 76, fetch: 0, ioread: 0)
 ```
-10회 execute × 10,000행 fetch = 100,000행 (Before와 동일). execute당 약 48ms.
+10회 execute × 10,000행 fetch = 100,000행 (Before와 동일). execute당 약 53ms.
 같은 데이터를 10번에 나눠 전송하는 비용이 2.1x 오버헤드로 나타남.
 
 ---
