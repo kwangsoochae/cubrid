@@ -1,7 +1,7 @@
 -- debug.sql: 개발 중 즉석 확인용 쿼리 모음. 커밋 불필요.
 -- 사용법:
---   csql -S -u dba <로컬DB명> -i debug.sql
---   csql -S -u dba <로컬DB명> -c "SET SYSTEM PARAMETERS 'xasl_debug_dump=on'; SELECT ..."
+--   csql -S -u cubrid -p cubrid <로컬DB명> -i debug.sql
+--   csql -S -u cubrid -p cubrid <로컬DB명> -c "SET SYSTEM PARAMETERS 'xasl_debug_dump=on'; SELECT ..."
 --   ./run_tc.sh --xasl TC-101.sql   ← xasl_debug_dump 자동 래핑
 
 -- ============================================================

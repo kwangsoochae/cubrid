@@ -11,24 +11,30 @@
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOCAL_DB="${CUBRID_DBLINK_LOCAL_DB:-testdb}"
-CSQL_OPTS="${CSQL_OPTS:--u dba}"
+CSQL_OPTS="${CSQL_OPTS:--u cubrid -p cubrid}"
 NO_COMPARE=0
 GEN_EXPECTED=0
 XASL_DUMP=0
 
 ARGS=()
 for a in "$@"; do
-  if [ "$a" = "--no-compare" ]; then
-    NO_COMPARE=1
-  elif [ "$a" = "--gen-expected" ]; then
-    GEN_EXPECTED=1
-    NO_COMPARE=1
-  elif [ "$a" = "--xasl" ]; then
-    XASL_DUMP=1
-  else
-    ARGS+=("$a")
-  fi
+  case "$a" in
+    --no-compare)   NO_COMPARE=1 ;;
+    --gen-expected) GEN_EXPECTED=1; NO_COMPARE=1 ;;
+    --xasl)         XASL_DUMP=1 ;;
+    --*)
+      echo "알 수 없는 옵션: $a" >&2
+      echo "사용법: $0 [--no-compare|--gen-expected|--xasl] all | TC-101 [TC-102 ...]" >&2
+      exit 1
+      ;;
+    *)  ARGS+=("$a") ;;
+  esac
 done
+
+# csql 출력에서 ERROR 줄만 추출 (오류 기대 TC용)
+extract_errors() {
+  grep "^ERROR:"
+}
 
 # csql 출력에서 SELECT Result 블록만 추출·정규화 (시간 정보 제거)
 extract_result() {
@@ -81,15 +87,21 @@ run_one() {
   fi
 
   echo "=== $tc ==="
-  out=$(csql -S $CSQL_OPTS "$LOCAL_DB" -i "$run_sqlf" 2>&1)
+  if [ $NO_COMPARE -eq 1 ] && [ $GEN_EXPECTED -eq 0 ]; then
+    echo "--- SQL ---"
+    cat "$sqlf"
+    echo "--- 출력 ---"
+  fi
+  out=$(csql $CSQL_OPTS "$LOCAL_DB" -i "$run_sqlf" 2>&1)
   echo "$out"
 
   [ -n "$tmpf" ] && rm -f "$tmpf"
 
   if [ $GEN_EXPECTED -eq 1 ]; then
     result=$(echo "$out" | extract_result)
+    [ -z "$result" ] && result=$(echo "$out" | extract_errors)
     if [ -z "$result" ]; then
-      echo "[WARN] $tc — Result 블록을 추출하지 못함, expected 파일 생성 생략"
+      echo "[WARN] $tc — Result/ERROR 블록을 추출하지 못함, expected 파일 생성 생략"
     else
       printf '%s\n' "$result" > "$expf"
       echo "[GEN] $tc.expected 생성 완료"
@@ -110,8 +122,9 @@ run_one() {
   fi
 
   result=$(echo "$out" | extract_result)
+  [ -z "$result" ] && result=$(echo "$out" | extract_errors)
   if [ -z "$result" ]; then
-    echo "[FAIL] $tc — Result 블록을 추출하지 못함"
+    echo "[FAIL] $tc — Result/ERROR 블록을 추출하지 못함"
     echo ""
     return 1
   fi
@@ -136,7 +149,7 @@ if [ ${#ARGS[@]} -eq 0 ]; then
 fi
 
 if [ "${ARGS[0]}" = "all" ]; then
-  for tc in TC-101.sql TC-102.sql TC-103.sql TC-104.sql; do
+  for tc in $(ls "$SCRIPT_DIR"/TC-*.sql 2>/dev/null | xargs -n1 basename | sort); do
     if run_one "$tc"; then
       RESULT_LINES+=("  $tc: PASS")
     else

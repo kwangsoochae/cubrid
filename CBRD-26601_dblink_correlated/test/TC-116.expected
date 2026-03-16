@@ -2,8 +2,8 @@
 =========================================================
             1  'local_1'             'remote_a1'         
             2  'local_2'             'remote_b1'         
-            3  'local_3'             'remote_c1'         
+            3  'local_3'             NULL                
             4  'local_4'             NULL                
-            5  'local_5'             'remote_e1'         
+            5  'local_5'             NULL                
 
 5 rows selected.

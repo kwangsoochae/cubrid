@@ -1,6 +1,6 @@
 -- setup_large_remote.sql
 -- 원격 DB에서 실행. T6-6 대용량 테스트용 remote_t 재구성 (100,000행).
--- 사용법: csql -S -u dba <원격DB명> -i setup_large_remote.sql
+-- 사용법: csql -S -u cubrid -p cubrid <원격DB명> -i setup_large_remote.sql
 -- 주의: 소량 테스트(setup_remote.sql)와 동일 테이블 사용 — 덮어씀.
 --       소량 테스트로 복원 시 setup_remote.sql 재실행.
 -- 구성:
@@ -9,7 +9,7 @@
 --     AS-IS: 100,000행 전체 전송
 --     TO-BE: id당 100행 × 100회 execute = 10,000행 전송 (1/10 절감)
 
-call login('dba', '') on CLASS db_user;
+call login('cubrid', 'cubrid') on CLASS db_user;
 
 DROP TABLE IF EXISTS remote_t;
 CREATE TABLE remote_t (

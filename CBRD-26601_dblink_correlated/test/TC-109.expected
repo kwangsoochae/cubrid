@@ -1,0 +1,7 @@
+           id  name                  remote_name         
+=========================================================
+            2  'local_2'             'remote_b1'         
+            2  'local_2b'            'remote_b1'         
+            2  'local_2c'            'remote_b1'         
+
+3 rows selected.

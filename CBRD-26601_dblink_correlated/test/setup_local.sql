@@ -1,9 +1,9 @@
 -- setup_local.sql
 -- 로컬 DB에서 실행. correlated 스칼라 서브쿼리 테스트용 local_t 생성/데이터.
--- 사용법: csql -S -u dba <로컬DB명> -i setup_local.sql
+-- 사용법: csql -S -u cubrid -p cubrid <로컬DB명> -i setup_local.sql
 -- 전제: cubrid_conn 서버 오브젝트는 이 파일 마지막에서 생성 (원격 DB 선행 구동 필요).
 
-call login('dba', '') on CLASS db_user;
+call login('cubrid', 'cubrid') on CLASS db_user;
 
 DROP TABLE IF EXISTS local_t;
 CREATE TABLE local_t (
@@ -26,4 +26,4 @@ INSERT INTO local_t VALUES (5, 'local_5');
 COMMIT;
 
 drop server if exists cubrid_conn;
-create server cubrid_conn (HOST='localhost', PORT=33000, DBNAME='testdb4dblink_remote', USER='dba', PASSWORD='');
+create server cubrid_conn (HOST='localhost', PORT=33000, DBNAME='testdb_remote', USER='cubrid', PASSWORD='cubrid');

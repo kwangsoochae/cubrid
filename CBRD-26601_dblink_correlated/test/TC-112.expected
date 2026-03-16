@@ -1,6 +1,6 @@
            id  name                  remote_name         
 =========================================================
-         NULL  'local_n'             NULL                
-            1  'local_1'             'remote_a1'         
+           -1  'local_neg1'          NULL                
+            0  'local_0'             NULL                
 
 2 rows selected.
