@@ -150,7 +150,7 @@ pt_to_dblink_table_spec_list()
 
 #### corr_key_regu 생성 방식
 
-`access_pred`에서 `a.id` 쪽 regu를 만드는 기존 `pt_to_pred_expr` 경로와 동일하게 `TYPE_CONSTANT` regu를 생성한다.
+`access_pred`에서 `l.id` 쪽 regu를 만드는 기존 `pt_to_pred_expr` 경로와 동일하게 `TYPE_CONSTANT` regu를 생성한다.
 단, pred 빌드 전 `parser->symbols->current_class = NULL` 설정이 필요 — `pt_to_subquery_table_spec_list`에서 이미 설정하는 패턴 참고.
 
 ---
@@ -312,7 +312,7 @@ flowchart TB
   outer 스캔 준비: scan_open_scan(local_t)
 
 [outer 행마다 반복]
-  local_t 행 읽기 → val_list: [a.id=INTEGER, a.name=VARCHAR]
+  local_t 행 읽기 → val_list: [l.id=INTEGER, l.name=VARCHAR]
 
   [outptr 평가]
   fetch_peek_dbval(TYPE_CONSTANT[xasl:0x40269c00])
@@ -320,9 +320,9 @@ flowchart TB
          └─ IS_XASL_INITIAL_STATUS(0x40269c00) = true (매번 clear됨)
          └─ qexec_execute_mainblock(0x40269c00)
               ├─ aptr 루프: DBLink(0x40249d60) 처리
-              │    ├─ [첫 행] INITIAL → dblink_open_scan(cci_prepare만) 후 dblink_execute_corr(a.id=1)
+              │    ├─ [첫 행] INITIAL → dblink_open_scan(cci_prepare만) 후 dblink_execute_corr(l.id=1)
               │    │         → cci_bind_param(1=1) + cci_execute → fetch → list
-              │    └─ [2번째+] SUCCESS → list 파괴 → dblink_execute_corr(a.id=2)
+              │    └─ [2번째+] SUCCESS → list 파괴 → dblink_execute_corr(l.id=2)
               │              → cci_bind_param(1=2) + cci_execute → fetch → list
               └─ list access: 0x40249d60->list_id 스캔
                    ├─ access_pred: (push-down 조건 제거됨, 나머지만)

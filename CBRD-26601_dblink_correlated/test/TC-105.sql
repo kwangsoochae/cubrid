@@ -9,10 +9,10 @@
 --   - TO-BE: id당 100행 × 100회 execute = 10,000행 전송 (1/10 수준)
 --   - ./run_tc.sh --no-compare TC-105 로 실행 시간/전송량을 관찰용으로 사용 (expected 비교 없음)
 
-SELECT a.id, a.name,
+SELECT l.id, l.name,
   (SELECT r.name FROM remote_t@cubrid_conn r
-   WHERE r.id = a.id
+   WHERE r.id = l.id
    ORDER BY r.name LIMIT 1) AS remote_name
-FROM local_t a
-ORDER BY a.id;
+FROM local_t l
+ORDER BY l.id;
 

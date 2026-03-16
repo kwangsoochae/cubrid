@@ -6,11 +6,11 @@
 INSERT INTO local_t VALUES (NULL, 'local_n');
 COMMIT;
 
-SELECT a.id, a.name,
-  (SELECT r.name FROM remote_t@cubrid_conn r WHERE r.id = a.id ORDER BY r.name LIMIT 1) AS remote_name
-FROM local_t a
-WHERE a.id IS NULL OR a.id = 1
-ORDER BY a.id;
+SELECT l.id, l.name,
+  (SELECT r.name FROM remote_t@cubrid_conn r WHERE r.id = l.id ORDER BY r.name LIMIT 1) AS remote_name
+FROM local_t l
+WHERE l.id IS NULL OR l.id = 1
+ORDER BY l.id;
 
 DELETE FROM local_t WHERE id IS NULL AND name = 'local_n';
 COMMIT;

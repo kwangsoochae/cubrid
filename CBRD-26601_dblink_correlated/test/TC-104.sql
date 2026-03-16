@@ -4,9 +4,9 @@
 -- 기존 방식(1회 전체 fetch 후 로컬 필터) 유지 확인. 에러 없음.
 -- 기대: 5행. 모든 로컬 행에서 r.id=1 매칭 결과 'remote_a1' 반환.
 
-SELECT a.id, a.name,
+SELECT l.id, l.name,
   (SELECT r.name FROM remote_t@cubrid_conn r
    WHERE r.id = 1
    ORDER BY r.name LIMIT 1) AS remote_name
-FROM local_t a
-ORDER BY a.id;
+FROM local_t l
+ORDER BY l.id;

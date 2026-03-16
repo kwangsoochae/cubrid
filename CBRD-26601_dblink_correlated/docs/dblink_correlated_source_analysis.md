@@ -2,7 +2,7 @@
 
 | 항목 | 내용 |
 |------|------|
-| 대상 | `SELECT (SELECT col FROM remote_t@conn WHERE remote_t.id = a.id LIMIT 1) FROM local_t a` 형태의 **correlated 스칼라 서브쿼리** |
+| 대상 | `SELECT (SELECT col FROM remote_t@conn WHERE remote_t.id = l.id LIMIT 1) FROM local_t l` 형태의 **correlated 스칼라 서브쿼리** |
 | 목적 | 서브쿼리 내 dblink에서 **correlation(outer ref)** 이 어떻게 처리되는지 코드 경로 정리 |
 
 ---
@@ -27,14 +27,14 @@
 - **패턴**: 외부 쿼리의 행마다, 원격 테이블에서 "현재 outer 행과 맞는" 값 하나를 스칼라로 가져오는 형태.
 - **현재 동작 (AS-IS)**:
   1. 원격에서 `SELECT name, id FROM remote_t` **1회** 전체 실행 → 결과 전체를 로컬 리스트에 저장.
-  2. outer 각 행마다, 해당 리스트를 다시 스캔하면서 **로컬에서** `remote_t.id = a.id` 및 `inst_num() <= 1` 필터 적용.
+  2. outer 각 행마다, 해당 리스트를 다시 스캔하면서 **로컬에서** `remote_t.id = l.id` 및 `inst_num() <= 1` 필터 적용.
 - **한계**: 원격 테이블이 크면 **1회 전체 전송** 후 대부분 버리므로, 전송량·로컬 연산 모두 낭비.
 
 ---
 
 ## 2. 전체 처리 흐름 (SQL → 결과)
 
-아래는 `SELECT (SELECT col FROM remote_t@conn WHERE remote_t.id = a.id LIMIT 1) FROM local_t a` 형태의 쿼리가 결과를 반환하기까지 거치는 **전체 단계**를 코드 기준으로 정리한 것이다.
+아래는 `SELECT (SELECT col FROM remote_t@conn WHERE remote_t.id = l.id LIMIT 1) FROM local_t l` 형태의 쿼리가 결과를 반환하기까지 거치는 **전체 단계**를 코드 기준으로 정리한 것이다.
 
 ```
 SQL 문자열
@@ -135,7 +135,7 @@ pt_semantic_type()                     ← 상수 폴딩 재적용
 - `pt_check_pushable_term()` (`view_transform.c`) 이 pushability를 판단:
   - **correlated(outer 참조 포함)** 조건 → **차단** (correlated_with_dblink 감지).
   - `PT_INST_NUM`, `PT_ROWNUM` 등 → **차단** (`pt_find_only_name_id()` 내 명시적 차단).
-- 결과: 우리 패턴에서는 `WHERE remote_t.id = a.id` 가 outer 참조이므로 push-down 실패 → 로컬 predicate로 남음.
+- 결과: 우리 패턴에서는 `WHERE remote_t.id = l.id` 가 outer 참조이므로 push-down 실패 → 로컬 predicate로 남음.
 
 #### correlation_level 할당
 
@@ -231,7 +231,7 @@ spec->info.spec.derived_table_type 분기:
 ```
 [buildlist_proc] outer (0x4026a110)   flag: XASL_TOP_MOST_XASL
   ├─ access spec: class, sequential  ← local_t 스캔
-  ├─ val_list: [a.id: INTEGER, a.name: VARCHAR]
+  ├─ val_list: [l.id: INTEGER, l.name: VARCHAR]
   └─ outptr: id, name, [xasl:0x40269c00][TYPE_CONSTANT]  ← 스칼라 서브쿼리 regu
 
 [buildlist_proc] 서브쿼리 래퍼 (0x40269c00)  flag: XASL_LINK_TO_REGU_VARIABLE
@@ -242,7 +242,7 @@ spec->info.spec.derived_table_type 분기:
 
 [buildlist_proc] dblink (0x40249d60)
   ├─ access spec: dblink, sequential
-  ├─ access pred: [_dbl.id: INTEGER] = [a.id: TYPE_CONSTANT]  ← 로컬 필터
+  ├─ access pred: [_dbl.id: INTEGER] = [l.id: TYPE_CONSTANT]  ← 로컬 필터
   └─ val_list: [name: VARCHAR, id: INTEGER]
 ```
 
@@ -252,7 +252,7 @@ spec->info.spec.derived_table_type 분기:
   - dptr 루프(`query_executor.c`)는 이 플래그가 있으면 skip.
   - 대신 outptr 평가 시 `TYPE_CONSTANT` regu_var 에서 `EXECUTE_REGU_VARIABLE_XASL` 로 실행.
 - `0x40249d60` (DBLink)은 `0x40269c00` 의 **aptr_list** 에 연결 → **전체 실행에서 1회만 실행**.
-- `access pred` 의 `a.id` 는 outer val_list 의 `TYPE_CONSTANT` (regu가 outer val_list slot을 참조) → **원격 SQL에 포함되지 않음**, 리스트 행 읽을 때 로컬에서만 평가.
+- `access pred` 의 `l.id` 는 outer val_list 의 `TYPE_CONSTANT` (regu가 outer val_list slot을 참조) → **원격 SQL에 포함되지 않음**, 리스트 행 읽을 때 로컬에서만 평가.
 
 `query_alias` 확인:
 
@@ -294,7 +294,7 @@ spec->info.spec.derived_table_type 분기:
 
 - **필드**: `PT_NODE.info.query.correlation_level`
   - 0: uncorrelated
-  - 1: 직계 부모 참조 (우리 패턴: `a.id` 참조)
+  - 1: 직계 부모 참조 (우리 패턴: `l.id` 참조)
   - N > 1: N단계 위 참조
 - **규칙**:
   - `correlation_level == 1` → **dptr_list** (부모 XASL 재실행 시 매번 재실행 대상)
@@ -313,7 +313,7 @@ spec->info.spec.derived_table_type 분기:
 | `pt_to_uncorr_subquery_list()` | `pt_uncorr_pre/post` walk로 level>1 XASL 수집 |
 
 - **우리 패턴에서의 배치**:
-  - 스칼라 서브쿼리 `(SELECT r.name … WHERE r.id = a.id LIMIT 1)` → **level 1** → outer XASL의 `dptr_list` (0x40269c00)
+  - 스칼라 서브쿼리 `(SELECT r.name … WHERE r.id = l.id LIMIT 1)` → **level 1** → outer XASL의 `dptr_list` (0x40269c00)
   - 내부 DBLink 쿼리 `SELECT name, id FROM remote_t` → outer를 참조하지 않으므로 0x40269c00 기준 **level 0** → `pt_set_aptr` 경로 → 0x40269c00의 `aptr_list` (0x40249d60)
 
 ---
@@ -344,7 +344,7 @@ spec->info.spec.derived_table_type 분기:
   3. `pt_to_position_regu_variable_list(...)` → **`TYPE_POSITION`** regu 생성 (리스트 파일 내 컬럼 위치 기반).
   4. `parser->symbols->current_class = NULL` 후 `pt_to_pred_expr(parser, where_part)` → where를 PRED_EXPR로 변환. 이 시점 `current_class = NULL` → **`TYPE_CONSTANT`** (val_list 슬롯) 기반 regu 생성.
   5. `pt_make_list_access_spec(subquery_proc, ACCESS_METHOD_SEQUENTIAL, NULL, where, ...)` → **list sequential access spec** 생성.
-- **핵심**: `where_part` (`_dbl.id = a.id`) 는 **리스트 행을 읽은 뒤** 평가되는 **로컬 predicate**. 원격 SQL과 무관.
+- **핵심**: `where_part` (`_dbl.id = l.id`) 는 **리스트 행을 읽은 뒤** 평가되는 **로컬 predicate**. 원격 SQL과 무관.
 
 ### 5.3 pt_to_dblink_table_spec_list (직접 dblink 경로)
 
@@ -464,7 +464,7 @@ flowchart TB
     └─ 스캔 준비: scan_open_scan(local_t)
 
 [outer 행마다 반복]
-  local_t 행 읽기 → val_list: [a.id=INTEGER, a.name=VARCHAR]
+  local_t 행 읽기 → val_list: [l.id=INTEGER, l.name=VARCHAR]
 
   [outptr 평가]
   fetch_peek_dbval(TYPE_CONSTANT[xasl:0x40269c00])
@@ -477,7 +477,7 @@ flowchart TB
               │         │               → dblink_open_scan: connect+prepare+execute → list
               │         └─ [2번째+] NO  → SKIP (list 재사용, 재실행 없음)
               └─ list access: 0x40249d60->list_id 스캔
-                   ├─ access_pred: _dbl.id = a.id  (로컬 필터)
+                   ├─ access_pred: _dbl.id = l.id  (로컬 필터)
                    ├─ instnum: inst_num() <= 1
                    └─ → single_tuple → regu_var->value.dbvalptr
 
@@ -586,7 +586,7 @@ case PT_FUNCTION:
 | 항목                                       | Push-Down | 차단 경로                                                |
 | ------------------------------------------ | --------- | -------------------------------------------------------- |
 | `WHERE` 상수 조건 (`id=1`)                 | **가능**  | `pt_copypush_terms` → conn_sql `WHERE` 추가              |
-| `WHERE` correlated 조건 (`id=a.id`)        | 불가      | `is_correlated_with_dblink = true`                       |
+| `WHERE` correlated 조건 (`id=l.id`)        | 불가      | `is_correlated_with_dblink = true`                       |
 | `COUNT`, `MIN`, `MAX` 등 집계              | 불가      | SELECT 절 → push-down 경로 진입 없음 + 행 스캔 모델 한계 |
 | `LIMIT n`                                  | 불가      | 파서에서 `inst_num()` 변환 → `PT_INST_NUM` 차단          |
 | `rownum`, `orderby_num()`, `groupby_num()` | 불가      | `pt_find_only_name_id` 명시적 차단                       |
@@ -616,7 +616,7 @@ case PT_FUNCTION:
 | XASL 노드       | buildvalue_proc (집계용)                 | buildlist_proc (단순 fetch)                   |
 | DBLink val_list | 2 슬롯 (name, id)                        | 1 슬롯 (cnt BIGINT)                           |
 
-correlated 집계의 경우 outer 참조(`a.id`)를 정적 conn_sql 문자열에 포함할 수 없으므로 우회 방법이 없다.
+correlated 집계의 경우 outer 참조(`l.id`)를 정적 conn_sql 문자열에 포함할 수 없으므로 우회 방법이 없다.
 → **CBRD-26601**의 correlated push-down 구현이 유일한 해결책이다.
 
 ---

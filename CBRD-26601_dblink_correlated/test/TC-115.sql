@@ -10,8 +10,8 @@
 --   id=4 → first_name=NULL,        remote_cnt=0
 --   id=5 → first_name='remote_e1', remote_cnt=3
 
-SELECT a.id, a.name,
-  (SELECT r.name FROM remote_t@cubrid_conn r WHERE r.id = a.id ORDER BY r.name LIMIT 1) AS first_name,
-  (SELECT COUNT(*) FROM remote_t@cubrid_conn r WHERE r.id = a.id) AS remote_cnt
-FROM local_t a
-ORDER BY a.id;
+SELECT l.id, l.name,
+  (SELECT r.name FROM remote_t@cubrid_conn r WHERE r.id = l.id ORDER BY r.name LIMIT 1) AS first_name,
+  (SELECT COUNT(*) FROM remote_t@cubrid_conn r WHERE r.id = l.id) AS remote_cnt
+FROM local_t l
+ORDER BY l.id;

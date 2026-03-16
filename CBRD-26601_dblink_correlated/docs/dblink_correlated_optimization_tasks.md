@@ -62,25 +62,25 @@
   ```sql
   -- push-down OFF 설정 후 correlated 쿼리 실행
   SET SYSTEM PARAMETERS 'use_dblink_corr_pushdown=no';
-  SELECT a.id, (SELECT r.name FROM remote_t@cubrid_conn r WHERE r.id = a.id LIMIT 1)
-  FROM local_t a;
+  SELECT l.id, (SELECT r.name FROM remote_t@cubrid_conn r WHERE r.id = l.id LIMIT 1)
+  FROM local_t l;
   -- gdb: 탐지 함수 진입 전 스킵 확인, conn_sql에 WHERE 없음 확인
   SET SYSTEM PARAMETERS 'use_dblink_corr_pushdown=yes';
   ```
 
 - **T1-1 탐지 성공**:
   ```sql
-  SELECT a.id, (SELECT r.name FROM remote_t@conn r WHERE r.id = a.id LIMIT 1)
-  FROM local_t a
+  SELECT l.id, (SELECT r.name FROM remote_t@conn r WHERE r.id = l.id LIMIT 1)
+  FROM local_t l
   ```
-  - gdb: 탐지 함수에서 `remote.id = a.id` → 탐지 성공, `corr_key` 기록 확인
+  - gdb: 탐지 함수에서 `remote.id = l.id` → 탐지 성공, `corr_key` 기록 확인
 
 - **T1-1 탐지 실패 (기존 방식 유지)**:
   ```sql
   -- 앱 ? 혼합
-  WHERE r.id = a.id AND r.val = ?
+  WHERE r.id = l.id AND r.val = ?
   -- OR 조건
-  WHERE r.id = a.id OR r.code = a.code
+  WHERE r.id = l.id OR r.code = l.code
   -- correlated 아님
   WHERE r.id = 1
   ```
@@ -100,7 +100,7 @@
 - **T2-1**: gdb `pt_to_dblink_table_spec_list` 리턴 후
   - `dblink_node->corr_key_count > 0` 확인
   - `dblink_node->conn_sql`에 `WHERE id = ?` 포함 확인
-  - `corr_key_regu_list[0]`이 outer val_list의 `a.id` 슬롯을 참조하는지 확인
+  - `corr_key_regu_list[0]`이 outer val_list의 `l.id` 슬롯을 참조하는지 확인
 - **push-down 불가**: PT_HOST_VAR 포함 시 `corr_key_count == 0` 유지 확인
 
 ---
@@ -124,16 +124,16 @@
 
 - **T3-2 — rebind + execute**:
   - gdb: 2번째 outer 행 평가 시 `cci_bind_param` → `cci_execute` 순서 호출 확인
-  - gdb: `corr_key_regu_list[0]`에서 읽은 값이 현재 outer 행의 `a.id`와 일치하는지 확인
+  - gdb: `corr_key_regu_list[0]`에서 읽은 값이 현재 outer 행의 `l.id`와 일치하는지 확인
 
 - **T3-2 에러 전파 (NFR-2)**:
   - 원격 DB 연결 끊긴 상태에서 re-execute → `ER_DBLINK` 에러 상위 전파 확인
 
 - **T3-3 NULL**:
   ```sql
-  -- a.id가 NULL인 행 포함 데이터
-  SELECT a.id, (SELECT r.name FROM remote_t@conn r WHERE r.id = a.id LIMIT 1)
-  FROM local_t a WHERE a.id IS NULL;
+  -- l.id가 NULL인 행 포함 데이터
+  SELECT l.id, (SELECT r.name FROM remote_t@conn r WHERE r.id = l.id LIMIT 1)
+  FROM local_t l WHERE l.id IS NULL;
   ```
   - NULL 반환 확인, 에러 없음 확인
 
@@ -147,7 +147,7 @@
 
 ### Step 4 점검
 
-- **T4-1**: XASL 덤프에서 `access pred` 항목에 `_dbl.id = a.id` 조건이 없는지 확인
+- **T4-1**: XASL 덤프에서 `access pred` 항목에 `_dbl.id = l.id` 조건이 없는지 확인
 - **T4-1 전제**: T0-1(C-1) 확인 결과에 따라 구현 방식 확정
 - push-down 불가 케이스에서 `access_pred` 기존 유지 확인 (제거 범위 최소화)
 
@@ -181,29 +181,29 @@
 
 ```sql
 -- [T6-1] 기본 케이스: 결과 동등성
-SELECT a.id, a.name,
-  (SELECT r.name FROM remote_t@cubrid_conn r WHERE r.id = a.id LIMIT 1) AS remote_name
-FROM local_t a;
+SELECT l.id, l.name,
+  (SELECT r.name FROM remote_t@cubrid_conn r WHERE r.id = l.id LIMIT 1) AS remote_name
+FROM local_t l;
 
 -- [T6-2] 매칭 없음: NULL 반환
-SELECT a.id,
-  (SELECT r.name FROM remote_t@cubrid_conn r WHERE r.id = a.id LIMIT 1)
-FROM local_t a WHERE a.id = 99999;
+SELECT l.id,
+  (SELECT r.name FROM remote_t@cubrid_conn r WHERE r.id = l.id LIMIT 1)
+FROM local_t l WHERE l.id = 99999;
 
 -- [T6-3] 앱 ? 혼합: 기존 방식 유지
-SELECT a.id,
-  (SELECT r.name FROM remote_t@cubrid_conn r WHERE r.id = a.id AND r.id > ? LIMIT 1)
-FROM local_t a;
+SELECT l.id,
+  (SELECT r.name FROM remote_t@cubrid_conn r WHERE r.id = l.id AND r.id > ? LIMIT 1)
+FROM local_t l;
 
 -- [T6-4] correlated 아닌 DBLink: 기존 방식 유지
-SELECT a.id,
+SELECT l.id,
   (SELECT r.name FROM remote_t@cubrid_conn r WHERE r.id = 1 LIMIT 1)
-FROM local_t a;
+FROM local_t l;
 
 -- [T6-5] NULL 키
-SELECT a.id,
-  (SELECT r.name FROM remote_t@cubrid_conn r WHERE r.id = a.id LIMIT 1)
-FROM local_t a WHERE a.id IS NULL;
+SELECT l.id,
+  (SELECT r.name FROM remote_t@cubrid_conn r WHERE r.id = l.id LIMIT 1)
+FROM local_t l WHERE l.id IS NULL;
 ```
 
 ---

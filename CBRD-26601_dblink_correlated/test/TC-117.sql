@@ -13,16 +13,16 @@ SET SYSTEM PARAMETERS 'use_dblink_corr_pushdown=no';
 
 -- 2. correlated 서브쿼리 실행 (TC-101과 동일 쿼리)
 -- 기대: push-down 미적용 (AS-IS: 1회 전체 fetch + 로컬 필터), 결과는 TC-101과 동일.
-SELECT a.id, a.name,
-  (SELECT r.name FROM remote_t@cubrid_conn r WHERE r.id = a.id ORDER BY r.name LIMIT 1) AS remote_name
-FROM local_t a
-ORDER BY a.id;
+SELECT l.id, l.name,
+  (SELECT r.name FROM remote_t@cubrid_conn r WHERE r.id = l.id ORDER BY r.name LIMIT 1) AS remote_name
+FROM local_t l
+ORDER BY l.id;
 
 -- 3. push-down 다시 ON (복원)
 SET SYSTEM PARAMETERS 'use_dblink_corr_pushdown=yes';
 
 -- 4. 동일 쿼리 재실행 — push-down 재적용 확인 (결과 동일, 실행 경로 복원)
-SELECT a.id, a.name,
-  (SELECT r.name FROM remote_t@cubrid_conn r WHERE r.id = a.id ORDER BY r.name LIMIT 1) AS remote_name
-FROM local_t a
-ORDER BY a.id;
+SELECT l.id, l.name,
+  (SELECT r.name FROM remote_t@cubrid_conn r WHERE r.id = l.id ORDER BY r.name LIMIT 1) AS remote_name
+FROM local_t l
+ORDER BY l.id;

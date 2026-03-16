@@ -8,12 +8,12 @@
 --   - id=4는 매칭 없음 → 해당 outer 행은 결과에 등장하지 않음.
 --   - push-down 최적화 1차(SELECT 절 전용)에서는 이 쿼리는 AS-IS 동작 유지.
 
-SELECT a.id, a.name, x.remote_name
-FROM local_t a,
+SELECT l.id, l.name, x.remote_name
+FROM local_t l,
      (SELECT r.id, r.name AS remote_name
       FROM remote_t@cubrid_conn r
-      WHERE r.id = a.id
+      WHERE r.id = l.id
       ORDER BY r.name
       LIMIT 1) AS x
-ORDER BY a.id, x.remote_name;
+ORDER BY l.id, x.remote_name;
 

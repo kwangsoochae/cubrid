@@ -9,11 +9,11 @@ INSERT INTO local_t VALUES (0, 'local_0');
 INSERT INTO local_t VALUES (-1, 'local_neg1');
 COMMIT;
 
-SELECT a.id, a.name,
-  (SELECT r.name FROM remote_t@cubrid_conn r WHERE r.id = a.id ORDER BY r.name LIMIT 1) AS remote_name
-FROM local_t a
-WHERE a.id <= 0
-ORDER BY a.id;
+SELECT l.id, l.name,
+  (SELECT r.name FROM remote_t@cubrid_conn r WHERE r.id = l.id ORDER BY r.name LIMIT 1) AS remote_name
+FROM local_t l
+WHERE l.id <= 0
+ORDER BY l.id;
 
 DELETE FROM local_t WHERE id IN (0, -1);
 COMMIT;

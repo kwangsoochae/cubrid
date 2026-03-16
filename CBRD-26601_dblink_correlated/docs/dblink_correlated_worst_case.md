@@ -98,26 +98,28 @@ CBRD-26553(`dblink_join_improve` 브랜치)의 POC 결과를 참고하여 CBRD-2
 
 ---
 
-## 7. Worst Case의 빈도 — 일반화 (AI 추론임)
+## 7. Worst Case 발생 가능성 — 일반화 추론
 
-TO-BE가 유리한 경우(POC-A, B)는 **"remote가 크고, outer가 적고, 매칭이 드문"** 특수한 상황이다.
-반대로 아래 조건은 실무에서 더 일반적이며, AS-IS가 유리한 worst case에 해당한다.
+Worst case 발생 여부는 **데이터 분포와 outer 필터 조건**에 따라 달라진다.
 
-**POC-D 패턴 (outer 많음, remote 작음):**
-- remote가 코드 테이블·참조 테이블인 경우 — 실무에서 매우 흔함.
-- 예: local_t = 수백만 건 주문, remote_t = 국가코드(200행), 상품코드(수천 행).
-- remote가 작을수록 AS-IS의 "1회 fetch" 비용이 낮아 TO-BE가 압도적으로 불리.
+**Worst case가 발생하기 쉬운 조건:**
 
-**l.id cardinality 낮음 (CBRD-26601 특유):**
-- 외래키 컬럼은 중복이 많은 게 정상 — 예: orders.customer_id.
-- 고객 1명당 주문 수백 건 → 같은 l.id 값으로 TO-BE가 수백 번 반복 실행.
-- 트랜잭션 DB의 전형적인 구조.
+- **N이 크고 remote가 작은 경우** (POC-D 패턴)
+  - remote가 코드 테이블·참조 테이블(수백~수천 행)이고, outer 필터 없이 N이 큰 경우.
+  - 예: `FROM local_t l` (필터 없음), remote_t = 국가코드(200행) → TO-BE 불리.
+- **l.id cardinality가 낮은 경우** (CBRD-26601 특유)
+  - 같은 l.id 값으로 TO-BE가 반복 실행 → 동일 remote 행 중복 fetch.
+  - 예: orders.customer_id — 고객 1명당 수백 건이면 같은 키로 수백 번 execute.
+- **WAN 환경**
+  - execute overhead가 loopback(~28ms)보다 훨씬 크므로 POC-E 수준의 조건에서도 역효과가 심화.
 
-**POC-E 패턴 (전송량 동일해도 느림):**
-- execute overhead(~28ms/loopback)만으로도 2x 느림.
-- WAN 환경에서는 latency가 수십~수백 ms → 역효과가 훨씬 커짐.
+**완화 요인:**
 
-→ **TO-BE를 무조건 적용하면 개선보다 역효과가 더 빈번할 가능성이 있다.**
+- **outer 필터가 있으면 N이 줄어** TO-BE의 round-trip 비용도 함께 감소.
+  - 예: `WHERE l.status = 'active' AND l.date > '2026-01-01'` → N이 충분히 작으면 TO-BE도 경쟁력 있음.
+- remote가 크고 outer가 적은 쿼리(POC-A, B 패턴)에서는 TO-BE가 명확히 유리.
+
+→ **worst case는 "outer 필터 없이 N이 크고 remote가 작은" 조건에서 발생하기 쉬우며, outer 필터 유무가 N을 결정하는 핵심 변수다.**
 
 ---
 

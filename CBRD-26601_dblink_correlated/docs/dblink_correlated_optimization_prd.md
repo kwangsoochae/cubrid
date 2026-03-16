@@ -12,7 +12,7 @@
 
 ### 1.1 목적
 
-`SELECT` 절 또는 `WHERE` 절에 `(SELECT col FROM remote_t@conn WHERE remote_t.id = a.id LIMIT 1)` 형태의 **correlated 스칼라 서브쿼리**가 있을 때, 현재는 원격 테이블 전체를 **1회 fetch**하여 로컬에서 필터링하는 구조이다. 이를 **outer 행마다 correlation 키를 바인딩 후 원격 execute**하는 방식으로 변경하여, 원격 전송 데이터량과 로컬 연산을 줄인다.
+`SELECT` 절 또는 `WHERE` 절에 `(SELECT col FROM remote_t@conn WHERE remote_t.id = l.id LIMIT 1)` 형태의 **correlated 스칼라 서브쿼리**가 있을 때, 현재는 원격 테이블 전체를 **1회 fetch**하여 로컬에서 필터링하는 구조이다. 이를 **outer 행마다 correlation 키를 바인딩 후 원격 execute**하는 방식으로 변경하여, 원격 전송 데이터량과 로컬 연산을 줄인다.
 
 ### 1.2 한 줄 요약
 
@@ -22,7 +22,7 @@
 
 | 용어 | 설명 |
 |------|------|
-| **Correlated 서브쿼리** | 외부 쿼리의 컬럼을 참조하는 서브쿼리 (`WHERE remote.id = a.id` 에서 `a.id`가 outer 참조) |
+| **Correlated 서브쿼리** | 외부 쿼리의 컬럼을 참조하는 서브쿼리 (`WHERE remote.id = l.id` 에서 `l.id`가 outer 참조) |
 | **Correlation 키** | 서브쿼리가 outer를 참조하는 컬럼 쌍 (`remote.col = outer.col`) |
 | **푸시(push)** | 로컬에서 평가하던 조건을 원격 SQL의 `WHERE col = ?`로 넣어 원격 DB에서 필터링하게 하는 것 |
 | **aptr** | XASL에서 1회 선행 실행되는 서브쿼리 리스트. 서브쿼리 내 dblink는 현재 여기에 배치됨 |
@@ -43,7 +43,7 @@ outer 스캔 시작
 outer 각 행마다
   └─ dptr(LINK_TO_REGU_VARIABLE) 재평가
        └─ local list 스캔
-            ├─ access_pred: remote.id = a.id  ← 로컬 필터
+            ├─ access_pred: remote.id = l.id  ← 로컬 필터
             └─ instnum: inst_num() <= 1
 ```
 
@@ -62,7 +62,7 @@ outer 각 행마다
 ### 2.3 구조적 제약
 
 - `mq_rewrite_dblink_as_subquery` (`view_transform.c:6607`)가 **모든** `PT_DERIVED_DBLINK_TABLE`을 `PT_IS_SUBQUERY`로 변환 → DBLink가 항상 **list access** 경로(`pt_to_subquery_table_spec_list`)를 거침.
-- Correlation 조건(`_dbl.id = a.id`)은 list access spec의 **`where` predicate**(로컬 필터)로만 생성되며, DBLink SQL(`conn_sql`)에는 반영되지 않음.
+- Correlation 조건(`_dbl.id = l.id`)은 list access spec의 **`where` predicate**(로컬 필터)로만 생성되며, DBLink SQL(`conn_sql`)에는 반영되지 않음.
 - `dblink_spec_node` / `DBLINK_SCAN_INFO` (develop 기준)에 **rebind/re-execute 관련 필드 없음**.
 
 ---
@@ -116,8 +116,8 @@ outer 각 행마다
 
 | 항목 | 내용 | 비고 |
 |------|------|------|
-| **WHERE 절 correlated 서브쿼리** | `WHERE EXISTS (SELECT 1 FROM remote@conn WHERE remote.id = a.id)` 등 | 탐지 경로 상이 (`dptr`/predicate); 20~30% 추가 작업 예상 |
-| **복합 correlation 키** | AND 등치 여러 개 (`remote.k1 = a.k1 AND remote.k2 = a.k2`) | bind_param 순서 관리 필요 |
+| **WHERE 절 correlated 서브쿼리** | `WHERE EXISTS (SELECT 1 FROM remote@conn WHERE remote.id = l.id)` 등 | 탐지 경로 상이 (`dptr`/predicate); 20~30% 추가 작업 예상 |
+| **복합 correlation 키** | AND 등치 여러 개 (`remote.k1 = l.k1 AND remote.k2 = l.k2`) | bind_param 순서 관리 필요 |
 | **cost 기반 push-down 선택** | remote NCARD 실측 + 선택도 추정으로 push-down 적용 여부 결정 | 현재는 구조적 조건으로만 판단 |
 
 ### 4.3 Out of Scope
@@ -165,7 +165,7 @@ AS-IS                              TO-BE
 [래퍼 XASL]                        [래퍼 XASL]
   aptr → [DBLink XASL]               aptr → [DBLink XASL]
            conn_sql: SELECT *                  conn_sql: SELECT * WHERE col=?
-           access_pred: col=a.id              corr_key_regu: → outer.val_list[0]
+           access_pred: col=l.id              corr_key_regu: → outer.val_list[0]
            IS_INITIAL: 첫 행만 실행            IS_INITIAL: 매 행 실행 (status reset)
 ```
 

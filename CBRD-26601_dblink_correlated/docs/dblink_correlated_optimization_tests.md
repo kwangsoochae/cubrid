@@ -78,6 +78,9 @@ csql -S -u dba <로컬DB명> -i test/setup_large_local.sql
 | **TC-117** | **`use_dblink_corr_pushdown=no` — AS-IS 유지** | FR-9 / Tasks T1-3, T6-7 | 세션 파라미터 OFF 시 push-down 미적용, 결과 TC-101과 동일 확인 |
 | **TC-118** | **LIMIT/집계 없음 — 원격 다중 행 반환 → 오류** | Design §3.9 LIMIT append 필요성 | corr 조건 없거나 비선택적 → 원격 다중 행 → 런타임 에러 확인 |
 | **TC-119** | **LIMIT/집계 없음 — 원격 1행 반환 → 성공** | Design §3.9 LIMIT append 필요성 | remote.id가 unique key이므로 LIMIT 없이도 1행 보장 → 정상 동작 확인 |
+| **TC-120** | **local 추가조건 only — outer WHERE에 local 컬럼 추가필터** | Design §3.2 outer 행 감소 시 execute 횟수 확인 | l.name IN 조건으로 id=1,3,5만 처리 → 3회 execute |
+| **TC-121** | **remote 추가조건 only — 조인키 외 remote 컬럼 추가필터 (전체 outer 처리)** | Design §3.2 remote 추가조건 독립 동작 | r.name LIKE 'remote_e%' → id=5만 'remote_e1', 나머지 NULL |
+| **TC-122** | **local + remote 추가조건 모두 — outer WHERE + 서브쿼리 WHERE 동시 추가필터** | Design §3.2 복합 조건 정합성 | l.id >= 2 (local) + r.name LIKE 'remote_b%' (remote) 동시 적용 |
 
 ---
 
@@ -90,11 +93,11 @@ csql -S -u dba <로컬DB명> -i test/setup_large_local.sql
 - 쿼리 요약:
 
 ```sql
-SELECT a.id, a.name,
+SELECT l.id, l.name,
   (SELECT r.name FROM remote_t@cubrid_conn r
-   WHERE r.id = a.id ORDER BY r.name LIMIT 1) AS remote_name
-FROM local_t a
-ORDER BY a.id;
+   WHERE r.id = l.id ORDER BY r.name LIMIT 1) AS remote_name
+FROM local_t l
+ORDER BY l.id;
 ```
 
 - 기대:
@@ -121,12 +124,12 @@ ORDER BY a.id;
 - 쿼리:
 
 ```sql
-SELECT a.id, a.name,
+SELECT l.id, l.name,
   (SELECT r.name FROM remote_t@cubrid_conn r
-   WHERE r.id = a.id OR r.id = -1
+   WHERE r.id = l.id OR r.id = -1
    ORDER BY r.name LIMIT 1) AS remote_name
-FROM local_t a
-ORDER BY a.id;
+FROM local_t l
+ORDER BY l.id;
 ```
 
 - 기대:
@@ -140,12 +143,12 @@ ORDER BY a.id;
 - 쿼리:
 
 ```sql
-SELECT a.id, a.name,
+SELECT l.id, l.name,
   (SELECT r.name FROM remote_t@cubrid_conn r
    WHERE r.id = 1
    ORDER BY r.name LIMIT 1) AS remote_name
-FROM local_t a
-ORDER BY a.id;
+FROM local_t l
+ORDER BY l.id;
 ```
 
 - 기대:
@@ -161,12 +164,12 @@ ORDER BY a.id;
 - 쿼리:
 
 ```sql
-SELECT a.id, a.name,
+SELECT l.id, l.name,
   (SELECT r.name FROM remote_t@cubrid_conn r
-   WHERE r.id = a.id
+   WHERE r.id = l.id
    ORDER BY r.name LIMIT 1) AS remote_name
-FROM local_t a
-ORDER BY a.id;
+FROM local_t l
+ORDER BY l.id;
 ```
 
 - 기대:
@@ -197,22 +200,22 @@ ORDER BY id, name;
 - 파일: `test/TC-109.sql`
 - 전제: `setup_remote.sql`, `setup_local.sql` 선행.
 - 동작: `local_t`에 `id=2` 행 2개 임시 추가 → 동일 outer key 3행 생성 후 쿼리 실행, 이후 삭제.
-- 검증 포인트: access_pred(`r.id = a.id`) 제거 상태에서 outer 행마다 독립 execute가 수행되고 각각 올바른 결과 반환.
+- 검증 포인트: access_pred(`r.id = l.id`) 제거 상태에서 outer 행마다 독립 execute가 수행되고 각각 올바른 결과 반환.
 - 기대: 3행(`local_2`, `local_2b`, `local_2c`), 모두 `remote_name = 'remote_b1'`.
 
 ### 4.8 TC-110 — AND 비상관 LIKE 조건 혼합
 
 - 파일: `test/TC-110.sql`
 - 전제: `setup_remote.sql`, `setup_local.sql` 선행.
-- 쿼리: `WHERE r.id = a.id AND r.name LIKE 'remote_b%'`
-- 검증 포인트: correlated 조건(`r.id = a.id`)만 제거/대체한 뒤, 비상관 조건(`LIKE 'remote_b%'`)이 올바르게 남아 필터링되는지 확인.
+- 쿼리: `WHERE r.id = l.id AND r.name LIKE 'remote_b%'`
+- 검증 포인트: correlated 조건(`r.id = l.id`)만 제거/대체한 뒤, 비상관 조건(`LIKE 'remote_b%'`)이 올바르게 남아 필터링되는지 확인.
 - 기대: id=2 → `'remote_b1'`, 나머지 모두 NULL.
 
 ### 4.9 TC-111 — COUNT 집계 서브쿼리
 
 - 파일: `test/TC-111.sql`
 - 전제: `setup_remote.sql`, `setup_local.sql` 선행.
-- 쿼리: `(SELECT COUNT(*) FROM remote_t@cubrid_conn r WHERE r.id = a.id)`
+- 쿼리: `(SELECT COUNT(*) FROM remote_t@cubrid_conn r WHERE r.id = l.id)`
 - 검증 포인트: access_pred 제거 후 remote가 올바른 행만 수신하고 COUNT가 정확한지 확인. 오매칭 행이 있으면 COUNT가 기대보다 커져 버그 감지 가능.
 - 기대: id=1→1, id=2→2, id=3→1, id=4→0, id=5→3.
 
@@ -253,8 +256,8 @@ ORDER BY id, name;
 
 - 파일: `test/TC-116.sql`
 - 전제: `setup_remote.sql`, `setup_local.sql` 선행.
-- 쿼리: `WHERE r.id = a.id AND r.id < 3`
-- 검증 포인트: correlated 조건(`r.id = a.id`)만 제거한 뒤 비상관 범위 조건(`r.id < 3`)이 독립적으로 올바르게 동작하는지 확인. id=3은 `r.id = a.id = 3`이지만 `r.id < 3` 불만족 → NULL이어야 함. 비상관 조건이 제거되었거나 잘못 처리되면 id=3에 `'remote_c1'`이 나와 버그 감지 가능.
+- 쿼리: `WHERE r.id = l.id AND r.id < 3`
+- 검증 포인트: correlated 조건(`r.id = l.id`)만 제거한 뒤 비상관 범위 조건(`r.id < 3`)이 독립적으로 올바르게 동작하는지 확인. id=3은 `r.id = l.id = 3`이지만 `r.id < 3` 불만족 → NULL이어야 함. 비상관 조건이 제거되었거나 잘못 처리되면 id=3에 `'remote_c1'`이 나와 버그 감지 가능.
 - 기대: id=1→`'remote_a1'`, id=2→`'remote_b1'`, id=3→NULL, id=4→NULL, id=5→NULL.
 
 ### 4.16 TC-118 — LIMIT/집계 없음, 원격 다중 행 → 오류
@@ -263,7 +266,7 @@ ORDER BY id, name;
 - 전제: `setup_remote.sql`, `setup_local.sql` 선행.
 - 쿼리:
   1. correlated 조건 없이 `remote_t` 전체 반환 → 다중 행 에러
-  2. 범위 조건(`r.id >= a.id`)으로 다중 행 반환 → 다중 행 에러
+  2. 범위 조건(`r.id >= l.id`)으로 다중 행 반환 → 다중 행 에러
 - 검증 포인트: LIMIT/집계 없이 원격에서 2행 이상이 반환되면 스칼라 서브쿼리 에러가 발생함을 확인. AS-IS/TO-BE 모두 동일하게 에러.
 - 기대: 두 쿼리 모두 런타임 에러 (`more than 1 row returned by a subquery`).
 
@@ -271,7 +274,7 @@ ORDER BY id, name;
 
 - 파일: `test/TC-119.sql`
 - 전제: `setup_remote.sql`, `setup_local.sql` 선행.
-- 쿼리: `WHERE r.id = a.id` — LIMIT 없음, 집계 없음.
+- 쿼리: `WHERE r.id = l.id` — LIMIT 없음, 집계 없음.
 - 검증 포인트: `remote_t.id`가 unique key이므로 correlated 조건이 항상 최대 1행을 반환한다. LIMIT 없이도 데이터 구조상 스칼라 에러가 발생하지 않음을 확인. push-down 적용 시에도 `conn_sql = 'SELECT name, id FROM remote_t WHERE id = ?'`로 1행 반환.
 - 기대: 5행, TC-101과 동일 값 (id=4 → NULL, 나머지 → 해당 remote name).
 
@@ -285,6 +288,34 @@ ORDER BY id, name;
   - 결과는 TC-101과 **완전히 동일** (push-down 여부와 무관하게 정확성 유지).
   - 파라미터 복원 후 재실행 시 push-down이 다시 적용됨.
 - 기대: 각 쿼리 모두 5행, TC-101과 동일 값.
+
+### 4.18 TC-120 — local 추가조건 only
+
+- 파일: `test/TC-120.sql`
+- 전제: `setup_remote.sql`, `setup_local.sql` 선행.
+- 쿼리: `FROM local_t l WHERE l.name IN ('local_1', 'local_3', 'local_5')`
+  - 서브쿼리: `WHERE r.id = l.id ORDER BY r.name LIMIT 1` (조인키만, remote 추가조건 없음)
+- 검증 포인트: outer WHERE에 local 컬럼 추가조건이 있어도 push-down 탐지에 영향 없음을 확인. id=2,4는 outer 단계에서 제외되어 서브쿼리 execute 대상에서 제외됨.
+- 기대: 3행. id=1→`'remote_a1'`, id=3→`'remote_c1'`, id=5→`'remote_e1'`.
+
+### 4.19 TC-121 — remote 추가조건 only (전체 outer 처리)
+
+- 파일: `test/TC-121.sql`
+- 전제: `setup_remote.sql`, `setup_local.sql` 선행.
+- 쿼리: `WHERE r.id = l.id AND r.name LIKE 'remote_e%'`
+  - outer 필터 없음 — 전체 5행 처리.
+- 검증 포인트: TC-110(`LIKE 'remote_b%'`), TC-116(`r.id < 3`)과 보완 관계. 조인키와 다른 컬럼(`r.name`)에 LIKE 추가조건이 있을 때 각 outer 행마다 remote 추가조건이 독립적으로 올바르게 적용되는지 확인.
+- 기대: 5행. id=5→`'remote_e1'`, 나머지 모두 NULL.
+
+### 4.20 TC-122 — local + remote 추가조건 모두
+
+- 파일: `test/TC-122.sql`
+- 전제: `setup_remote.sql`, `setup_local.sql` 선행.
+- 쿼리:
+  - outer: `WHERE l.id >= 2` (local 추가조건 — id=1 제외)
+  - 서브쿼리: `WHERE r.id = l.id AND r.name LIKE 'remote_b%'` (remote 추가조건)
+- 검증 포인트: local 필터(TC-120)와 remote 필터(TC-121)가 동시에 적용되어도 각각 독립적으로 올바르게 동작하는지 확인. push-down 시 outer 4회 execute, 각 회차에서 remote 추가조건도 정확히 처리.
+- 기대: 4행. id=2→`'remote_b1'`, id=3→NULL, id=4→NULL, id=5→NULL.
 
 ---
 

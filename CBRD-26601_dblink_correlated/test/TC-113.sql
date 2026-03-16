@@ -6,8 +6,8 @@
 -- 기대: id=1 → 'remote_a1', id=3 → 'remote_c1'.
 -- 비고: id=2, id=5처럼 1:N 케이스는 스칼라 서브쿼리에서 에러이므로 제외.
 
-SELECT a.id, a.name,
-  (SELECT r.name FROM remote_t@cubrid_conn r WHERE r.id = a.id) AS remote_name
-FROM local_t a
-WHERE a.id IN (1, 3)
-ORDER BY a.id;
+SELECT l.id, l.name,
+  (SELECT r.name FROM remote_t@cubrid_conn r WHERE r.id = l.id) AS remote_name
+FROM local_t l
+WHERE l.id IN (1, 3)
+ORDER BY l.id;

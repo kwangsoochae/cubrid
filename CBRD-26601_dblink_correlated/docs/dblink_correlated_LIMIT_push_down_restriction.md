@@ -23,23 +23,23 @@ TO-BE는 원격 전송량·로컬 연산을 줄이는 경우가 많지만, **데
 **예제 질의 (사용자 SQL)**
 
 ```sql
-SELECT a.id, a.name,
+SELECT l.id, l.name,
        (SELECT r.name
         FROM remote_t@conn r
-        WHERE r.id = a.id
+        WHERE r.id = l.id
         LIMIT 1) AS remote_name
-FROM local_t a;
+FROM local_t l;
 ```
 
 **dblink로 전달되는 질의 (conn_sql, AS-IS)**
 
-- Correlation 조건(`r.id = a.id`)은 push-down 되지 않으므로 원격에는 **WHERE 없이** 전달된다.
+- Correlation 조건(`r.id = l.id`)은 push-down 되지 않으므로 원격에는 **WHERE 없이** 전달된다.
 
 ```sql
 /* DBLINK SELECT */ SELECT name, id FROM remote_t r
 ```
 
-→ 원격에서 위 SQL 1회 실행 후 결과 **전체**를 로컬로 가져오고, `r.id = a.id` 및 `LIMIT 1`은 **로컬**에서 `access_pred`·`instnum`으로만 평가된다.
+→ 원격에서 위 SQL 1회 실행 후 결과 **전체**를 로컬로 가져오고, `r.id = l.id` 및 `LIMIT 1`은 **로컬**에서 `access_pred`·`instnum`으로만 평가된다.
 
 ---
 
@@ -48,7 +48,7 @@ FROM local_t a;
 ### 3.1 dblink로 전달되는 질의 (TO-BE)
 
 - Correlation 조건(`remote.col = outer.col`)을 **원격에 push**하므로, `conn_sql`에 `WHERE r.id = ?` 가 포함된다.  
-  outer 행마다 `?`에 현재 행의 `a.id`를 바인딩하여 실행한다.
+  outer 행마다 `?`에 현재 행의 `l.id`를 바인딩하여 실행한다.
 
 **dblink로 전달되는 질의 (conn_sql, TO-BE)**
 
@@ -56,7 +56,7 @@ FROM local_t a;
 /* DBLINK SELECT */ SELECT name, id FROM remote_t r WHERE r.id = ?
 ```
 
-→ outer 행마다 위 SQL을 **한 번씩** 실행하며, 매 회 `?`에 해당 outer 행의 `a.id`를 넣어 원격에서 조건에 맞는 행만 가져온다. LIMIT 1은 원격에 없고, 로컬에서 `instnum`으로 1건만 사용한다.
+→ outer 행마다 위 SQL을 **한 번씩** 실행하며, 매 회 `?`에 해당 outer 행의 `l.id`를 넣어 원격에서 조건에 맞는 행만 가져온다. LIMIT 1은 원격에 없고, 로컬에서 `instnum`으로 1건만 사용한다.
 
 ### 3.2 실행 흐름 비교
 

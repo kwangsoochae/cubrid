@@ -7,12 +7,12 @@
 --   - remote_t 에 매칭이 있는 id = 1,2,3,5 만 반환.
 --   - id = 4 (remote 매칭 없음)는 결과에 포함되지 않음.
 
-SELECT a.id, a.name
-FROM local_t a
+SELECT l.id, l.name
+FROM local_t l
 WHERE EXISTS (
   SELECT 1
   FROM remote_t@cubrid_conn r
-  WHERE r.id = a.id
+  WHERE r.id = l.id
 )
-ORDER BY a.id;
+ORDER BY l.id;
 

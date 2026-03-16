@@ -10,14 +10,14 @@
 
 -- 1. correlated 조건 없음 — remote_t 전체 반환 (remote_t 행 수 > 1이면 에러)
 -- 기대: ERROR (more than 1 row returned by a subquery used as an expression)
-SELECT a.id, a.name,
+SELECT l.id, l.name,
   (SELECT r.name FROM remote_t@cubrid_conn r) AS remote_name
-FROM local_t a
-WHERE a.id = 1;
+FROM local_t l
+WHERE l.id = 1;
 
 -- 2. 비선택적 correlated 조건 — 범위 조건으로 여러 행 반환
 -- 기대: ERROR (id=3 이상인 remote 행이 여러 개)
-SELECT a.id, a.name,
-  (SELECT r.name FROM remote_t@cubrid_conn r WHERE r.id >= a.id) AS remote_name
-FROM local_t a
-WHERE a.id = 1;
+SELECT l.id, l.name,
+  (SELECT r.name FROM remote_t@cubrid_conn r WHERE r.id >= l.id) AS remote_name
+FROM local_t l
+WHERE l.id = 1;

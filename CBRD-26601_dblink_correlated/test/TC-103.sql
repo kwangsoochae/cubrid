@@ -5,9 +5,9 @@
 --       OR 조건 포함 시 탐지 실패 → 기존 방식 유지 → 결과는 TC-101과 동일해야 함.
 -- 기대: 5행. TC-101과 동일 결과 (push-down 적용 여부와 무관하게 결과 동등성 확인).
 
-SELECT a.id, a.name,
+SELECT l.id, l.name,
   (SELECT r.name FROM remote_t@cubrid_conn r
-   WHERE r.id = a.id OR r.id = -1
+   WHERE r.id = l.id OR r.id = -1
    ORDER BY r.name LIMIT 1) AS remote_name
-FROM local_t a
-ORDER BY a.id;
+FROM local_t l
+ORDER BY l.id;
