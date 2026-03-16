@@ -655,12 +655,15 @@ correlated 집계의 경우 outer 참조(`a.id`)를 정적 conn_sql 문자열에
 | 네트워크 전송 | 전체 행 전송 | 매칭 행만 전송 |
 | 효율 조건 | - | 원격 테이블 크고, 매칭 비율 낮을수록 유리 |
 
-### 개선을 위해 변경 필요한 지점
+### 개선을 위해 변경 필요한 지점 (CBRD-26601 구현 대상)
 
-1. **0x40249d60 재실행 허용**: `qexec_clear_xasl_head(0x40269c00)` 시 aptr(0x40249d60)도 status를 CLEARED로 reset.
-2. **correlation 조건 → DBLink SQL에 `?` 삽입**: `pt_to_dblink_table_spec_list` (또는 그 전 단계)에서 correlation predicate를 탐지하여 `WHERE col = ?` append.
-3. **bind 정보 전달**: `dblink_spec_node` / `DBLINK_SCAN_INFO` 에 correlation key regu_list 추가. `dblink_open_scan` 에서 `vd` 를 통해 현재 outer 행 값 바인딩 후 execute.
-4. **predicate 제거**: access_pred에서 push-down된 조건 제거 (이중 필터 방지).
+아래 4개 항목은 CBRD-26601 correlated push-down 구현 시 변경해야 할 핵심 지점이다.
+각 항목은 Design Doc의 구현 태스크(T2-1, T3-1~T3-3)와 1:1로 대응된다.
+
+1. **0x40249d60 재실행 허용** *(T3-1)*: `qexec_clear_xasl_head(0x40269c00)` 시 aptr(0x40249d60)도 status를 CLEARED로 reset.
+2. **correlation 조건 → DBLink SQL에 `?` 삽입** *(T2-1)*: `pt_to_dblink_table_spec_list` (또는 그 전 단계)에서 correlation predicate를 탐지하여 `WHERE col = ?` append.
+3. **bind 정보 전달** *(T2-1 + T3-2)*: `dblink_spec_node` / `DBLINK_SCAN_INFO` 에 correlation key regu_list 추가. `dblink_open_scan` 에서 `vd` 를 통해 현재 outer 행 값 바인딩 후 execute.
+4. **predicate 제거** *(T3-3)*: access_pred에서 push-down된 조건 제거 (이중 필터 방지).
 
 ---
 
@@ -698,7 +701,8 @@ ORDER BY o.order_id;
 1. `remote_products` 전체를 1회 fetch하여 로컬 리스트 저장.
 2. `local_orders` 각 행에서 해당 리스트를 스캔하며 `product_code = o.product_code` + LIMIT 1 로 필터.
 
-**개선 후 예상 (CBRD-26601 적용)**:
+**개선 (CBRD-26601 적용) 후 예상**:
+
 1. `local_orders` 각 행에서 `cci_bind_param(product_code = o.product_code)` + `cci_execute`.
 2. 원격에서 `SELECT product_name FROM remote_products WHERE product_code = ?` 실행 → **매칭 행만** 반환.
 3. 로컬에서 instnum_pred (`LIMIT 1`) 적용 → 최종 1행.

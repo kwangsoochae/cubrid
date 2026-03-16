@@ -97,7 +97,7 @@ FROM local_t a;
 
 ### 4.4 수치 예시 (Worst Case)
 
-- **가정**: outer 10,000행, 원격 10행, correlation 키가 10개 값만 가짐(예: 10개 상품 코드).  
+- **가정**: outer 10,000행, 원격 10행, correlation 키가 10개 값만 가짐(예: 10개 상품 코드).
   → 각 원격 행은 평균 1,000개 outer 행에서 참조됨.
 
 | 방식 | Round-trip | 전송 행 수 |
