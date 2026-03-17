@@ -426,6 +426,48 @@ corr push-down 적용 시 `conn_sql`에 `LIMIT n`도 함께 append하면 outer �
 - **구현 진입점**: T1-2 conn_sql 구성 시점에 서브쿼리의 `instnum_val`에서 LIMIT 값 추출 후 append
 - 현재 작업 범위 밖. corr push-down 안정화 후 검토.
 
+#### Push-Down 후보 플래그 + Optimizer 결정 구조
+
+탐지(view_transform)와 결정(optimizer)을 분리하여 향후 통계 기반 비용 비교로 교체 가능하도록 설계하는 방안.
+
+**흐름:**
+
+```
+view_transform (탐지만):
+  detect_corr_key() → PT_DBLINK_INFO.is_corr_pushdown_candidate = true
+  (push-down 여부는 미결)
+
+optimizer (결정):
+  DBLink spec에 candidate flag 있으면:
+  → 현재: 단순 휴리스틱(outer filter/LIMIT 유무 등)으로 AS-IS/TO-BE 선택
+  → 나중: outer cardinality 추정값 기반 비용 비교
+
+XASL 생성 (결과 반영):
+  optimizer 결정에 따라 corr_key_regu_list 채우거나 생략
+```
+
+**장점:**
+- 탐지 로직(view_transform)과 결정 로직(optimizer)이 명확히 분리됨
+- 통계 기반 비용 모델 구현 시 optimizer 쪽만 교체하면 됨 (탐지 로직 변경 불필요)
+
+**현실적 과제:**
+- CUBRID optimizer가 현재 DBLink를 불투명 스캔으로 취급 → optimizer에서 DBLink candidate를 인식하는 훅 추가 필요
+- remote 테이블 통계는 플래닝 타임에 획득 불가 → outer cardinality(N)만으로 단방향 비용 추정
+- 현재 작업 범위 밖. corr push-down 안정화 및 통계 기반 비용 모델 구현 후 검토.
+
+#### Outer Filter Guard
+
+outer query(local_t)에 join 조건 외의 조건이 없을 때 push-down을 억제하는 휴리스틱.
+
+- **동기**: worst case는 outer 필터 없이 N이 크고 remote가 작은 조건에서 발생하기 쉬움 (worst_case.md §7). outer 필터 유무가 N을 결정하는 핵심 변수.
+- **허용 조건 (OR)**:
+  - outer WHERE 절에 local_t를 참조하는 조건이 있음
+  - outer LIMIT 절이 있음 (N이 명시적으로 bounded)
+- **한계**: outer 필터가 있어도 selectivity가 낮으면 N이 클 수 있음. POC-A 패턴(테이블 자체가 소형)은 outer 필터가 없어도 TO-BE가 유리하지만 이 guard로 차단됨.
+- **구현 위치**: `detect_corr_key()` 내 또는 호출 직전에 `has_outer_bound(outer_statement)` 확인. outer statement는 `mq_rewrite_dblink_as_subquery()`의 `statement` 파라미터.
+- **세션 파라미터와의 관계**: `use_dblink_corr_pushdown=yes`(기본)일 때 guard 적용. 파라미터로 guard를 우회 가능.
+- 현재 작업 범위 밖. corr push-down 안정화 후 검토.
+
 ---
 
 ## 4. 직렬화 (`xasl_to_stream.c` / `stream_to_xasl.c`)
@@ -509,3 +551,4 @@ corr_key 값이 NULL이면 `cci_execute` 없이 빈 list → 스칼라 NULL 반�
 | 2026-03-13 | 초안 작성 |
 | 2026-03-16 | FR-9 세션 파라미터 설계 추가 (§3.7) |
 | 2026-03-16 | 이전 행 키 비교 최적화 추가 (§3.8, Phase 2) |
+| 2026-03-17 | Outer Filter Guard, Push-Down 후보 플래그 + Optimizer 결정 구조 추가 (§3.9) |

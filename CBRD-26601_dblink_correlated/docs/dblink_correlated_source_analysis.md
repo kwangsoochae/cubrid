@@ -229,18 +229,18 @@ spec->info.spec.derived_table_type 분기:
 실행 계획은 **3단 buildlist** 로 구성된다.
 
 ```
-[buildlist_proc] outer (0x4026a110)   flag: XASL_TOP_MOST_XASL
+[buildlist_proc] outer (🔴0x4026a110)   flag: XASL_TOP_MOST_XASL
   ├─ access spec: class, sequential  ← local_t 스캔
   ├─ val_list: [l.id: INTEGER, l.name: VARCHAR]
-  └─ outptr: id, name, [xasl:0x40269c00][TYPE_CONSTANT]  ← 스칼라 서브쿼리 regu
+  └─ outptr: id, name, [xasl:🟡0x40269c00][TYPE_CONSTANT]  ← 스칼라 서브쿼리 regu
 
-[buildlist_proc] 서브쿼리 래퍼 (0x40269c00)  flag: XASL_LINK_TO_REGU_VARIABLE
-  ├─ access spec: list, sequential    ← aptr(0x40249d60) 결과 리스트 스캔
+[buildlist_proc] 서브쿼리 래퍼 (🟡0x40269c00)  flag: XASL_LINK_TO_REGU_VARIABLE
+  ├─ access spec: list, sequential    ← aptr(🔵0x40249d60) 결과 리스트 스캔
   ├─ instnum predicate: inst_num() <= ?:0   (LIMIT 1)
   ├─ single_tuple: 스칼라 결과 (remote name)
-  └─ aptr list → [buildlist_proc] dblink (0x40249d60)
+  └─ aptr list → [buildlist_proc] dblink (🔵0x40249d60)
 
-[buildlist_proc] dblink (0x40249d60)
+[buildlist_proc] dblink (🔵0x40249d60)
   ├─ access spec: dblink, sequential
   ├─ access pred: [_dbl.id: INTEGER] = [l.id: TYPE_CONSTANT]  ← 로컬 필터
   └─ val_list: [name: VARCHAR, id: INTEGER]
@@ -248,10 +248,10 @@ spec->info.spec.derived_table_type 분기:
 
 ### XASL 덤프 핵심 관찰
 
-- `0x40269c00` 는 **dptr_list** 에 연결되지만 `XASL_LINK_TO_REGU_VARIABLE` 플래그가 있어 **lazy 실행** 됨.
+- `🟡0x40269c00` 는 **dptr_list** 에 연결되지만 `XASL_LINK_TO_REGU_VARIABLE` 플래그가 있어 **lazy 실행** 됨.
   - dptr 루프(`query_executor.c`)는 이 플래그가 있으면 skip.
   - 대신 outptr 평가 시 `TYPE_CONSTANT` regu_var 에서 `EXECUTE_REGU_VARIABLE_XASL` 로 실행.
-- `0x40249d60` (DBLink)은 `0x40269c00` 의 **aptr_list** 에 연결 → **전체 실행에서 1회만 실행**.
+- `🔵0x40249d60` (DBLink)은 `🟡0x40269c00` 의 **aptr_list** 에 연결 → **전체 실행에서 1회만 실행**.
 - `access pred` 의 `l.id` 는 outer val_list 의 `TYPE_CONSTANT` (regu가 outer val_list slot을 참조) → **원격 SQL에 포함되지 않음**, 리스트 행 읽을 때 로컬에서만 평가.
 
 `query_alias` 확인:
@@ -313,8 +313,8 @@ spec->info.spec.derived_table_type 분기:
 | `pt_to_uncorr_subquery_list()` | `pt_uncorr_pre/post` walk로 level>1 XASL 수집 |
 
 - **우리 패턴에서의 배치**:
-  - 스칼라 서브쿼리 `(SELECT r.name … WHERE r.id = l.id LIMIT 1)` → **level 1** → outer XASL의 `dptr_list` (0x40269c00)
-  - 내부 DBLink 쿼리 `SELECT name, id FROM remote_t` → outer를 참조하지 않으므로 0x40269c00 기준 **level 0** → `pt_set_aptr` 경로 → 0x40269c00의 `aptr_list` (0x40249d60)
+  - 스칼라 서브쿼리 `(SELECT r.name … WHERE r.id = l.id LIMIT 1)` → **level 1** → outer XASL의 `dptr_list` (🟡0x40269c00)
+  - 내부 DBLink 쿼리 `SELECT name, id FROM remote_t` → outer를 참조하지 않으므로 🟡0x40269c00 기준 **level 0** → `pt_set_aptr` 경로 → 🟡0x40269c00의 `aptr_list` (🔵0x40249d60)
 
 ---
 
@@ -339,7 +339,7 @@ spec->info.spec.derived_table_type 분기:
 - **함수**: `pt_to_subquery_table_spec_list()`
 - **입력**: `spec`, `subquery`(XASL 붙은 PT_NODE), `where_part`(서브쿼리 WHERE)
 - **처리 흐름**:
-  1. `subquery->info.query.xasl` → 이미 빌드된 서브쿼리 XASL (0x40249d60) 참조.
+  1. `subquery->info.query.xasl` → 이미 빌드된 서브쿼리 XASL (🔵0x40249d60) 참조.
   2. `pt_split_attrs(parser, tbl_info, where_part, ...)` → pred/rest 속성 분리.
   3. `pt_to_position_regu_variable_list(...)` → **`TYPE_POSITION`** regu 생성 (리스트 파일 내 컬럼 위치 기반).
   4. `parser->symbols->current_class = NULL` 후 `pt_to_pred_expr(parser, where_part)` → where를 PRED_EXPR로 변환. 이 시점 `current_class = NULL` → **`TYPE_CONSTANT`** (val_list 슬롯) 기반 regu 생성.
@@ -368,6 +368,7 @@ spec->info.spec.derived_table_type 분기:
 ### 5.5 핵심 구조체
 
 **`dblink_spec_node`** (`src/query/xasl.h`):
+
 ```c
 struct dblink_spec_node {
   REGU_VARIABLE_LIST dblink_regu_list_pred;   /* predicate용 regu list */
@@ -380,7 +381,7 @@ struct dblink_spec_node {
   char  *conn_sql;         /* 원격 실행 SQL 문자열 */
 };
 ```
-→ develop 기준 **push-down 키 관련 필드 없음** (join_key_count, join_key_regu_list 미존재).
+→ correlation 키 수 및 outer val_list 슬롯을 가리키는 regu list 가 추가 될 것으로 예상.
 
 **`DBLINK_SCAN_INFO`** (`src/query/dblink_scan.h`):
 ```c
@@ -392,7 +393,7 @@ struct dblink_scan_info {
   void *col_info;      /* T_CCI_COL_INFO* */
 };
 ```
-→ develop 기준 **rebind/re-execute 관련 필드 없음**.
+→ correlation 키 수 및 outer val_list 슬롯을 가리키는 regu list 가 추가 될 것으로 예상.
 
 ---
 
@@ -400,9 +401,7 @@ struct dblink_scan_info {
 
 ### 6.1 실행 흐름 다이어그램
 
-**① 전체 흐름 (AS-IS)**: prepare+execute+fetch는 **1회만** — 첫 outer 행 처리 시 aptr에서 수행. 이후 행은 같은 리스트 재사용. TO-BE 다이어그램과 동일한 단계 구조로 비교 가능.
-
-> **코드 근거**: `fetch.c` TYPE_CONSTANT 시 `EXECUTE_REGU_VARIABLE_XASL` 호출 → 래퍼 실행. `query_executor.c` 래퍼의 aptr 루프에서 `IS_XASL_INITIAL_STATUS(xptr)` 일 때만 `qexec_execute_mainblock`(→ `dblink_open_scan`) 호출. `dblink_scan.c` `dblink_open_scan` 에서 `cci_prepare` 후 `cci_execute` 1회. dptr 루프에서 `qexec_clear_head_lists(dptr)` 로 매 outer 행마다 래퍼 clear.
+**① 전체 흐름 (AS-IS)**: prepare+execute+fetch는 **1회만** — 첫 outer 행 처리 시 aptr에서 수행. 이후 행은 같은 리스트 재사용. 
 
 ```mermaid
 flowchart TB
@@ -427,7 +426,7 @@ flowchart TB
   I1 --> L1
 ```
 
-**② XASL status 전이**: outer 행 진행에 따른 래퍼(0x40269c00)와 DBLink(0x40249d60) 상태 비교
+**② XASL status 전이**: outer 행 진행에 따른 래퍼 XASL (🟡0x40269c00)와 DBLink XASL (🔵0x40249d60) 상태 비교
 
 ```mermaid
 flowchart TB
@@ -460,33 +459,33 @@ flowchart TB
 
 ```
 [초기화: 1회]
-  qexec_execute_mainblock_internal(outer: 0x4026a110)
+  qexec_execute_mainblock_internal(outer: 🔴0x4026a110)
     └─ 스캔 준비: scan_open_scan(local_t)
 
 [outer 행마다 반복]
   local_t 행 읽기 → val_list: [l.id=INTEGER, l.name=VARCHAR]
 
   [outptr 평가]
-  fetch_peek_dbval(TYPE_CONSTANT[xasl:0x40269c00])
-    └─ EXECUTE_REGU_VARIABLE_XASL(0x40269c00, vd)  ← xasl.h
-         └─ IS_XASL_INITIAL_STATUS(0x40269c00) → YES (매번 clear됨)
-         └─ qexec_execute_mainblock(0x40269c00)
+  fetch_peek_dbval(TYPE_CONSTANT[xasl:🟡0x40269c00])
+    └─ EXECUTE_REGU_VARIABLE_XASL(🟡0x40269c00, vd)  ← xasl.h
+         └─ IS_XASL_INITIAL_STATUS(🟡0x40269c00) → YES (매번 clear됨)
+         └─ qexec_execute_mainblock(🟡0x40269c00)
               ├─ aptr_list 처리  ← qexec_execute_mainblock_internal()
-              │    └─ 0x40249d60: IS_XASL_INITIAL_STATUS?
-              │         ├─ [첫 행] YES  → qexec_execute_mainblock(0x40249d60)
-              │         │               → dblink_open_scan: connect+prepare+execute → list
+              │    └─ 🔵0x40249d60: IS_XASL_INITIAL_STATUS?
+              │         ├─ [첫 행] YES  → qexec_execute_mainblock(🔵0x40249d60)
+              │         │              → dblink_open_scan: connect+prepare+execute → list
               │         └─ [2번째+] NO  → SKIP (list 재사용, 재실행 없음)
-              └─ list access: 0x40249d60->list_id 스캔
+              └─ list access: 🔵0x40249d60->list_id 스캔
                    ├─ access_pred: _dbl.id = l.id  (로컬 필터)
                    ├─ instnum: inst_num() <= 1
                    └─ → single_tuple → regu_var->value.dbvalptr
 
   [다음 outer 행 준비]  ← dptr 루프 (query_executor.c)
-  qexec_clear_head_lists(0x40269c00)
-    └─ qexec_clear_xasl_head(0x40269c00)  ← query_executor.c
+  qexec_clear_head_lists(🟡0x40269c00)
+    └─ qexec_clear_xasl_head(🟡0x40269c00)  ← query_executor.c
          ├─ list_id 파괴 (qfile_destroy_list)
          ├─ status = XASL_CLEARED  → IS_XASL_INITIAL_STATUS = true 재진입 허용
-         └─ ※ aptr 0x40249d60는 clear 안 함 → XASL_SUCCESS 유지 → 재실행 없음
+         └─ ※ aptr 🔵0x40249d60는 clear 안 함 → XASL_SUCCESS 유지 → 재실행 없음
 ```
 
 ### 6.3 핵심 매크로·함수 (코드 참조)
@@ -541,9 +540,9 @@ case PT_DBLINK_TABLE:
     query->info.dblink_table.rewritten = rewritten;
 ```
 
-`term_list`는 **WHERE 절 조건(predicate)만** 포함한다. SELECT 절의 집계 함수는 이 경로에 진입하지 않는다.
+`term_list`는 **WHERE 절 조건(predicate)만** 포함한다. 
 
-래핑(`SELECT * FROM (...) cublink WHERE ...`) 구조는 이기종 DB 호환 목적이 아니라, 원본 SQL이 이미 WHERE/ORDER BY 등을 가질 수 있어 조건을 추가하는 가장 단순한 구현 방식이다.
+래핑(`SELECT * FROM (...) cublink WHERE ...`) 구조는 원본 SQL이 이미 WHERE/ORDER BY 등을 가질 수 있어 조건을 추가하는 가장 단순한 구현 방식이다.
 
 ### 7.3 Push-Down 가능 조건 판단: pt_check_pushable_term
 
@@ -557,7 +556,7 @@ if (pt_has_aggregate (parser, infop->in.subquery))
 return PT_PUSHABLE_TERM (infop) && !is_correlated_with_agg && !is_correlated_with_dblink;
 ```
 
-집계 함수 자체의 push-down이 아니라, 집계 포함 서브쿼리에 correlated term을 push할 때의 차단이다.
+`is_correlated_with_agg`는 outer WHERE의 correlated 조건이 집계 포함 서브쿼리 안으로 push될 때 GROUP BY 전후 평가 순서가 달라지는 것을 막는 가드다. CBRD-26601의 push-down(서브쿼리 자신의 WHERE → 원격 SQL)과는 경로가 다르므로 직접 연관은 없다.
 
 ### 7.4 LIMIT Push-Down 불가 경로
 
@@ -580,6 +579,8 @@ case PT_FUNCTION:
         infop->out.others_found = true;
     break;
 ```
+
+> `others_found = true`이면 `PT_PUSHABLE_TERM`이 false가 되어 push-down이 차단된다. "push 대상 spec 이외의 참조(outer col, rownum 등)가 term 안에 있다"는 신호다.
 
 ### 7.5 Push-Down 가능/불가 정리
 
@@ -660,7 +661,7 @@ correlated 집계의 경우 outer 참조(`l.id`)를 정적 conn_sql 문자열에
 아래 4개 항목은 CBRD-26601 correlated push-down 구현 시 변경해야 할 핵심 지점이다.
 각 항목은 Design Doc의 구현 태스크(T2-1, T3-1~T3-3)와 1:1로 대응된다.
 
-1. **0x40249d60 재실행 허용** *(T3-1)*: `qexec_clear_xasl_head(0x40269c00)` 시 aptr(0x40249d60)도 status를 CLEARED로 reset.
+1. **🔵0x40249d60 재실행 허용** *(T3-1)*: `qexec_clear_xasl_head(🟡0x40269c00)` 시 aptr(🔵0x40249d60)도 status를 CLEARED로 reset.
 2. **correlation 조건 → DBLink SQL에 `?` 삽입** *(T2-1)*: `pt_to_dblink_table_spec_list` (또는 그 전 단계)에서 correlation predicate를 탐지하여 `WHERE col = ?` append.
 3. **bind 정보 전달** *(T2-1 + T3-2)*: `dblink_spec_node` / `DBLINK_SCAN_INFO` 에 correlation key regu_list 추가. `dblink_open_scan` 에서 `vd` 를 통해 현재 outer 행 값 바인딩 후 execute.
 4. **predicate 제거** *(T3-3)*: access_pred에서 push-down된 조건 제거 (이중 필터 방지).

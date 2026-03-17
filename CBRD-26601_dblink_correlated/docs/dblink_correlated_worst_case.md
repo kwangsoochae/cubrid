@@ -4,7 +4,7 @@
 |------|------|
 | 이슈 | CBRD-26601 |
 | 관련 문서 | [AS-IS/TO-BE 한계](dblink_correlated_as_is_to_be_limits.md) |
-| 목적 | l.id(outer correlation 키) 중복이 많을 때 AS-IS 대비 TO-BE가 불리해지는 worst case 설명 |
+| 목적 | SELECT 절 correlated 스칼라 서브쿼리에서 TO-BE(outer 행마다 re-execute)가 AS-IS(원격 1회 전체 fetch)보다 불리해지는 worst case 조건(outer 행 수가 많고 remote가 작은 경우, outer correlation 키의 cardinality가 낮은 경우)을 분석한다. |
 
 ---
 
@@ -115,11 +115,10 @@ Worst case 발생 여부는 **데이터 분포와 outer 필터 조건**에 따�
 
 **완화 요인:**
 
-- **outer 필터가 있으면 N이 줄어** TO-BE의 round-trip 비용도 함께 감소.
+- outer 필터가 있으면 N이 줄어 TO-BE의 round-trip 비용도 함께 감소.
   - 예: `WHERE l.status = 'active' AND l.date > '2026-01-01'` → N이 충분히 작으면 TO-BE도 경쟁력 있음.
 - remote가 크고 outer가 적은 쿼리(POC-A, B 패턴)에서는 TO-BE가 명확히 유리.
-
-→ **worst case는 "outer 필터 없이 N이 크고 remote가 작은" 조건에서 발생하기 쉬우며, outer 필터 유무가 N을 결정하는 핵심 변수다.**
+- remote가 클수록 AS-IS의 전송 부담이 커지므로 실무에서는 TO-BE가 유리한 케이스가 더 많을 수 있음. SELECT 절에 correlated 서브쿼리가 여러 개면 이 부담이 서브쿼리 수에 비례해 늘어나 그 차이가 더욱 두드질 것으로 보임.
 
 ---
 
@@ -129,3 +128,4 @@ Worst case 발생 여부는 **데이터 분포와 outer 필터 조건**에 따�
 |------|------|
 | 2026-03-16 | 초안 작성 (l.id 중복 많을 때 AS-IS 대비 TO-BE worst case 설명). |
 | 2026-03-16 | CBRD-26553 POC 결과 기반 AS-IS/TO-BE 예상값 추가. |
+| 2026-03-17 | 서브쿼리 패턴에서의 완화 요인 추가 (§7). |
