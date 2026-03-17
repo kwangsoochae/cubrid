@@ -32,9 +32,9 @@ AS-IS에서는 correlated 조건이 로컬 `access_pred`에서만 평가되지�
 ### 2.1 AS-IS 한계
 
 - AS-IS XASL 구조에서 dblink 스캔은 **outer와 독립된 단일 스캔**으로 동작한다.
-  - `dblink_open_scan` 시 한 번 `cci_prepare + cci_execute`로 전체/대량 결과를 받아 로컬 리스트에 적재.
-  - 이후 outer 루프에서 **모든 튜플 조합에 대해 로컬 리스트를 스캔**하며 correlated 조건을 평가 (`access_pred`).
-  - outer 루프 반복마다 `dblink_scan_reset`이 호출되지만, AS-IS에서는 **커서를 처음으로 되감는 것**에 그치며 원격 재실행은 없다. 즉, 원격 실행은 최초 1회, 이후는 로컬 리스트를 반복 스캔하는 구조다.
+  - `dblink_open_scan`에서 `cci_prepare + cci_execute`를 수행한 뒤, 상위 buildlist_proc 루프에서 `scan_next_dblink_scan`(`cci_cursor + cci_fetch`)으로 행을 하나씩 읽어 **로컬 결과 리스트 파일에 적재**.
+  - 이후 outer 루프에서 **모든 튜플 조합에 대해 로컬 결과 리스트 파일을 재스캔**하며 correlated 조건을 평가 (`access_pred`).
+  - 원격 실행(`cci_execute`)은 최초 1회만 수행되며, 이후 outer 행마다 결과 리스트 파일을 처음부터 다시 스캔하는 구조다. 
 - 결과적으로:
   - **outer 튜플 수 × 원격 결과 행 수** 만큼의 조합을 로컬에서 검증해야 함.
   - correlated 조건이 선택적인 경우에도, **원격에서는 필터되지 않은 전체 행**을 받아서 로컬에서만 필터링.
@@ -43,7 +43,7 @@ AS-IS에서는 correlated 조건이 로컬 `access_pred`에서만 평가되지�
 
 - TO-BE에서는 dblink 스캔을 **outer 의존 스캔**으로 모델링한다.
   - aptr(`dblink_open_scan`): `cci_prepare`만 수행하고 execute는 하지 않는다.
-  - dptr(outer 튜플마다): `dblink_execute_corr`를 통해 **correlated 값 바인딩 후 원격 SQL 재실행**. AS-IS의 "커서 되감기"가 "원격 재실행"으로 대체된다.
+  - dptr(outer 튜플마다): `dblink_execute_corr`를 통해 **correlated 값 바인딩 후 원격 SQL 재실행**. AS-IS의 "결과 리스트 파일 재스캔"이 "원격 재실행"으로 대체된다.
 - 이렇게 하면:
   - 원격 SQL의 WHERE에 correlated 조건이 포함되어, **outer 튜플마다 “필요한 행만” 반환**.
   - 로컬 리스트 크기와 로컬 `access_pred` 평가 비용이 크게 줄어든다.
