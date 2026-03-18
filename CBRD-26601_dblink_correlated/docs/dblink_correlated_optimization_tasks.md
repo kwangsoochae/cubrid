@@ -107,7 +107,7 @@
 
 ## Step 3: 런타임 (Open / Re-execute / Fetch)
 
-**배경**: 현재 DBLink는 `0x40269c00`(래퍼)의 `aptr_list`에 배치되어 `IS_XASL_INITIAL_STATUS` 체크로 1회만 실행된다. corr_key_count > 0인 경우, 래퍼가 매 outer 행마다 재평가될 때 DBLink도 새 outer 값으로 rebind + re-execute 해야 한다.
+**배경**: 현재 DBLink는 `0x40269c00`(래퍼)의 `aptr_list`에 배치되어 있으나 `XASL_ZERO_CORR_LEVEL`이 없어 `qexec_clear_head_lists`에서 매 래퍼 실행 후 CLEARED로 리셋된다. `IS_XASL_INITIAL_STATUS` 체크에서 매번 true가 되어 **N회 실행**된다. corr_key_count > 0인 경우(TO-BE), 이 재실행 시 DBLink가 새 outer 값으로 rebind + re-execute 하도록 처리한다.
 
 | ID | 작업 | 파일/위치 | 완료 |
 |----|------|-----------|:----:|

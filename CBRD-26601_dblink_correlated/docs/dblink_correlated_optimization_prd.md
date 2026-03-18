@@ -12,11 +12,11 @@
 
 ### 1.1 목적
 
-`SELECT` 절 또는 `WHERE` 절에 `(SELECT col FROM remote_t@conn WHERE remote_t.id = l.id LIMIT 1)` 형태의 **correlated 스칼라 서브쿼리**가 있을 때, 현재는 원격 테이블 전체를 **1회 fetch**하여 로컬에서 필터링하는 구조이다. 이를 **outer 행마다 correlation 키를 바인딩 후 원격 execute**하는 방식으로 변경하여, 원격 전송 데이터량과 로컬 연산을 줄인다.
+`SELECT` 절 또는 `WHERE` 절에 `(SELECT col FROM remote_t@conn WHERE remote_t.id = l.id LIMIT 1)` 형태의 **correlated 스칼라 서브쿼리**가 있을 때, 현재는 outer 행마다 원격 테이블 전체를 **N회 fetch**하여 로컬에서 필터링하는 구조이다. 이를 **outer 행마다 correlation 키를 바인딩 후 원격 execute**하는 방식으로 변경하여, 원격 전송 데이터량과 로컬 연산을 줄인다.
 
 ### 1.2 한 줄 요약
 
-원격 테이블 **전체 1회 fetch → 로컬 N회 필터** 구조를 **outer 행마다 `WHERE col = ?` 바인딩 후 원격 execute** 구조로 교체.
+outer 행마다 원격 테이블 전체를 **N회 fetch → 로컬 필터** 구조를 outer 행마다 **`WHERE col = ?` 바인딩 후 원격 execute**하여 매칭 행만 가져오는 구조로 교체.
 
 ### 1.3 용어
 
@@ -35,20 +35,20 @@
 ### 2.1 현재 동작 (AS-IS)
 
 ```
-outer 스캔 시작
-  └─ aptr 실행 (1회)
-       └─ dblink: cci_prepare + cci_execute('SELECT col FROM remote_t')
-            └─ 결과 전체 → local list
-
-outer 각 행마다
-  └─ dptr(LINK_TO_REGU_VARIABLE) 재평가
+outer 각 행마다 (N회)
+  └─ dptr 루프: 래퍼(wrapper) XASL CLEARED
+  └─ outptr 평가 → EXECUTE_REGU_VARIABLE_XASL(래퍼)
+       └─ aptr 처리: dblink IS_XASL_INITIAL_STATUS? YES (매번 CLEARED 상태)
+            └─ dblink: cci_prepare + cci_execute('SELECT col FROM remote_t')
+                 └─ 결과 전체 → local list
        └─ local list 스캔
             ├─ access_pred: remote.id = l.id  ← 로컬 필터
             └─ instnum: inst_num() <= 1
+       └─ mainblock 말미: qexec_clear_head_lists(aptr) → dblink CLEARED
 ```
 
-- DBLink가 `0x40269c00`(래퍼)의 **aptr_list**에 배치되어, `IS_XASL_INITIAL_STATUS` 체크에서 첫 outer 행 시점에만 실행되고 이후는 **skip** 됨 (`query_executor.c:15292`).
-- `qexec_clear_xasl_head` (`query_executor.c:1395`)가 래퍼(0x40269c00) status만 CLEARED로 리셋하고, **aptr DBLink(0x40249d60)는 건드리지 않으므로** 재실행 없이 동일 list를 N회 재스캔.
+- DBLink가 `0x40269c00`(래퍼)의 **aptr_list**에 배치되어 있으나, `XASL_ZERO_CORR_LEVEL` 플래그가 없어 `qexec_clear_head_lists`에서 매 래퍼 실행 후 CLEARED로 리셋된다 (`query_executor.c:16087`).
+- `IS_XASL_INITIAL_STATUS` 체크에서 CLEARED 상태이면 재실행하므로, DBLink는 outer 행마다 **N회 prepare+execute**된다.
 - 원격 쿼리 (`conn_sql`)에는 `WHERE id = ?`가 없음 — correlation 조건이 로컬 `access_pred`로만 존재.
 
 ### 2.2 문제점
@@ -143,7 +143,7 @@ outer 각 행마다
 | FR-6 | correlation 키가 NULL이면 re-execute를 스킵하고 0건(NULL) 반환한다. | Must |
 | FR-7 | push-down 불가 쿼리(앱 `?` 포함, 조건 없음 등)는 기존 동작(1회 전체 fetch)을 유지한다. | Must |
 | FR-8 | push-down 적용 시 list access spec의 `access_pred`에서 push-down된 조건을 제거한다. | Must |
-| FR-9 | 세션 파라미터 `use_dblink_corr_pushdown`(기본값 `yes`)가 `no`이면 correlated push-down을 적용하지 않고 AS-IS 방식(1회 전체 fetch)을 유지한다. | Should |
+| FR-9 | 세션 파라미터 `use_dblink_corr_pushdown`(기본값 `yes`)가 `no`이면 correlated push-down을 적용하지 않고 AS-IS 방식(N회 실행, conn_sql에 WHERE 없음)을 유지한다. | Should |
 
 ### 5.2 비기능 요구사항
 
@@ -184,8 +184,8 @@ AS-IS                              TO-BE
 
 | 단계 | AS-IS | TO-BE |
 |------|-------|-------|
-| cci_prepare | 1회 | 1회 |
-| cci_execute | 1회 (전체 fetch) | N회 (outer 행마다, 조건 포함) |
+| cci_prepare | N회 (outer 행마다) | 1회 |
+| cci_execute | N회 (전체 fetch, WHERE 없음) | N회 (outer 행마다, WHERE 포함) |
 | 원격 결과 전송 행 수 | 전체 | 매칭 행만 |
 | 로컬 list 스캔 | N회 | 불필요 |
 
@@ -240,7 +240,7 @@ AS-IS                              TO-BE
 | 앱 `?` 포함 서브쿼리 | 기존 방식(1회 fetch) 유지, regression 없음 |
 | push-down 불가 조건 (OR 등) | 기존 방식 유지, regression 없음 |
 | DBLink 단독 사용 (correlated 아님) | 기존 방식 유지, regression 없음 |
-| `use_dblink_corr_pushdown=no` 세션 설정 | push-down 미적용, AS-IS(1회 전체 fetch) 동작 확인 |
+| `use_dblink_corr_pushdown=no` 세션 설정 | push-down 미적용, AS-IS(N회 실행, conn_sql에 WHERE 없음) 동작 확인 |
 
 ---
 

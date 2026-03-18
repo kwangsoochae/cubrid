@@ -174,8 +174,8 @@ ORDER BY l.id;
 
 - 기대:
   - 결과 행 수: 100행.
-  - AS-IS: 원격에서 1회 `SELECT` + 100,000행 전송 후 로컬 필터.
-  - TO-BE: id 1~100에 대해 **100회 execute**, 각 100행씩 전송 → 총 10,000행.
+  - AS-IS: 원격에서 **100회 execute**, 매회 100,000행 전송 → 총 10,000,000행 (conn_sql에 WHERE 없음).
+  - TO-BE: id 1~100에 대해 **100회 execute**, 각 최대 100행씩 전송 → 총 최대 10,000행 (WHERE 조건으로 필터).
   - 실제 실행 시간/네트워크 전송량 비교는 `./run_tc.sh --no-compare TC-105` 또는 별도 프로파일링으로 수행.
 
 ### 4.6 TC-108 — dblink uncorrelated (단독 SELECT)
@@ -284,7 +284,7 @@ ORDER BY id, name;
 - 전제: `setup_remote.sql`, `setup_local.sql` 선행.
 - 동작: 세션 파라미터 `use_dblink_corr_pushdown=no` 설정 → correlated 서브쿼리 실행 → `yes`로 복원.
 - 검증 포인트:
-  - 파라미터 OFF 시 push-down이 적용되지 않아야 함 (`conn_sql`에 `WHERE id = ?` 없음, 1회 전체 fetch 경로 사용).
+  - 파라미터 OFF 시 push-down이 적용되지 않아야 함 (`conn_sql`에 `WHERE id = ?` 없음, N회 실행 경로 유지).
   - 결과는 TC-101과 **완전히 동일** (push-down 여부와 무관하게 정확성 유지).
   - 파라미터 복원 후 재실행 시 push-down이 다시 적용됨.
 - 기대: 각 쿼리 모두 5행, TC-101과 동일 값.

@@ -34,10 +34,10 @@ AS-IS에서는 correlated 조건이 로컬 `access_pred`에서만 평가되지�
 - AS-IS XASL 구조에서 dblink 스캔은 **outer와 독립된 단일 스캔**으로 동작한다.
   - `dblink_open_scan`에서 `cci_prepare + cci_execute`를 수행한 뒤, 상위 buildlist_proc 루프에서 `scan_next_dblink_scan`(`cci_cursor + cci_fetch`)으로 행을 하나씩 읽어 **로컬 결과 리스트 파일에 적재**.
   - 이후 outer 루프에서 **모든 튜플 조합에 대해 로컬 결과 리스트 파일을 재스캔**하며 correlated 조건을 평가 (`access_pred`).
-  - 원격 실행(`cci_execute`)은 최초 1회만 수행되며, 이후 outer 행마다 결과 리스트 파일을 처음부터 다시 스캔하는 구조다. 
+  - 원격 실행(`cci_execute`)은 outer 행마다 **N회** 수행된다. DBLink XASL에 `XASL_ZERO_CORR_LEVEL`이 설정되지 않아 매 래퍼 실행 후 CLEARED로 리셋되기 때문이다.
 - 결과적으로:
-  - **outer 튜플 수 × 원격 결과 행 수** 만큼의 조합을 로컬에서 검증해야 함.
-  - correlated 조건이 선택적인 경우에도, **원격에서는 필터되지 않은 전체 행**을 받아서 로컬에서만 필터링.
+  - outer 행마다 원격 전체를 **N회 fetch** 하고, 그 중 correlated 조건에 맞는 행만 `access_pred`로 필터링.
+  - correlated 조건이 선택적인 경우에도, **원격에서는 필터되지 않은 전체 행**을 N번 반복해서 받음.
 
 ### 2.2 TO-BE 개선 방향
 

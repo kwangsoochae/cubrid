@@ -209,9 +209,9 @@ dblink_open_scan():
 /* AS-IS aptr 루프 */
 for (aptr = xasl->aptr_list; aptr; aptr = aptr->next) {
   if (IS_XASL_INITIAL_STATUS(aptr->status)) {
-    qexec_execute_mainblock(aptr, vd);  // 1회만 실행
+    qexec_execute_mainblock(aptr, vd);  // CLEARED 상태이면 실행 (correlated DBLink는 매 outer 행마다 CLEARED → N회 실행)
   }
-  // XASL_SUCCESS면 skip
+  // XASL_ZERO_CORR_LEVEL 있는 비상관 서브쿼리만 XASL_SUCCESS 유지 → skip
 }
 
 /* TO-BE */

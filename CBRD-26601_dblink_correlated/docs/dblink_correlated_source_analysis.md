@@ -26,9 +26,10 @@
 
 - **패턴**: 외부 쿼리의 행마다, 원격 테이블에서 "현재 outer 행과 맞는" 값 하나를 스칼라로 가져오는 형태.
 - **현재 동작 (AS-IS)**:
-  1. 원격에서 `SELECT name, id FROM remote_t` **1회** 전체 실행 → 결과 전체를 로컬 리스트에 저장.
-  2. outer 각 행마다, 해당 리스트를 다시 스캔하면서 **로컬에서** `remote_t.id = l.id` 및 `inst_num() <= 1` 필터 적용.
-- **한계**: 원격 테이블이 크면 **1회 전체 전송** 후 대부분 버리므로, 전송량·로컬 연산 모두 낭비.
+  1. 원격에서 `SELECT name, id FROM remote_t` **outer 행마다 N회** 실행 → 매번 결과 전체를 로컬 리스트에 저장.
+  2. outer 각 행마다, 해당 리스트를 스캔하면서 **로컬에서** `remote_t.id = l.id` 및 `inst_num() <= 1` 필터 적용.
+  - 재실행 원인: 래퍼 XASL 실행 말미의 `qexec_clear_head_lists(aptr_list)` 가 DBLink XASL를 매번 CLEARED로 리셋.
+- **한계**: outer 행마다 원격 테이블 **전체** 를 가져오므로, 매칭 비율이 낮을수록 전송량·로컬 연산 모두 낭비.
 
 ---
 
@@ -214,12 +215,12 @@ spec->info.spec.derived_table_type 분기:
 
 | 단계 | 함수 | 시점 |
 |------|------|------|
-| aptr 실행 (DBLink 원격 질의 1회) | `qexec_execute_connect_by_iter_proc` / `qexec_execute_mainblock_iterations` | outer scan 최초 시작 시 |
-| DBLink open | `dblink_open_scan()` (`dblink_scan.c`) | aptr XASL 실행 중 |
-| cci_prepare + cci_execute | `dblink_open_scan()` 내 | 1회만 |
+| aptr 실행 (DBLink 원격 질의) | `qexec_execute_mainblock_internal()` aptr 루프 | outer 행마다 (`IS_XASL_INITIAL_STATUS` true → 실행) |
+| DBLink open | `dblink_open_scan()` (`dblink_scan.c`) | aptr XASL 실행 시마다 |
+| cci_prepare + cci_execute | `dblink_open_scan()` 내 | **outer 행마다 N회** |
 | 결과 fetch → 리스트 저장 | `scan_next_dblink_scan()` (`scan_manager.c`) | aptr buildlist 루프 |
-| dptr 실행 (outer 행마다) | `qexec_execute_query()` dptr loop | outer 각 행 처리 시 |
-| 리스트 재스캔 + 로컬 predicate | `scan_next_list_scan()` | dptr buildlist 루프 |
+| 래퍼 XASL 말미 aptr clear | `qexec_clear_head_lists(aptr_list)` (`query_executor.c` L16087) | 래퍼 mainblock 완료 후 → DBLink XASL CLEARED |
+| 리스트 스캔 + 로컬 predicate | `scan_next_list_scan()` | 래퍼 buildlist 루프 |
 | instnum 평가 (LIMIT) | `qexec_eval_instnum_pred()` | 리스트 행 읽을 때마다 |
 
 ---
@@ -401,7 +402,8 @@ struct dblink_scan_info {
 
 ### 6.1 실행 흐름 다이어그램
 
-**① 전체 흐름 (AS-IS)**: prepare+execute+fetch는 **1회만** — 첫 outer 행 처리 시 aptr에서 수행. 이후 행은 같은 리스트 재사용. 
+**① 전체 흐름 (AS-IS)**: prepare+execute+fetch는 **outer 행마다 N회** 발생한다.
+래퍼 XASL 실행 말미에 `qexec_clear_head_lists(aptr_list)` 가 DBLink XASL를 CLEARED로 리셋하기 때문에, 다음 outer 행에서 DBLink XASL가 다시 실행된다.
 
 ```mermaid
 flowchart TB
@@ -409,19 +411,17 @@ flowchart TB
     I1[outer 스캔 준비]
   end
   subgraph loop["outer 행마다 (N회)"]
-    L1[행 읽기] --> L2[outptr 평가]
-    L2 --> L3[EXECUTE_REGU_VARIABLE_XASL]
+    L1[행 읽기] --> L2[dptr loop: clear_head_lists_with_truncate 래퍼 XASL]
+    L2 --> L3[outptr 평가 → EXECUTE_REGU_VARIABLE_XASL]
     L3 --> L4[래퍼 XASL 실행]
-    L4 --> L5A{aptr: 첫 행?}
-    L5A -->|Yes| L5B[prepare + execute + fetch → list 저장]
-    L5A -->|No| L5C[SKIP, 기존 list 재사용]
-    L5B --> L9[list access 스캔]
-    L5C --> L9
-    L9 --> L10[where 평가 로컬 + instnum≤1]
-    L10 --> L11[스칼라 반환]
-    L11 --> L12[qexec_clear_xasl_head]
-    L12 --> L13[다음 행]
-    L13 --> L1
+    L4 --> L5[aptr: IS_XASL_INITIAL_STATUS=true → DBLink XASL 실행]
+    L5 --> L6[prepare + execute + fetch → list 저장]
+    L6 --> L7[list access 스캔]
+    L7 --> L8[where 평가 로컬 + instnum≤1]
+    L8 --> L9[스칼라 반환]
+    L9 --> L10["래퍼 mainblock 말미:\nqexec_clear_head_lists(aptr) → DBLink XASL CLEARED"]
+    L10 --> L11[다음 행]
+    L11 --> L1
   end
   I1 --> L1
 ```
@@ -430,30 +430,41 @@ flowchart TB
 
 ```mermaid
 flowchart TB
-  subgraph row1["outer 행 1 (첫 번째)"]
+  subgraph row1["outer 행 1"]
     direction LR
     W1S([래퍼 XASL: CLEARED]) -->|execute| W1E([래퍼 XASL: SUCCESS])
-    D1S([DBLink XASL: INITIALIZED]) -->|"cci_execute ✓\n원격 전체 fetch"| D1E([DBLink XASL: SUCCESS])
+    D1S([DBLink XASL: CLEARED]) -->|"cci_execute ✓\n원격 전체 fetch"| D1E([DBLink XASL: SUCCESS])
   end
 
   subgraph row2["outer 행 2"]
     direction LR
     W2S([래퍼 XASL: CLEARED]) -->|execute| W2E([래퍼 XASL: SUCCESS])
-    D2S([DBLink XASL: SUCCESS]) -. "IS_XASL_INITIAL_STATUS = false\n→ SKIP, 리스트 재사용" .-> D2E([DBLink XASL: SUCCESS])
+    D2S([DBLink XASL: CLEARED]) -->|"cci_execute ✓\n원격 전체 fetch"| D2E([DBLink XASL: SUCCESS])
   end
 
   subgraph rowN["outer 행 3 ~ N"]
     direction LR
     WNS([래퍼 XASL: CLEARED]) -->|execute| WNE([래퍼 XASL: SUCCESS])
-    DNS([DBLink XASL: SUCCESS]) -. "SKIP" .-> DNE([DBLink XASL: SUCCESS])
+    DNS([DBLink XASL: CLEARED]) -->|"cci_execute ✓\n원격 전체 fetch"| DNE([DBLink XASL: SUCCESS])
   end
 
-  row1 -->|"clear_xasl_head: 래퍼 XASL → CLEARED, DBLink XASL는 그대로"| row2
-  row2 -->|"clear_xasl_head (반복)"| rowN
+  row1 -->|"래퍼 mainblock 말미: clear_head_lists(aptr) → DBLink XASL CLEARED\ndptr loop: clear_head_lists_with_truncate → 래퍼 XASL CLEARED"| row2
+  row2 -->|"(반복)"| rowN
 ```
 
-> **핵심**: `qexec_clear_xasl_head(래퍼)`는 래퍼만 CLEARED로 리셋하고 aptr(DBLink)는 건드리지 않는다.
-> 그 결과 래퍼는 N회 CLEARED↔SUCCESS를 반복하지만, DBLink는 행 1에서 SUCCESS가 된 뒤 고정되어 재실행이 없다.
+> **핵심**: 래퍼 XASL mainblock 실행 말미에 `qexec_clear_head_lists(xasl->aptr_list)`
+> (query_executor.c L16087)가 호출되어 DBLink XASL의 status가 CLEARED로 리셋된다.
+> DBLink XASL는 `XASL_ZERO_CORR_LEVEL` 플래그가 없으므로 skip되지 않고 매번 clear된다.
+>
+> **`XASL_ZERO_CORR_LEVEL` 미설정 원인**: 옵티마이저 단계에서
+> `query_rewrite_select.c` L112가 `mq_copypush_sargable_terms(래퍼 XASL, DBLink_spec)`를 호출한다.
+> 이때 `pt_check_pushable_term`은 DBLink XASL의 `derived_table`이 `PT_DBLINK_TABLE`이 아닌 `PT_SELECT`이므로
+> correlated 술어 `_dbl.id = l.id`의 push를 허용한다.
+> `mq_copypush_sargable_terms_helper` (view_transform.c L4734)는 push 성공 시
+> DBLink XASL의 `correlation_level`을 0 → 2로 변경한다 (`statement->correlation_level + 1`).
+> 이 변경이 XASL 생성 **이전**에 일어나므로, `parser_generate_xasl_proc(DBLink XASL)` (L18096)는
+> `correlation_level == 0` 조건을 충족하지 못해 `XASL_ZERO_CORR_LEVEL`을 설정하지 않는다.
+> 그 결과 DBLink는 outer 행 N회마다 재실행된다.
 
 ### 6.2 텍스트 형식 상세 흐름
 
@@ -462,30 +473,31 @@ flowchart TB
   qexec_execute_mainblock_internal(outer: 🔴0x4026a110)
     └─ 스캔 준비: scan_open_scan(local_t)
 
-[outer 행마다 반복]
+[outer 행마다 반복 (N회)]
   local_t 행 읽기 → val_list: [l.id=INTEGER, l.name=VARCHAR]
+
+  [dptr 루프]  ← qexec_execute_scan() 또는 qexec_intprt_fnc()
+  for xptr in outer->dptr_list:
+    qexec_clear_head_lists_with_truncate(🟡0x40269c00)  ← 래퍼 XASL list 파괴 + status=CLEARED
+    if XASL_LINK_TO_REGU_VARIABLE: continue  ← 래퍼 XASL는 이 플래그가 있으므로 execute SKIP
 
   [outptr 평가]
   fetch_peek_dbval(TYPE_CONSTANT[xasl:🟡0x40269c00])
     └─ EXECUTE_REGU_VARIABLE_XASL(🟡0x40269c00, vd)  ← xasl.h
-         └─ IS_XASL_INITIAL_STATUS(🟡0x40269c00) → YES (매번 clear됨)
+         └─ IS_XASL_INITIAL_STATUS(🟡0x40269c00) → YES (dptr loop에서 CLEARED)
          └─ qexec_execute_mainblock(🟡0x40269c00)
-              ├─ aptr_list 처리  ← qexec_execute_mainblock_internal()
+              ├─ aptr_list 처리  ← qexec_execute_mainblock_internal() L15371
               │    └─ 🔵0x40249d60: IS_XASL_INITIAL_STATUS?
-              │         ├─ [첫 행] YES  → qexec_execute_mainblock(🔵0x40249d60)
-              │         │              → dblink_open_scan: connect+prepare+execute → list
-              │         └─ [2번째+] NO  → SKIP (list 재사용, 재실행 없음)
-              └─ list access: 🔵0x40249d60->list_id 스캔
-                   ├─ access_pred: _dbl.id = l.id  (로컬 필터)
-                   ├─ instnum: inst_num() <= 1
-                   └─ → single_tuple → regu_var->value.dbvalptr
-
-  [다음 outer 행 준비]  ← dptr 루프 (query_executor.c)
-  qexec_clear_head_lists(🟡0x40269c00)
-    └─ qexec_clear_xasl_head(🟡0x40269c00)  ← query_executor.c
-         ├─ list_id 파괴 (qfile_destroy_list)
-         ├─ status = XASL_CLEARED  → IS_XASL_INITIAL_STATUS = true 재진입 허용
-         └─ ※ aptr 🔵0x40249d60는 clear 안 함 → XASL_SUCCESS 유지 → 재실행 없음
+              │         └─ [매 outer 행] YES (CLEARED 상태)
+              │              → qexec_execute_mainblock(🔵0x40249d60)
+              │              → dblink_open_scan: connect+prepare+execute → list 저장
+              ├─ list access: 🔵0x40249d60->list_id 스캔
+              │    ├─ access_pred: _dbl.id = l.id  (로컬 필터)
+              │    ├─ instnum: inst_num() <= 1
+              │    └─ → single_tuple → regu_var->value.dbvalptr
+              └─ [mainblock 말미] qexec_clear_head_lists(래퍼 XASL->aptr_list)  ← L16087
+                   └─ DBLink XASL는 XASL_ZERO_CORR_LEVEL 없음 → qexec_clear_xasl_head(DBLink XASL)
+                        └─ DBLink XASL status = XASL_CLEARED  ← 다음 outer 행에서 재실행 허용
 ```
 
 ### 6.3 핵심 매크로·함수 (코드 참조)
@@ -494,9 +506,16 @@ flowchart TB
 |------|--------|------|
 | `xasl.h` | `IS_XASL_INITIAL_STATUS(s)` | `(s) <= XASL_CLEARED` — INITIALIZED 또는 CLEARED 이면 true |
 | `xasl.h` | `EXECUTE_REGU_VARIABLE_XASL(thread_p, r, v)` | `XASL_LINK_TO_REGU_VARIABLE` xasl의 lazy 실행 진입점 |
-| `query_executor.c` | `qexec_clear_xasl_head()` | list_id 파괴 + status=XASL_CLEARED. **aptr는 건드리지 않음** |
-| `query_executor.c` | dptr 루프 | `XASL_LINK_TO_REGU_VARIABLE` 이면 skip; 나머지는 `qexec_clear_head_lists` |
-| `query_executor.c` | `qexec_execute_mainblock_internal()` aptr 루프 | `IS_XASL_INITIAL_STATUS` 체크 후 execute; 이미 SUCCESS면 skip |
+| `xasl.h` | `XASL_ZERO_CORR_LEVEL` | correlation_level==0 비상관 서브쿼리 플래그. `qexec_clear_head_lists`에서 skip 대상. |
+| `query_executor.c` | `qexec_clear_xasl_head()` | list_id 파괴 + status=XASL_CLEARED. 직접 호출 시 aptr는 건드리지 않음. |
+| `query_executor.c` | `qexec_clear_head_lists()` | `XASL_ZERO_CORR_LEVEL` 없는 노드에 `qexec_clear_xasl_head` 적용 |
+| `query_executor.c` | `qexec_clear_head_lists_with_truncate()` | `qexec_clear_head_lists`와 유사하나 list truncate 방식 사용 |
+| `query_executor.c` | dptr 루프 (L8333, L9226) | `qexec_clear_head_lists_with_truncate(래퍼 XASL)` 후, `XASL_LINK_TO_REGU_VARIABLE` 이면 execute skip |
+| `query_executor.c` | `qexec_execute_mainblock_internal()` aptr 루프 (L15371) | `IS_XASL_INITIAL_STATUS` 체크 후 execute |
+| `query_executor.c` | `qexec_execute_mainblock_internal()` 말미 (L16082) | `qexec_clear_head_lists(aptr_list)` → **DBLink XASL를 매 래퍼 실행 후 CLEARED로 리셋** |
+| `query_rewrite_select.c` | L112: `mq_copypush_sargable_terms(래퍼 XASL, DBLink_spec)` | 옵티마이저 단계에서 `_dbl.id = l.id`를 DBLink XASL WHERE에 복사. `DBLink XASL.correlation_level` 0→2로 변경 → **`XASL_ZERO_CORR_LEVEL` 미설정의 직접 원인** |
+| `view_transform.c` | `mq_copypush_sargable_terms_helper()` (L4734) | push 성공 시 `pt_set_correlation_level(subquery, statement->level + 1)` 호출. DBLink XASL가 `PT_DBLINK_TABLE`이 아닌 `PT_SELECT`이므로 `pt_check_pushable_term` 차단 없음 |
+| `xasl_generation.c` | `parser_generate_xasl_proc()` (L18096) | `correlation_level==0` 이면 `XASL_ZERO_CORR_LEVEL` 설정. DBLink XASL는 L4734에서 이미 level=2이므로 해당 없음 |
 | `scan_manager.c` | `scan_reset_scan_block()` | `S_DBLINK_SCAN` reset → `dblink_scan_reset()` (cursor만 되감기) |
 | `dblink_scan.c` | `dblink_open_scan()` | connect + cci_prepare + cci_bind_param(host_vars) + cci_execute |
 | `dblink_scan.c` | `dblink_scan_reset()` | `scan_info->cursor = CCI_CURSOR_FIRST` 만 수행, re-execute 없음 |
@@ -505,13 +524,19 @@ flowchart TB
 
 | 단계 | 횟수 |
 |------|------|
-| 원격 connect + prepare + execute | **1회** (첫 outer 행 시점) |
-| 원격 결과 전체 fetch → local list | **1회** |
+| 원격 connect + prepare + execute | **N회** (outer 행마다) |
+| 원격 결과 전체 fetch → local list | **N회** (매번 전체 행 fetch) |
 | local list 스캔 (access_pred + instnum) | **outer 행 수 N회** |
 | `dblink_scan_reset` 호출 | 해당 없음 (서브쿼리 aptr 경로는 reset 미사용) |
 
+**재실행 원인**: 래퍼 XASL의 `qexec_execute_mainblock_internal` 말미에서
+`qexec_clear_head_lists(xasl->aptr_list)` (L16087) 가 호출되어 DBLink XASL의 status가 매번 CLEARED로 리셋된다.
+DBLink XASL는 `XASL_ZERO_CORR_LEVEL` 플래그가 없으므로 skip되지 않는다.
+
+> 실측: local_t 5행 → `/* DBLINK SELECT */ SELECT name, id FROM remote_t r` prepare+execute **5회** 발생.
+
 → `scan_reset_scan_block` → `dblink_scan_reset` 경로는 **FROM 절 직접 조인** 시에만 사용됨.
-서브쿼리 내 dblink는 aptr에 고정되어 **1회 실행 후 list 재사용** 패턴.
+서브쿼리 내 dblink는 매 outer 행마다 재실행되며 list 재사용은 없다.
 
 ---
 
@@ -651,17 +676,27 @@ correlated 집계의 경우 outer 참조(`l.id`)를 정적 conn_sql 문자열에
 
 | 항목 | 현재 (AS-IS) | 개선 후 (TO-BE) |
 |------|-------------|-----------------|
-| 원격 execute 횟수 | **1회** (전체 fetch) | **N회** (outer 행마다, WHERE id=? 포함) |
+| 원격 execute 횟수 | **N회** (outer 행마다, WHERE 없이 전체 fetch) | **N회** (outer 행마다, `WHERE id=?` 포함) |
+| 원격 전송 행 수 | 매 실행마다 전체 행 | 매 실행마다 매칭 행만 |
 | 로컬 필터링 | N회 리스트 스캔 + predicate 평가 | 불필요 (원격에서 필터) |
-| 네트워크 전송 | 전체 행 전송 | 매칭 행만 전송 |
+| 네트워크 전송 | 전체 행 × N회 전송 | 매칭 행만 × N회 전송 |
 | 효율 조건 | - | 원격 테이블 크고, 매칭 비율 낮을수록 유리 |
+
+> **AS-IS 오해 정정**: DBLink는 "1회만" 실행되는 것이 아니라 outer 행마다 재실행된다.
+> `qexec_execute_mainblock_internal` 말미의 `qexec_clear_head_lists(aptr_list)` 가 DBLink XASL를 매번 CLEARED로 리셋하기 때문.
+> 문제는 "재실행 횟수"가 아니라 **"원격 SQL에 WHERE 조건 없이 전체 행을 가져온다"** 는 점이다.
+>
+> **주의**: AS-IS의 재실행은 `mq_copypush_sargable_terms_helper`의 `correlation_level` 변경에 의한 **부수 효과**다.
+> 이 원인이 수정되면 DBLink가 1회 실행으로 바뀌므로, TO-BE에서는 재실행을 **명시적으로 구현**해야 한다.
 
 ### 개선을 위해 변경 필요한 지점 (CBRD-26601 구현 대상)
 
-아래 4개 항목은 CBRD-26601 correlated push-down 구현 시 변경해야 할 핵심 지점이다.
-각 항목은 Design Doc의 구현 태스크(T2-1, T3-1~T3-3)와 1:1로 대응된다.
+아래 4개 항목이 핵심 구현 대상이다.
 
-1. **🔵0x40249d60 재실행 허용** *(T3-1)*: `qexec_clear_xasl_head(🟡0x40269c00)` 시 aptr(🔵0x40249d60)도 status를 CLEARED로 reset.
+1. **DBLink XASL 재실행 보장** *(T3-1)*: TO-BE에서는 outer 행마다 DBLink XASL를 명시적으로 재실행해야 한다.
+   - AS-IS에서 재실행이 발생하는 것은 `mq_copypush_sargable_terms_helper`가 `correlation_level`을 0→2로 바꾸어 `XASL_ZERO_CORR_LEVEL`이 미설정되는 **부수 효과**일 뿐이다.
+   - 해당 부수 효과가 수정되면(`XASL_ZERO_CORR_LEVEL` 설정 등) DBLink XASL는 aptr 1회 실행으로 되돌아가고 TO-BE 구현이 깨진다.
+   - 따라서 TO-BE에서는 `dblink_execute_corr` 호출(또는 이에 상응하는 재실행 트리거)을 **명시적으로 구현**해야 한다.
 2. **correlation 조건 → DBLink SQL에 `?` 삽입** *(T2-1)*: `pt_to_dblink_table_spec_list` (또는 그 전 단계)에서 correlation predicate를 탐지하여 `WHERE col = ?` append.
 3. **bind 정보 전달** *(T2-1 + T3-2)*: `dblink_spec_node` / `DBLINK_SCAN_INFO` 에 correlation key regu_list 추가. `dblink_open_scan` 에서 `vd` 를 통해 현재 outer 행 값 바인딩 후 execute.
 4. **predicate 제거** *(T3-3)*: access_pred에서 push-down된 조건 제거 (이중 필터 방지).
