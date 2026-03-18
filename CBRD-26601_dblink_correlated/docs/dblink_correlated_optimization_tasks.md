@@ -112,9 +112,8 @@
 | ID | 작업 | 파일/위치 | 완료 |
 |----|------|-----------|:----:|
 | T3-1 | `dblink_open_scan()`: `corr_key_count > 0`이면 `cci_prepare`만 수행, `cci_execute` 생략. spec → scan_info로 `corr_key_count`, `corr_key_regu_list` 복사. | `src/query/dblink_scan.c` `dblink_open_scan()`, `src/query/dblink_scan.h` `DBLINK_SCAN_INFO` | [ ] |
-| T3-2 | corr DBLink aptr 재실행 메커니즘 구현: `qexec_execute_mainblock_internal`의 aptr 처리 루프(`query_executor.c:15292`)에서, `spec->s.dblink_node.corr_key_count > 0`인 DBLink aptr가 `XASL_SUCCESS` 상태일 때 기존 list를 파괴하고 신규 함수 `dblink_execute_corr(thread_p, aptr, vd)`를 호출. 이 함수에서 `corr_key_regu_list` 현재 값으로 `cci_bind_param` + `cci_execute` 수행 후 결과를 list에 재적재. 실패 시 에러 설정·상위 전파(NFR-2). | `src/query/query_executor.c`, `src/query/dblink_scan.c` (`dblink_execute_corr` 신규) | [ ] |
+| T3-2 | corr DBLink aptr 재실행 메커니즘 구현: `qexec_execute_mainblock_internal`의 aptr 처리 루프(`query_executor.c:15292`)에서, `IS_CORR_DBLINK_XASL(aptr)`가 true인 aptr의 INITIAL/SUCCESS 분기 처리. (a) INITIAL: `qexec_execute_mainblock`으로 `dblink_open_scan`(prepare만) 후 `scan_reset_scan_block(&aptr->spec_list->s_id)` 호출. (b) SUCCESS: list 파괴 후 `scan_reset_scan_block` 호출. `scan_reset_scan_block`은 `dblink_scan_reset(scan_info, s_id->vd)`를 호출하며, 이 함수에서 `corr_key_regu_list`를 현재 outer 행 값으로 `cci_bind_param` + `cci_execute`한다. 실패 시 에러 설정·상위 전파(NFR-2). | `src/query/query_executor.c`, `src/query/dblink_scan.c` (`dblink_scan_reset` 확장), `src/query/scan_manager.c` (`s_id->vd` 전달 추가) | [ ] |
 | T3-3 | NULL 처리: re-execute 직전 corr_key 값이 NULL이면 execute 스킵 → 빈 list → 0건(NULL 스칼라) 반환. | `src/query/dblink_scan.c` 또는 `query_executor.c` T3-2 내 | [ ] |
-| T3-4 | **[Phase 2]** 이전 행 키 비교 최적화: `DBLINK_SCAN_INFO`에 `prev_corr_key`(DB_VALUE), `prev_key_valid`(bool) 추가. `dblink_execute_corr` 진입 시 현재 corr key와 이전 값을 비교하여 같으면 `dblink_scan_reset`(cursor 되감기)만 수행하고 `cci_execute` 스킵. outer 행이 키 순으로 정렬된 경우(index scan) 연속 중복 키에 대한 원격 RTT를 제거한다. T3-1~T3-3 완료 후 적용. (설계: Design Doc §3.8) | `src/query/dblink_scan.c`, `src/query/dblink_scan.h` | [ ] |
 
 ### Step 3 점검
 
@@ -213,7 +212,7 @@ FROM local_t l WHERE l.id IS NULL;
 - [ ] **Step 0** — T0-1 [ ], T0-2 [ ]
 - [ ] **Step 1** — T1-1 [ ], T1-2 [ ], T1-3 [ ]
 - [ ] **Step 2** — T2-1 [ ]
-- [ ] **Step 3** — T3-1 [ ], T3-2 [ ], T3-3 [ ], T3-4 [ ] *(Phase 2)*
+- [ ] **Step 3** — T3-1 [ ], T3-2 [ ], T3-3 [ ]
 - [ ] **Step 4** — T4-1 [ ]
 - [ ] **Step 5** — T5-1 [ ]
 - [ ] **Step 6** — T6-1 [ ], T6-2 [ ], T6-3 [ ], T6-4 [ ], T6-5 [ ], T6-6 [ ], T6-7 [ ]
@@ -227,4 +226,4 @@ FROM local_t l WHERE l.id IS NULL;
 | 2026-03-13 | 초안 작성 |
 | 2026-03-13 | Design Doc 기준 정합성 반영: T0-1 내용 교체(C-1~C-5), Step 1 배경 확정(rewrite 유지 옵션 B), T3-2 판별 조건·신규 함수명 명확화, T4-1 전제 조건 추가 |
 | 2026-03-16 | FR-9 반영: T1-3(`use_dblink_corr_pushdown` 세션 파라미터), T6-7(파라미터 OFF 시 AS-IS 유지 검증) 추가; PRD 매핑·체크리스트 업데이트 |
-| 2026-03-16 | T3-4 추가: 이전 행 키 비교 최적화 (Phase 2, Design Doc §3.8) |
+| 2026-03-18 | T3-4 제거: 이전 행 키 비교 최적화는 Phase 2 추가 개선 사항 (Design Doc §7.1) — Tasks 범위 밖 |

@@ -67,8 +67,8 @@ SQL 문자열
   서버: xqmgr_execute_query → XASL 캐시 등록 / 실행
   │
   ▼ [9] XASL 실행 (query_executor.c)
-  outer scan → (aptr 1회) DBLink cci_execute → list 저장
-  → (dptr N회) 리스트 재스캔 + 로컬 predicate 평가
+  outer scan → (aptr N회) DBLink cci_execute 후 scan_next_dblink_scan으로 1행씩 on-demand fetch → list 누적
+  → (래퍼) 누적된 리스트 재스캔 + 로컬 predicate 평가
   │
   ▼ 결과 리스트(QFILE_LIST_ID) → 클라이언트 fetch
 ```
@@ -415,7 +415,8 @@ flowchart TB
     L2 --> L3[outptr 평가 → EXECUTE_REGU_VARIABLE_XASL]
     L3 --> L4[래퍼 XASL 실행]
     L4 --> L5[aptr: IS_XASL_INITIAL_STATUS=true → DBLink XASL 실행]
-    L5 --> L6[prepare + execute + fetch → list 저장]
+    L5 --> L6A[prepare + execute\ndblink_open_scan]
+    L6A --> L6B["scan_next_dblink_scan 루프:\ncci_cursor+cci_fetch → list 누적"]
     L6 --> L7[list access 스캔]
     L7 --> L8[where 평가 로컬 + instnum≤1]
     L8 --> L9[스칼라 반환]
@@ -490,7 +491,8 @@ flowchart TB
               │    └─ 🔵0x40249d60: IS_XASL_INITIAL_STATUS?
               │         └─ [매 outer 행] YES (CLEARED 상태)
               │              → qexec_execute_mainblock(🔵0x40249d60)
-              │              → dblink_open_scan: connect+prepare+execute → list 저장
+              │              → dblink_open_scan: connect+prepare+execute (cursor=FIRST)
+              │              → buildlist 루프: scan_next_dblink_scan(cci_cursor+cci_fetch) → list 누적
               ├─ list access: 🔵0x40249d60->list_id 스캔
               │    ├─ access_pred: _dbl.id = l.id  (로컬 필터)
               │    ├─ instnum: inst_num() <= 1
@@ -696,7 +698,7 @@ correlated 집계의 경우 outer 참조(`l.id`)를 정적 conn_sql 문자열에
 1. **DBLink XASL 재실행 보장** *(T3-1)*: TO-BE에서는 outer 행마다 DBLink XASL를 명시적으로 재실행해야 한다.
    - AS-IS에서 재실행이 발생하는 것은 `mq_copypush_sargable_terms_helper`가 `correlation_level`을 0→2로 바꾸어 `XASL_ZERO_CORR_LEVEL`이 미설정되는 **부수 효과**일 뿐이다.
    - 해당 부수 효과가 수정되면(`XASL_ZERO_CORR_LEVEL` 설정 등) DBLink XASL는 aptr 1회 실행으로 되돌아가고 TO-BE 구현이 깨진다.
-   - 따라서 TO-BE에서는 `dblink_execute_corr` 호출(또는 이에 상응하는 재실행 트리거)을 **명시적으로 구현**해야 한다.
+   - 따라서 TO-BE에서는 `scan_reset_scan_block` → `dblink_scan_reset(scan_info, vd)` 경로를 통한 재실행 트리거를 **명시적으로 구현**해야 한다.
 2. **correlation 조건 → DBLink SQL에 `?` 삽입** *(T2-1)*: `pt_to_dblink_table_spec_list` (또는 그 전 단계)에서 correlation predicate를 탐지하여 `WHERE col = ?` append.
 3. **bind 정보 전달** *(T2-1 + T3-2)*: `dblink_spec_node` / `DBLINK_SCAN_INFO` 에 correlation key regu_list 추가. `dblink_open_scan` 에서 `vd` 를 통해 현재 outer 행 값 바인딩 후 execute.
 4. **predicate 제거** *(T3-3)*: access_pred에서 push-down된 조건 제거 (이중 필터 방지).
