@@ -302,9 +302,7 @@ for (aptr = xasl->aptr_list; aptr; aptr = aptr->next) {
 
 > **IS_CORR_DBLINK_XASL 판별 매크로**:
 > ```c
-> #define IS_CORR_DBLINK_XASL(x) \
->   ((x)->spec_list != NULL && (x)->spec_list->type == TARGET_DBLINK \
->    && (x)->spec_list->s.dblink_node.corr_key_count > 0)
+> #define IS_CORR_DBLINK_XASL(x)  XASL_IS_FLAGED(x, XASL_CORR_DBLINK)
 > ```
 
 #### `dblink_scan_reset()` 확장 (`dblink_join_improve` 패턴 적용)

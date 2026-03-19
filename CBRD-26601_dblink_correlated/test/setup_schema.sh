@@ -180,6 +180,22 @@ SELECT a.id, a.name,
   (SELECT r.name FROM remote_t@cubrid_conn r
    WHERE r.id = a.id ORDER BY r.name LIMIT 1) AS remote_name
 FROM local_t a ORDER BY a.id;"
+
+        echo ""
+        echo "========================================"
+        echo " [검증] presentation 예제: orders × customer@cubrid_conn"
+        echo "========================================"
+        echo "  쿼리: SELECT order_id, amount, (SELECT c.name FROM customer@cubrid_conn WHERE cust_id=? LIMIT 1)"
+        echo ""
+        $CSQL_LOCAL -c "
+SELECT o.order_id,
+       o.amount,
+       (SELECT c.name
+          FROM customer@cubrid_conn c
+         WHERE c.cust_id = o.cust_id
+         LIMIT 1) AS cust_name
+  FROM orders o
+ ORDER BY o.order_id;"
         ;;
     large)
         echo "  행 수 확인"

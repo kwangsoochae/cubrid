@@ -25,5 +25,21 @@ INSERT INTO local_t VALUES (5, 'local_5');
 
 COMMIT;
 
+-- presentation_asistobe.md 예제용: orders 테이블 (로컬)
+-- 5행, cust_id 1~5 각 1건 → customer@cubrid_conn 과 1:1 매칭
+DROP TABLE IF EXISTS orders;
+CREATE TABLE orders (
+    order_id  INT,
+    amount    INT,
+    cust_id   INT
+);
+INSERT INTO orders VALUES (1, 10000, 1);
+INSERT INTO orders VALUES (2, 20000, 2);
+INSERT INTO orders VALUES (3, 15000, 3);
+INSERT INTO orders VALUES (4, 30000, 4);
+INSERT INTO orders VALUES (5,  5000, 5);
+
+COMMIT;
+
 drop server if exists cubrid_conn;
 create server cubrid_conn (HOST='localhost', PORT=33000, DBNAME='testdb_remote', USER='cubrid', PASSWORD='cubrid');

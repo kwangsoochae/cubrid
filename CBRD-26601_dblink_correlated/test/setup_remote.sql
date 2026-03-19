@@ -40,6 +40,24 @@ INSERT INTO remote_unique_t VALUES (5, 'remote_ue1');
 
 COMMIT;
 
+-- presentation_asistobe.md 예제용: customer 테이블 (원격)
+-- orders 5행 × customer 7행 — outer row마다 1건 매칭, 2건은 매칭 없음
+DROP TABLE IF EXISTS customer;
+CREATE TABLE customer (
+    cust_id  INT,
+    name     VARCHAR(32)
+);
+INSERT INTO customer VALUES (1, 'Alice');
+INSERT INTO customer VALUES (2, 'Bob');
+INSERT INTO customer VALUES (3, 'Charlie');
+INSERT INTO customer VALUES (4, 'Diana');
+INSERT INTO customer VALUES (5, 'Eve');
+INSERT INTO customer VALUES (6, 'Frank');   -- orders에 매칭 없음
+INSERT INTO customer VALUES (7, 'Grace');   -- orders에 매칭 없음
+
+COMMIT;
+
 -- 확인
 SELECT id, name FROM remote_t ORDER BY id, name;
 SELECT id, name FROM remote_unique_t ORDER BY id;
+SELECT cust_id, name FROM customer ORDER BY cust_id;
