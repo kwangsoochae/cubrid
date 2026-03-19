@@ -847,6 +847,8 @@ struct dblink_spec_node
   char *conn_user;		/* user name for remote DB server */
   char *conn_password;		/* password for remote user */
   char *conn_sql;		/* SQL command text for remote database */
+  int corr_key_count;		/* correlation key count (0 = no correlated pushdown) */
+  REGU_VARIABLE_LIST corr_key_regu_list;	/* outer val_list slot regu list (TYPE_CONSTANT) */
 };
 
 struct reguval_list_spec_node

@@ -5219,6 +5219,21 @@ xts_process_dblink_spec_type (char *ptr, const DBLINK_SPEC_TYPE * dblink_spec)
     }
   ptr = or_pack_int (ptr, offset);
 
+  ptr = or_pack_int (ptr, dblink_spec->corr_key_count);
+  if (dblink_spec->corr_key_count > 0)
+    {
+      offset = xts_save_regu_variable_list (dblink_spec->corr_key_regu_list);
+      if (offset == ER_FAILED)
+	{
+	  return NULL;
+	}
+      ptr = or_pack_int (ptr, offset);
+    }
+  else
+    {
+      ptr = or_pack_int (ptr, 0);
+    }
+
   return ptr;
 }
 
@@ -7060,7 +7075,9 @@ xts_sizeof_dblink_spec_type (const DBLINK_SPEC_TYPE * dblink_spec)
 	   + PTR_SIZE		/* conn_rul */
 	   + PTR_SIZE		/* conn_user */
 	   + PTR_SIZE		/* conn_password */
-	   + PTR_SIZE);		/* conn_sql */
+	   + PTR_SIZE		/* conn_sql */
+	   + OR_INT_SIZE	/* corr_key_count */
+	   + PTR_SIZE);		/* corr_key_regu_list */
 
   return size;
 }

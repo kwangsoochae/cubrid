@@ -44,6 +44,9 @@ typedef enum
 struct regu_variable_list_node;
 struct val_list_node;
 
+typedef struct regu_variable_list_node *REGU_VARIABLE_LIST;
+typedef struct val_descr VAL_DESCR;
+
 typedef struct
 {
   int count;
@@ -58,6 +61,8 @@ struct dblink_scan_info
   int col_cnt;			/* column count of dblink query result */
   char cursor;			/* cursor position T_CCI_CURSOR_POS */
   void *col_info;		/* column information T_CCI_COL_INFO */
+  int corr_key_count;		/* correlation key count */
+  REGU_VARIABLE_LIST corr_key_regu_list;	/* regu list for correlation key (TYPE_CONSTANT) */
 };
 
 #define MAX_LEN_CONNECTION_URL 512

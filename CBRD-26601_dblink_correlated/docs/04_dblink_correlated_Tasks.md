@@ -33,8 +33,8 @@
 
 | ID | 작업 | 파일/위치 | 완료 |
 |----|------|-----------|:----:|
-| T0-1 | Design Doc 미결 사항(C-1~C-5) 사전 코드 확인. (C-1) `pt_to_subquery_table_spec_list`에서 원본 PT_DBLINK_INFO 접근 경로. (C-2) 래퍼 재실행 시 DBLink spec에 `scan_close_scan`/`scan_open_scan` 호출 여부. (C-3) `conn_sql` 기존 WHERE 절 존재 여부 판별. (C-4) aptr DBLink 판별 조건(`ACCESS_SPEC_TYPE` 등). (C-5) `REGU_VARIABLE_LIST` pack/unpack 기존 함수명. | `src/parser/xasl_generation.c`, `src/query/dblink_scan.c`, `src/query/xasl_to_stream.c` | [ ] |
-| T0-2 | `dblink_spec_node`에 `corr_key_count`(int), `corr_key_regu_list`(REGU_VARIABLE_LIST) 추가. `DBLINK_SCAN_INFO`에 동일 필드 추가. 직렬화(`xasl_to_stream.c` / `stream_to_xasl.c`) pack/unpack 반영. | `src/query/xasl.h`, `src/query/dblink_scan.h`, `src/query/xasl_to_stream.c`, `src/query/stream_to_xasl.c` | [ ] |
+| T0-1 | Design Doc 미결 사항(C-1~C-5) 사전 코드 확인. (C-1) `pt_to_subquery_table_spec_list`에서 원본 PT_DBLINK_INFO 접근 경로. (C-2) 래퍼 재실행 시 DBLink spec에 `scan_close_scan`/`scan_open_scan` 호출 여부. (C-3) `conn_sql` 기존 WHERE 절 존재 여부 판별. (C-4) aptr DBLink 판별 조건(`ACCESS_SPEC_TYPE` 등). (C-5) `REGU_VARIABLE_LIST` pack/unpack 기존 함수명. | `src/parser/xasl_generation.c`, `src/query/dblink_scan.c`, `src/query/xasl_to_stream.c` | [x] |
+| T0-2 | `dblink_spec_node`에 `corr_key_count`(int), `corr_key_regu_list`(REGU_VARIABLE_LIST) 추가. `DBLINK_SCAN_INFO`에 동일 필드 추가. 직렬화(`xasl_to_stream.c` / `stream_to_xasl.c`) pack/unpack 반영. | `src/query/xasl.h`, `src/query/dblink_scan.h`, `src/query/xasl_to_stream.c`, `src/query/stream_to_xasl.c` | [x] |
 
 ### Step 0 점검
 
@@ -44,6 +44,25 @@
 - **T0-1 (C-4)**: `xasl.h`의 `ACCESS_SPEC_TYPE` 또는 `spec->type` 으로 dblink 판별 방법 확인
 - **T0-1 (C-5)**: `xasl_to_stream.c`에서 `dblink_regu_list_pred` pack 코드 패턴 확인
 - **T0-2**: `xasl.h` 필드 추가 후 빌드 통과, stream pack/unpack 대칭 확인
+
+### Step 0 확인 결과 (C-1~C-5)
+
+- **C-1 (원본 PT_DBLINK_INFO 접근 경로)**: 가능(플랜 B 구현 가능).
+  - `mq_rewrite_dblink_as_derived()`가 래퍼 `PT_SELECT`의 `from`에 `PT_SPEC(derived_table_type=PT_DERIVED_DBLINK_TABLE, derived_table=PT_DBLINK_TABLE)`를 구성.
+  - 따라서 `pt_to_subquery_table_spec_list()`에서 원본 dblink 노드는:
+    - `subquery->info.query.q.select.from` → `spec_dbl->info.spec.derived_table`(node_type=PT_DBLINK_TABLE) → `...->info.dblink_table.(qstr/rewritten/pushed_pred/… + corr_key 필드)`
+
+- **C-2 (래퍼 재실행 시 scan_close/open 여부)**: `qexec_clear_head_lists()`는 `qexec_clear_xasl_head()`만 호출하며 `scan_close_scan()`을 호출하지 않음.
+  - 결론: “clear 자체”가 dblink scan을 닫거나 다시 여는 것은 아님. 다만 DBLink XASL이 다시 execute되면 `scan_open_dblink_scan()`이 호출되어 `dblink_open_scan()`이 재진입할 수 있음(prepare 재발생 가능).
+
+- **C-3 (conn_sql 기존 WHERE 존재 판별)**: `PT_DBLINK_TABLE.rewritten`은 push된 pred가 있으면 문자열로 `" ... WHERE ..."`가 포함됨.
+  - 권장: corr append 시 `rewritten`이 존재하면 `" AND ..."` 형태로 이어붙일 수 있고, 없으면 `qstr`에서 WHERE 유무를 확인 후 `" WHERE "`/`" AND "` 결정.
+
+- **C-4 (aptr DBLink 판별 조건)**: 런타임 XASL의 access spec에서 `TARGET_DBLINK`로 판별 가능(`src/query/xasl.h`), 스캔 레이어에서는 `scan_open_dblink_scan()`이 `S_DBLINK_SCAN` 설정 후 `dblink_open_scan()` 호출.
+
+- **C-5 (REGU_VARIABLE_LIST pack/unpack 함수명)**:
+  - pack: `xts_save_regu_variable_list()` (`src/query/xasl_to_stream.c`)
+  - unpack: `stx_restore_regu_variable_list()` (`src/query/stream_to_xasl.c`)
 
 ---
 
@@ -220,7 +239,7 @@ FROM local_t l WHERE l.id IS NULL;
 
 ## 완료 체크리스트
 
-- [ ] **Step 0** — T0-1 [ ], T0-2 [ ]
+- [x] **Step 0** — T0-1 [x], T0-2 [x]
 - [ ] **Step 1** — T1-1 [ ], T1-2 [ ], T1-3 [ ]
 - [ ] **Step 2** — T2-1 [ ]
 - [ ] **Step 3** — T3-1 [ ], T3-2 [ ], T3-3 [ ]
