@@ -3,7 +3,8 @@
 | 항목 | 내용 |
 |------|------|
 | 이슈 | CBRD-26601 |
-| 관련 문서 | [PRD](dblink_correlated_optimization_prd.md), [Design Doc](dblink_correlated_optimization_design_doc.md), [소스 분석](dblink_correlated_source_analysis.md) |
+| 관련 문서 | [02 PRD](02_dblink_correlated_optimization_prd.md), [03 Design Doc](03_dblink_correlated_optimization_design_doc.md), [01 소스 분석](01_dblink_correlated_source_analysis.md) |
+| 테스트 상세 | [05 Tests](05_dblink_correlated_optimization_tests.md) |
 
 **의존 관계**: Step 0 → Step 1 → Step 2 → Step 3 → Step 4. Step 5(직렬화)는 Step 2 완료 후 병행 가능. Step 6(테스트)는 Step 4 완료 후.
 
@@ -48,7 +49,10 @@
 
 ## Step 1: 탐지 (Parser / View transform)
 
-**배경**: `mq_rewrite_dblink_as_subquery`(`view_transform.c:6607`)에서 correlation 조건(`remote.col = outer.col`)을 탐지하고 `PT_DBLINK_INFO`에 기록한다. **rewrite는 기존과 동일하게 PT_IS_SUBQUERY로 변환 유지(옵션 B)**. 이후 XASL 생성 단계에서 래퍼 안의 `PT_DERIVED_DBLINK_TABLE` spec을 `pt_to_dblink_table_spec_list`로 처리하는 것을 목표로 하고, 접근이 어렵다면 Step 4에서처럼 `where_part` 재탐지로 fallback 한다. (설계 근거: Design Doc 5.1, C-1)
+**배경**: `mq_rewrite_dblink_as_subquery`(`view_transform.c:6607`)에서 correlation 조건(`remote.col = outer.col`)을 탐지하고 `PT_DBLINK_INFO`에 기록한다. **rewrite는 기존과 동일하게 PT_IS_SUBQUERY로 변환 유지** — 이후 XASL은 보통 `pt_to_spec_list()` → `pt_to_subquery_table_spec_list()` 경로를 탄다.
+
+- **플랜 A (1순위)**: `pt_to_dblink_table_spec_list()`에 진입 가능하면(T0-1 C-1 확인) 여기서 `corr_key_regu_list` 채움(T2-1).
+- **플랜 B (fallback)**: `PT_IS_SUBQUERY` 경로만 타는 경우 `pt_to_subquery_table_spec_list()`에서 `dblink_spec_node`의 corr 필드 및 `where_part` 처리(T2-1, T4-1)를 함께 수행한다. Step 0(C-1) 결과에 따라 A/B를 확정한다. (설계 근거: Design Doc 5.1, C-1)
 
 | ID | 작업 | 파일/위치 | 완료 |
 |----|------|-----------|:----:|
@@ -93,11 +97,11 @@
 
 | ID | 작업 | 파일/위치 | 완료 |
 |----|------|-----------|:----:|
-| T2-1 | `pt_to_dblink_table_spec_list()`에서 `PT_DBLINK_INFO.corr_key_count > 0`이고 PT_HOST_VAR 없을 때, `dblink_spec_node.corr_key_count` 및 `corr_key_regu_list` 채우기. `corr_key_regu_list`의 각 엔트리는 outer val_list 슬롯을 가리키는 TYPE_CONSTANT regu (현재 `access_pred`에서 쓰이는 것과 동일 슬롯). | `src/parser/xasl_generation.c` `pt_to_dblink_table_spec_list()` | [ ] |
+| T2-1 | **플랜 A**: `pt_to_dblink_table_spec_list()`에서 `PT_DBLINK_INFO.corr_key_count > 0`이고 PT_HOST_VAR 없을 때 `dblink_spec_node.corr_key_count` 및 `corr_key_regu_list` 채우기. **플랜 B**: 동일 조건을 `pt_to_subquery_table_spec_list()` 내 DBLink 하위 XASL 생성 경로에서 채운다(T0-1 C-1 불가 시). `corr_key_regu_list`는 outer val_list 슬롯을 가리키는 TYPE_CONSTANT regu(현재 `access_pred`와 동일 슬롯). | `src/parser/xasl_generation.c` `pt_to_dblink_table_spec_list()`, `pt_to_subquery_table_spec_list()` | [ ] |
 
 ### Step 2 점검
 
-- **T2-1**: gdb `pt_to_dblink_table_spec_list` 리턴 후
+- **T2-1**: gdb — 플랜 A면 `pt_to_dblink_table_spec_list` 리턴 후, 플랜 B면 해당 경로에서 동일 확인
   - `dblink_node->corr_key_count > 0` 확인
   - `dblink_node->conn_sql`에 `WHERE id = ?` 포함 확인
   - `corr_key_regu_list[0]`이 outer val_list의 `l.id` 슬롯을 참조하는지 확인
@@ -112,7 +116,7 @@
 | ID | 작업 | 파일/위치 | 완료 |
 |----|------|-----------|:----:|
 | T3-1 | `dblink_open_scan()`: `corr_key_count > 0`이면 `cci_prepare`만 수행, `cci_execute` 생략. spec → scan_info로 `corr_key_count`, `corr_key_regu_list` 복사. | `src/query/dblink_scan.c` `dblink_open_scan()`, `src/query/dblink_scan.h` `DBLINK_SCAN_INFO` | [ ] |
-| T3-2 | corr DBLink aptr 재실행 메커니즘 구현: `qexec_execute_mainblock_internal`의 aptr 처리 루프(`query_executor.c:15292`)에서, `IS_CORR_DBLINK_XASL(aptr)`가 true인 aptr의 INITIAL/SUCCESS 분기 처리. (a) INITIAL: `qexec_execute_mainblock`으로 `dblink_open_scan`(prepare만) 후 `scan_reset_scan_block(&aptr->spec_list->s_id)` 호출. (b) SUCCESS: list 파괴 후 `scan_reset_scan_block` 호출. `scan_reset_scan_block`은 `dblink_scan_reset(scan_info, s_id->vd)`를 호출하며, 이 함수에서 `corr_key_regu_list`를 현재 outer 행 값으로 `cci_bind_param` + `cci_execute`한다. 실패 시 에러 설정·상위 전파(NFR-2). | `src/query/query_executor.c`, `src/query/dblink_scan.c` (`dblink_scan_reset` 확장), `src/query/scan_manager.c` (`s_id->vd` 전달 추가) | [ ] |
+| T3-2 | corr DBLink aptr 재실행 메커니즘: `qexec_execute_mainblock_internal`의 aptr 처리 루프(`query_executor.c:15292`)에서 `IS_CORR_DBLINK_XASL(aptr)` true인 경우 INITIAL/SUCCESS 분기. (a) INITIAL: `dblink_open_scan`(prepare만) 후 rebind+execute 트리거. (b) SUCCESS: list 정리 후 동일 트리거. **기본안**: `scan_reset_scan_block` → `dblink_scan_reset(scan_info, vd)`에서 `cci_bind_param` + `cci_execute`. **대안(플랜 B)**: `scan_manager`/`scan_reset_scan_block` 변경 파급이 크면 `dblink_scan_execute_corr(scan_info, vd)` 등 전용 함수를 두고 aptr 루프에서 직접 호출. 실패 시 에러 설정·상위 전파(NFR-2). | `src/query/query_executor.c`, `src/query/dblink_scan.c`, `src/query/scan_manager.c` (선택) | [ ] |
 | T3-3 | NULL 처리: re-execute 직전 corr_key 값이 NULL이면 execute 스킵 → 빈 list → 0건(NULL 스칼라) 반환. | `src/query/dblink_scan.c` 또는 `query_executor.c` T3-2 내 | [ ] |
 
 ### Step 3 점검
@@ -142,11 +146,12 @@
 
 | ID | 작업 | 파일/위치 | 완료 |
 |----|------|-----------|:----:|
-| T4-1 | push-down 적용 시(`corr_key_count > 0`) list access spec의 `access_pred`에서 push-down된 조건(`remote.col = outer.col`)을 제거. `pt_to_subquery_table_spec_list`에서 `where_part`에서 해당 PT_EQ 노드 제거 후 PRED_EXPR 생성. 전제: T0-1(C-1)에서 PT_DBLINK_INFO 접근 경로 확인 필요. 접근 불가 시 대안: `where_part`에서 corr 패턴 재탐지 후 제거. | `src/parser/xasl_generation.c` `pt_to_subquery_table_spec_list()` | [ ] |
+| T4-1 | push-down 적용 시(`corr_key_count > 0`) list access spec의 `access_pred`에서 push-down된 조건만 제거. **제거 대상은 Step 1에서 `PT_DBLINK_INFO`에 기록한 `corr_key_remote_col` / `corr_key_outer_ref`와 정확히 일치하는 `PT_EQ` 한정** — 다른 `=` 조건(상수 필터 등)은 유지. `pt_to_subquery_table_spec_list`에서 `where_part`에서 해당 노드 제거 후 PRED_EXPR 생성. T0-1(C-1) 불가 시 `where_part`에서 동일 corr 패턴 재탐지 후 제거. | `src/parser/xasl_generation.c` `pt_to_subquery_table_spec_list()` | [ ] |
 
 ### Step 4 점검
 
 - **T4-1**: XASL 덤프에서 `access pred` 항목에 `_dbl.id = l.id` 조건이 없는지 확인
+- **T4-1 혼합 WHERE**: `WHERE r.id = l.id AND r.status = 'A'` 등에서 corr 조건만 제거되고 `status` 조건은 로컬/원격 정책에 맞게 남는지 확인
 - **T4-1 전제**: T0-1(C-1) 확인 결과에 따라 구현 방식 확정
 - push-down 불가 케이스에서 `access_pred` 기존 유지 확인 (제거 범위 최소화)
 
@@ -170,11 +175,13 @@
 |----|--------|-----------|:----:|
 | T6-1 | 기본 correlated 스칼라 서브쿼리 | 결과 행 수·값이 AS-IS(push-down 전)와 동일 | [ ] |
 | T6-2 | outer 행에 매칭 없음 (0건) | NULL 반환, 에러 없음 | [ ] |
-| T6-3 | 앱 `?` 포함 서브쿼리 | 기존 방식(1회 fetch) 유지, regression 없음 | [ ] |
-| T6-4 | correlated 아닌 DBLink (단독) | 기존 방식 유지, regression 없음 | [ ] |
+| T6-3 | 앱 `?` 포함 서브쿼리 | 기존 방식(AS-IS) 유지, regression 없음 | [ ] |
+| T6-4 | correlated 아닌 DBLink (단독) | 기존 방식(AS-IS) 유지, regression 없음 | [ ] |
 | T6-5 | correlation 키 = NULL | NULL 반환, re-execute 스킵 | [ ] |
 | T6-6 | 대용량 원격 테이블 | 원격 전송 행 수 감소 확인 | [ ] |
-| T6-7 | `use_dblink_corr_pushdown=no` 설정 | push-down 미적용, AS-IS(1회 전체 fetch) 동작 및 결과 동등성 확인 | [ ] |
+| T6-7 | `use_dblink_corr_pushdown=no` 설정 | push-down 미적용, AS-IS 동작 및 결과 동등성 확인(conn_sql에 corr `WHERE` 없음, corr bind/execute 경로 미진입) | [ ] |
+| T6-8 | 원격 동일 키 다중 행 (비유니크) | ORDER BY 없는 `LIMIT 1`은 비결정적일 수 있음 — AS-IS와 동일한 동등성만 요구 | [ ] |
+| T6-9 | correlated + 상수 조건 혼합 | `WHERE r.id = l.id AND r.status='X'` 등에서 corr push 적용 시 상수 조건이 원격/로컬 중 어디에 남는지 설계와 일치하는지 확인 | [ ] |
 
 ### Step 6 점검 SQL
 
@@ -203,6 +210,10 @@ FROM local_t l;
 SELECT l.id,
   (SELECT r.name FROM remote_t@cubrid_conn r WHERE r.id = l.id LIMIT 1)
 FROM local_t l WHERE l.id IS NULL;
+
+-- [T6-8] 비유니크 원격 키 (데이터: 동일 id에 행 2건 이상) — 결과는 AS-IS와 동등(비결정성 유지)
+-- [T6-9] correlated + 상수 조건 (스키마에 status 컬럼이 있다고 가정)
+-- SELECT l.id, (SELECT r.name FROM remote_t@cubrid_conn r WHERE r.id = l.id AND r.status = 'A' LIMIT 1) FROM local_t l;
 ```
 
 ---
@@ -215,7 +226,7 @@ FROM local_t l WHERE l.id IS NULL;
 - [ ] **Step 3** — T3-1 [ ], T3-2 [ ], T3-3 [ ]
 - [ ] **Step 4** — T4-1 [ ]
 - [ ] **Step 5** — T5-1 [ ]
-- [ ] **Step 6** — T6-1 [ ], T6-2 [ ], T6-3 [ ], T6-4 [ ], T6-5 [ ], T6-6 [ ], T6-7 [ ]
+- [ ] **Step 6** — T6-1 [ ], T6-2 [ ], T6-3 [ ], T6-4 [ ], T6-5 [ ], T6-6 [ ], T6-7 [ ], T6-8 [ ], T6-9 [ ]
 
 ---
 
@@ -227,3 +238,4 @@ FROM local_t l WHERE l.id IS NULL;
 | 2026-03-13 | Design Doc 기준 정합성 반영: T0-1 내용 교체(C-1~C-5), Step 1 배경 확정(rewrite 유지 옵션 B), T3-2 판별 조건·신규 함수명 명확화, T4-1 전제 조건 추가 |
 | 2026-03-16 | FR-9 반영: T1-3(`use_dblink_corr_pushdown` 세션 파라미터), T6-7(파라미터 OFF 시 AS-IS 유지 검증) 추가; PRD 매핑·체크리스트 업데이트 |
 | 2026-03-18 | T3-4 제거: 이전 행 키 비교 최적화는 Phase 2 추가 개선 사항 (Design Doc §7.1) — Tasks 범위 밖 |
+| 2026-03-19 | 리뷰 반영: Step 1 플랜 A/B 명시, T2-1·T4-1 보강, T3-2 전용 함수 대안, T6-3/T6-7 AS-IS 표현 정리, T6-8·T6-9 추가 |

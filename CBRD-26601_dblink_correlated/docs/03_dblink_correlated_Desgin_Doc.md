@@ -3,20 +3,22 @@
 | 항목 | 내용 |
 |------|------|
 | 이슈 | CBRD-26601 |
-| 기준 문서 | [PRD](dblink_correlated_optimization_prd.md), [소스 분석](dblink_correlated_source_analysis.md) |
+| 기준 문서 | [02 PRD](02_dblink_correlated_optimization_prd.md), [01 소스 분석](01_dblink_correlated_source_analysis.md) |
 | 기준 브랜치 | develop |
 | 대상 | SELECT 절 correlated 스칼라 서브쿼리 안의 DBLink (1차) |
+
+> 문서 내 라인 번호는 develop 기준이며, 머지·리팩터 시 변경될 수 있다.
 
 ---
 
 ## 1. 개요
 
 이 문서는 PRD의 FR-1 ~ FR-8, FR-9 및 NFR-1 ~ NFR-3을 구현하기 위한 레이어별 설계를 기술한다.
-AS-IS 코드 분석은 `dblink_correlated_source_analysis.md` 를 참고한다.
+AS-IS 코드 분석은 [01 소스 분석](01_dblink_correlated_source_analysis.md)을 참고한다.
 
 ### 1.1 핵심 설계 원칙
 
-- **보수적 탐지**: 탐지 불확실 시 기존 방식(1회 전체 fetch) 유지.
+- **보수적 탐지**: 탐지 불확실 시 기존 동작(AS-IS) 유지.
 - **기존 경로 최소 변경**: rewrite 흐름은 그대로 유지, push-down 대상에만 추가 처리.
 - **단일 등치 한정**: `remote.col = outer.col` 패턴만 허용 (1차).
 
@@ -136,7 +138,8 @@ outer ref는 `TYPE_CONSTANT` regu (outer val_list 슬롯)로 나타난다.
 
 **진입점**: `pt_to_dblink_table_spec_list()` (develop:12993)
 
-`mq_rewrite_dblink_as_subquery`가 PT_IS_SUBQUERY 래퍼로 감싼 뒤에도, 이상적인 흐름은 래퍼 안의 `PT_DERIVED_DBLINK_TABLE` spec이 `pt_to_dblink_table_spec_list`를 통해 처리되는 것이다. (실제 접근 가능 여부는 C-1 확인 후, 불가 시 where 재탐지로 fallback.)
+`mq_rewrite_dblink_as_subquery`가 PT_IS_SUBQUERY 래퍼로 감싼 뒤에도, 이상적인 흐름은 래퍼 안의 `PT_DERIVED_DBLINK_TABLE` spec이 `pt_to_dblink_table_spec_list`를 통해 처리되는 것이다. (실제 접근 가능 여부는 C-1 확인 후, 불가 시 where 재탐지로 fallback.)  
+C-1에서 `pt_to_dblink_table_spec_list` 진입이 불가한 경우, corr_key_regu_list 채우기 및 access_pred 제거를 `pt_to_subquery_table_spec_list` 경로(플랜 B)에서 수행한다. (Tasks T2-1, T4-1 참고.)
 
 ```
 pt_to_dblink_table_spec_list()
@@ -160,12 +163,12 @@ pt_to_dblink_table_spec_list()
 
 **진입점**: `pt_to_subquery_table_spec_list()` (develop:12772)
 
-push-down된 조건이 list access spec의 `access_pred`에 이중으로 남지 않도록, `where_part`에서 push-down된 조건을 제외하고 PRED_EXPR를 생성한다.
+push-down된 조건이 list access spec의 `access_pred`에 이중으로 남지 않도록, `where_part`에서 push-down된 조건을 제외하고 PRED_EXPR를 생성한다. **제거 대상은 PT_DBLINK_INFO에 기록한 corr_key_remote_col / corr_key_outer_ref와 일치하는 PT_EQ만** 한정하며, 다른 `=` 조건(상수 필터 등)은 유지한다.
 
 ```
 pt_to_subquery_table_spec_list()
   ├─ subquery 노드에서 원본 PT_DBLINK_INFO 접근 가능 여부 확인
-  ├─ [신규] corr_key_count > 0 이면 where_part에서 해당 PT_EQ 노드 제거
+  ├─ [신규] corr_key_count > 0 이면 where_part에서 해당 PT_EQ 노드 제거 (corr_key와 일치하는 것만)
   │    └─ 제거 후 나머지 where로 pt_to_pred_expr 호출
   └─ [기존] pt_make_list_access_spec(...)
 ```
@@ -197,7 +200,7 @@ dblink_open_scan():
     assert(scan_info->stmt_handle > 0)
     assert(scan_info->conn_handle > 0)
     return  // execute는 aptr 루프(scan_reset_scan_block)에서 처리
-  // 기존: bind host_vars + execute + fetch
+  // corr_key_count == 0: 기존대로 cci_bind_param(host_vars) + cci_execute() 수행
 ```
 
 > `cci_prepare` 결과(`stmt_handle`)는 `scan_info->stmt_handle`에 유지된다.
@@ -321,7 +324,7 @@ int dblink_scan_reset(DBLINK_SCAN_INFO *scan_info, VAL_DESCR *vd)
     // [ASSERT] 진입 조건: prepare는 반드시 완료된 상태
     assert(scan_info->stmt_handle > 0);
 
-    // NULL 체크 (FR-6): outer corr_key가 NULL이면 cursor만 되감기 → 빈 결과
+    // NULL 체크 (FR-6): outer corr_key가 NULL이면 cursor만 되감기 → 빈 list → list access 시 0건 → 스칼라 NULL (PRD §3.3)
     for (regu = scan_info->corr_key_regu_list; regu; regu = regu->next):
       fetch_peek_dbval(regu, vd, &val)
       if (DB_IS_NULL(val)):
@@ -369,7 +372,7 @@ flowchart TB
   subgraph init["초기화"]
     I1[outer 스캔 준비]
   end
-  subgraph loop["outer 행마다 (N회)"]
+  subgraph loop["outer 행마다"]
     L1[행 읽기] --> L2[outptr 평가]
     L2 --> L3[EXECUTE_REGU_VARIABLE_XASL]
     L3 --> L4["래퍼 XASL 진입<br/>qexec_execute_mainblock(래퍼)"]
@@ -486,6 +489,8 @@ if (node->corr_key_count > 0) {
   ptr = unpack_regu_variable_list(ptr, &node->corr_key_regu_list);
 }
 ```
+
+> 위 함수명(`pack_regu_variable_list` / `unpack_regu_variable_list`)은 예시이며, 실제 함수명은 C-5 확인 및 `xasl_to_stream.c`의 `dblink_regu_list_pred` pack 패턴에 따른다.
 
 ### 4.2 REGU_VARIABLE_LIST 직렬화 참고
 
@@ -628,9 +633,9 @@ outer query(local_t)에 join 조건 외의 조건이 없을 때 push-down을 억
 
 ## 8. 참고 문서
 
-- [dblink_correlated_optimization_prd.md](dblink_correlated_optimization_prd.md) — 요구사항
-- [dblink_correlated_source_analysis.md](dblink_correlated_source_analysis.md) — AS-IS 소스 분석
-- [dblink_correlated_as_is_to_be_limits.md](dblink_correlated_as_is_to_be_limits.md) — AS-IS/TO-BE 구조적 한계 및 worst case
+- [02 PRD](02_dblink_correlated_optimization_prd.md) — 요구사항
+- [01 소스 분석](01_dblink_correlated_source_analysis.md) — AS-IS 소스 분석
+- [04 Tasks](04_dblink_correlated_optimization_tasks.md) — 구현 태스크
 
 ---
 
@@ -644,3 +649,4 @@ outer query(local_t)에 join 조건 외의 조건이 없을 때 push-down을 억
 | 2026-03-17 | Outer Filter Guard, Push-Down 후보 플래그 + Optimizer 결정 구조 추가 |
 | 2026-03-18 | C-2 확인 완료 (코드 직접 분석). Option 1(corr DBLink clear skip) 채택. §3.4/3.5/3.6/5.2/6 assert 및 불변 조건 추가. |
 | 2026-03-18 | §3.5/3.6 신규 함수 `dblink_execute_corr` → `scan_reset_scan_block` + `dblink_scan_reset(scan_info, vd)` 확장으로 교체 (`dblink_join_improve` 패턴 적용). §1.2 테이블 `scan_manager.c` 행 추가. |
+| 2026-03-19 | 리뷰 반영: 문서 상단 라인 번호 유의사항, §1.1 AS-IS 유지 표현, §3.2 플랜 B 명시, §3.3 access_pred 제거 대상 한정, §3.4 corr_key_count==0 분기 명시, §3.6 N회 제거, §4.1 pack 함수명 C-5 참고 주석 |

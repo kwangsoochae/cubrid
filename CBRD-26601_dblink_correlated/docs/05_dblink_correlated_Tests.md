@@ -3,7 +3,7 @@
 | 항목 | 내용 |
 |------|------|
 | 이슈 | CBRD-26601 |
-| 관련 문서 | PRD, Design Doc, Tasks, Source Analysis |
+| 관련 문서 | [01 소스 분석](01_dblink_correlated_source_analysis.md), [02 PRD](02_dblink_correlated_optimization_prd.md), [03 Design Doc](03_dblink_correlated_optimization_design_doc.md), [04 Tasks](04_dblink_correlated_optimization_tasks.md) |
 
 ---
 

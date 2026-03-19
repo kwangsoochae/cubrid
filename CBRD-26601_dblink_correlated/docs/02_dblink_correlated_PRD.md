@@ -12,11 +12,11 @@
 
 ### 1.1 목적
 
-`SELECT` 절 또는 `WHERE` 절에 `(SELECT col FROM remote_t@conn WHERE remote_t.id = l.id LIMIT 1)` 형태의 **correlated 스칼라 서브쿼리**가 있을 때, 현재는 outer 행마다 원격 테이블 전체를 **N회 fetch**하여 로컬에서 필터링하는 구조이다. 이를 **outer 행마다 correlation 키를 바인딩 후 원격 execute**하는 방식으로 변경하여, 원격 전송 데이터량과 로컬 연산을 줄인다.
+`SELECT` 절 또는 `WHERE` 절에 `(SELECT col FROM remote_t@conn WHERE remote_t.id = l.id LIMIT 1)` 형태의 **correlated 스칼라 서브쿼리**가 있을 때, 현재는 outer 행마다 원격 테이블 전체를 가져와 로컬에서 필터링하는 구조이다. 이를 **outer 행마다 correlation 키를 바인딩 후 원격 execute**하는 방식으로 변경하여, 원격 전송 데이터량과 로컬 연산을 줄인다.
 
 ### 1.2 한 줄 요약
 
-outer 행마다 원격 테이블 전체를 **N회 fetch → 로컬 필터** 구조를 outer 행마다 **`WHERE col = ?` 바인딩 후 원격 execute**하여 매칭 행만 가져오는 구조로 교체.
+outer 행마다 원격 테이블 전체를 가져와 **로컬 필터**하던 구조를, outer 행마다 **`WHERE col = ?` 바인딩 후 원격 execute**하여 매칭 행만 가져오는 구조로 교체.
 
 ### 1.3 용어
 
@@ -25,7 +25,7 @@ outer 행마다 원격 테이블 전체를 **N회 fetch → 로컬 필터** 구�
 | **Correlated 서브쿼리** | 외부 쿼리의 컬럼을 참조하는 서브쿼리 (`WHERE remote.id = l.id` 에서 `l.id`가 outer 참조) |
 | **Correlation 키** | 서브쿼리가 outer를 참조하는 컬럼 쌍 (`remote.col = outer.col`) |
 | **푸시(push)** | 로컬에서 평가하던 조건을 원격 SQL의 `WHERE col = ?`로 넣어 원격 DB에서 필터링하게 하는 것 |
-| **aptr** | XASL에서 1회 선행 실행되는 서브쿼리 리스트. 서브쿼리 내 dblink는 현재 여기에 배치됨 |
+| **aptr** | XASL에서 선행 실행되는 서브쿼리 리스트. 서브쿼리 내 dblink는 현재 여기에 배치됨 |
 | **dptr** | XASL에서 outer 행마다 재실행되는 correlated 서브쿼리 |
 
 ---
@@ -35,7 +35,7 @@ outer 행마다 원격 테이블 전체를 **N회 fetch → 로컬 필터** 구�
 ### 2.1 현재 동작 (AS-IS)
 
 ```
-outer 각 행마다 (N회)
+outer 각 행마다
   └─ dptr 루프: 래퍼(wrapper) XASL CLEARED
   └─ outptr 평가 → EXECUTE_REGU_VARIABLE_XASL(래퍼)
        └─ aptr 처리: dblink IS_XASL_INITIAL_STATUS? YES (매번 CLEARED 상태)
@@ -48,7 +48,7 @@ outer 각 행마다 (N회)
 ```
 
 - DBLink가 `0x40269c00`(래퍼)의 **aptr_list**에 배치되어 있으나, `XASL_ZERO_CORR_LEVEL` 플래그가 없어 `qexec_clear_head_lists`에서 매 래퍼 실행 후 CLEARED로 리셋된다 (`query_executor.c:16087`).
-- `IS_XASL_INITIAL_STATUS` 체크에서 CLEARED 상태이면 재실행하므로, DBLink는 outer 행마다 **N회 prepare+execute**된다.
+- `IS_XASL_INITIAL_STATUS` 체크에서 CLEARED 상태이면 재실행하므로, DBLink는 outer 행마다 prepare+execute된다.
 - 원격 쿼리 (`conn_sql`)에는 `WHERE id = ?`가 없음 — correlation 조건이 로컬 `access_pred`로만 존재.
 
 ### 2.2 문제점
@@ -56,7 +56,7 @@ outer 각 행마다 (N회)
 | 문제 | 영향 |
 |------|------|
 | 원격 테이블 **전체 전송** | 원격 행이 많을수록 네트워크 전송량 낭비 |
-| 로컬 **N회 리스트 스캔** | outer 행 수만큼 local list를 처음부터 스캔 |
+| 로컬 **리스트 스캔** | outer 행마다 local list를 처음부터 스캔 |
 | **매칭율 낮을수록 비효율** | 실제 필요한 행은 1~수 건이지만 전체를 받음 |
 
 ### 2.3 구조적 제약
@@ -73,30 +73,30 @@ outer 각 행마다 (N회)
 
 ```
 outer 스캔 시작
-  └─ dblink prepare (1회)
+  └─ dblink prepare
 
 outer 각 행마다
   └─ cci_bind_param(correlation 키 = 현재 outer 행 값)
   └─ cci_execute('SELECT col FROM remote_t WHERE id = ?')
-  └─ fetch (최대 1행)
+  └─ fetch (매칭 행만)
   └─ 스칼라 반환
 ```
 
-- DBLink가 outer 행마다 **rebind + re-execute** → 원격에서 조건 만족 행만 반환.
+- DBLink가 outer 행마다 rebind + re-execute → 원격에서 조건 만족 행만 반환.
 - `conn_sql`에 `WHERE remote.col = ?` 포함.
 - 로컬 `access_pred`에서 push-down된 조건 제거 (이중 필터 방지).
 
 ### 3.2 기대 효과
 
 - **네트워크 전송량**: 전체 테이블 → 매칭 행만 (원격 테이블 크기 · 매칭율에 비례)
-- **로컬 연산**: N회 list 전체 스캔 → 불필요 (원격에서 필터)
+- **로컬 연산**: list 전체 스캔 → 불필요 (원격에서 필터)
 - **원격 DB 부하**: WHERE 조건 유무로 인덱스 활용 가능성 증가
 
 ### 3.3 성공 기준
 
 - **정확성**: 푸시 후 결과 행 수·값이 AS-IS와 **동일**.
 - **Regression**: 푸시 불가 쿼리, 단순 DBLink 쿼리 등 기존 동작에 **영향 없음**.
-- **NULL 처리**: correlation 키가 NULL인 경우 re-execute 스킵 → 0건 반환 (로컬 조인과 동일).
+- **NULL 처리**: AS-IS에서도 col = NULL 비교는 매칭이 없으므로 스칼라 결과는 NULL이며, execute 스킵은 의미 보존.
 
 ---
 
@@ -140,10 +140,10 @@ outer 각 행마다
 | FR-3 | `dblink_spec_node` / `DBLINK_SCAN_INFO`에 correlation 키 regu_list 및 count 필드를 추가한다. correlation 키 regu는 outer val_list 슬롯을 참조한다. | Must |
 | FR-4 | push-down 후보 DBLink의 open 시 `cci_prepare`만 수행하고, execute는 outer 행 평가 시점으로 지연한다. | Must |
 | FR-5 | outer 행 평가 시마다 correlation 키 값을 `vd`에서 읽어 `cci_bind_param` 후 `cci_execute`를 수행한다. | Must |
-| FR-6 | correlation 키가 NULL이면 re-execute를 스킵하고 0건(NULL) 반환한다. | Must |
-| FR-7 | push-down 불가 쿼리(앱 `?` 포함, 조건 없음 등)는 기존 동작(1회 전체 fetch)을 유지한다. | Must |
+| FR-6 | correlation 키가 NULL이면 원격 re-execute를 스킵하고, 스칼라 서브쿼리 결과는 NULL로 평가되도록 한다(의미 보존). | Must |
+| FR-7 | push-down 불가 쿼리(앱 `?` 포함, OR 포함, 조건 패턴 불일치 등)는 **기존 동작(AS-IS) 그대로**를 유지한다. | Must |
 | FR-8 | push-down 적용 시 list access spec의 `access_pred`에서 push-down된 조건을 제거한다. | Must |
-| FR-9 | 세션 파라미터 `use_dblink_corr_pushdown`(기본값 `yes`)가 `no`이면 correlated push-down을 적용하지 않고 AS-IS 방식(N회 실행, conn_sql에 WHERE 없음)을 유지한다. | Should |
+| FR-9 | 세션 파라미터 `use_dblink_corr_pushdown`(기본값 `yes`)가 `no`이면 correlated push-down을 적용하지 않고 **기존 동작(AS-IS) 그대로** 유지한다. | Should |
 
 ### 5.2 비기능 요구사항
 
@@ -184,16 +184,16 @@ AS-IS                              TO-BE
 
 | 단계 | AS-IS | TO-BE |
 |------|-------|-------|
-| cci_prepare | N회 (outer 행마다) | 1회 |
-| cci_execute | N회 (전체 fetch, WHERE 없음) | N회 (outer 행마다, WHERE 포함) |
+| cci_prepare | outer 행마다 | 최초 1회 |
+| cci_execute | outer 행마다 (WHERE 없음, 전체 반환) | outer 행마다 (WHERE 포함, 매칭만) |
 | 원격 결과 전송 행 수 | 전체 | 매칭 행만 |
-| 로컬 list 스캔 | N회 | 불필요 |
+| 로컬 list 스캔 | outer 행마다 | 불필요 |
 
 ---
 
 ## 7. 제약 및 가정
 
-- correlation 키 탐지는 **보수적**으로 정의: 불명확한 경우 기존 방식(1회 fetch) 유지.
+- correlation 키 탐지는 **보수적**으로 정의: 불명확한 경우 기존 동작(AS-IS) 유지.
 - 앱 `?` (PT_HOST_VAR)가 서브쿼리 안에 존재하면 correlation 키 푸시를 적용하지 않음.
 - 원격은 CUBRID뿐 아니라 Gateway 경유 Oracle/MySQL도 CCI 인터페이스로 동일하게 제어되므로 동일 이득.
 - DBLink 카디널리티는 원격 통계 없이 고정 추정값 사용 — 푸시 적용 여부는 비용이 아닌 **구조적 조건**으로 판단.
@@ -213,7 +213,7 @@ AS-IS                              TO-BE
 
 ## 9. 구현 단계 요약 (1차)
 
-상세 설계는 `dblink_correlated_optimization_design_doc.md` 참고.
+상세 설계는 [03 Design Doc](03_dblink_correlated_optimization_design_doc.md) 참고.
 
 | 단계 | 내용 |
 |------|------|
@@ -237,16 +237,17 @@ AS-IS                              TO-BE
 | outer에 매칭 행 없음 (0건) | NULL 반환 |
 | 원격 테이블 대용량 | 전송 행 수 감소 확인 |
 | correlation 키 = NULL | re-execute 스킵, NULL 반환 |
-| 앱 `?` 포함 서브쿼리 | 기존 방식(1회 fetch) 유지, regression 없음 |
-| push-down 불가 조건 (OR 등) | 기존 방식 유지, regression 없음 |
-| DBLink 단독 사용 (correlated 아님) | 기존 방식 유지, regression 없음 |
-| `use_dblink_corr_pushdown=no` 세션 설정 | push-down 미적용, AS-IS(N회 실행, conn_sql에 WHERE 없음) 동작 확인 |
+| 앱 `?` 포함 서브쿼리 | 기존 동작(AS-IS) 유지, regression 없음 |
+| push-down 불가 조건 (OR 등) | 기존 동작(AS-IS) 유지, regression 없음 |
+| DBLink 단독 사용 (correlated 아님) | 기존 동작(AS-IS) 유지, regression 없음 |
+| `use_dblink_corr_pushdown=no` 세션 설정 | push-down 미적용, 기존 동작(AS-IS) 그대로 동작 확인 |
 
 ---
 
 ## 11. 참고 문서
 
-- [dblink_correlated_source_analysis.md](dblink_correlated_source_analysis.md) — AS-IS 소스 분석
+- [01 소스 분석](01_dblink_correlated_source_analysis.md) — AS-IS 코드 경로
+- [03 Design Doc](03_dblink_correlated_optimization_design_doc.md) — 상세 설계 (§9 참고)
 
 ---
 
@@ -257,3 +258,4 @@ AS-IS                              TO-BE
 | 2026-03-13 | 초안 작성 |
 | 2026-03-13 | 4장 적용 범위를 1차/2차/Out of Scope로 분리; 9·10장 제목에 "(1차)" 명시 |
 | 2026-03-16 | FR-9 추가: `use_dblink_corr_pushdown` 세션 파라미터로 push-down ON/OFF 제어 (Should); §9 Step 1, §10 테스트 케이스 반영 |
+| 2026-03-19 | 실행 횟수(N회/1회) 표현 제거, 기존 동작(AS-IS) 그대로 유지로 통일 (§1, §2, §3, §4.3, §5 FR-9, §6.3, §7, §10) |

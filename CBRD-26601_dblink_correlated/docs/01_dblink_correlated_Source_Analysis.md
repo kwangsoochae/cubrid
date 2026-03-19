@@ -25,17 +25,18 @@
 ## 1. 개요
 
 - **패턴**: 외부 쿼리의 행마다, 원격 테이블에서 "현재 outer 행과 맞는" 값 하나를 스칼라로 가져오는 형태.
+
 - **현재 동작 (AS-IS)**:
-  1. 원격에서 `SELECT name, id FROM remote_t` **outer 행마다 N회** 실행 → 매번 결과 전체를 로컬 리스트에 저장.
-  2. outer 각 행마다, 해당 리스트를 스캔하면서 **로컬에서** `remote_t.id = l.id` 및 `inst_num() <= 1` 필터 적용.
-  - 재실행 원인: 래퍼 XASL 실행 말미의 `qexec_clear_head_lists(aptr_list)` 가 DBLink XASL를 매번 CLEARED로 리셋.
-- **한계**: outer 행마다 원격 테이블 **전체** 를 가져오므로, 매칭 비율이 낮을수록 전송량·로컬 연산 모두 낭비.
+  - 원격에서 `SELECT name, id FROM remote_t` outer 행마다 실행 → 매번 결과 전체를 로컬 리스트에 저장.
+  - outer 각 행마다, 해당 리스트를 스캔하면서 로컬에서 `remote_t.id = l.id` 및 `inst_num() <= 1` 필터 적용.
+  - 래퍼 XASL 실행 말미의 `qexec_clear_head_lists(aptr_list)` 가 DBLink XASL를 매번 CLEARED로 리셋되어 outer 행마다 재실행됨.
+
 
 ---
 
 ## 2. 전체 처리 흐름 (SQL → 결과)
 
-아래는 `SELECT (SELECT col FROM remote_t@conn WHERE remote_t.id = l.id LIMIT 1) FROM local_t l` 형태의 쿼리가 결과를 반환하기까지 거치는 **전체 단계**를 코드 기준으로 정리한 것이다.
+아래는 `SELECT (SELECT col FROM remote_t@conn WHERE remote_t.id = l.id LIMIT 1) FROM local_t l` 형태의 쿼리가 결과를 반환하기까지 거치는 전체 단계를 코드 기준으로 정리한 것이다.
 
 ```
 SQL 문자열
@@ -233,6 +234,7 @@ spec->info.spec.derived_table_type 분기:
 [buildlist_proc] outer (🔴0x4026a110)   flag: XASL_TOP_MOST_XASL
   ├─ access spec: class, sequential  ← local_t 스캔
   ├─ val_list: [l.id: INTEGER, l.name: VARCHAR]
+  ├─ dptr_list → 🟡0x40269c00          ← correlation_level==1 서브쿼리 연결
   └─ outptr: id, name, [xasl:🟡0x40269c00][TYPE_CONSTANT]  ← 스칼라 서브쿼리 regu
 
 [buildlist_proc] 서브쿼리 래퍼 (🟡0x40269c00)  flag: XASL_LINK_TO_REGU_VARIABLE
@@ -252,7 +254,7 @@ spec->info.spec.derived_table_type 분기:
 - `🟡0x40269c00` 는 **dptr_list** 에 연결되지만 `XASL_LINK_TO_REGU_VARIABLE` 플래그가 있어 **lazy 실행** 됨.
   - dptr 루프(`query_executor.c`)는 이 플래그가 있으면 skip.
   - 대신 outptr 평가 시 `TYPE_CONSTANT` regu_var 에서 `EXECUTE_REGU_VARIABLE_XASL` 로 실행.
-- `🔵0x40249d60` (DBLink)은 `🟡0x40269c00` 의 **aptr_list** 에 연결 → **전체 실행에서 1회만 실행**.
+- `🔵0x40249d60` (DBLink)은 `🟡0x40269c00` 의 **aptr_list** 에 aptr_list에 연결되어 있지만, 래퍼 mainblock 말미의 qexec_clear_head_lists(aptr_list)로 status가 CLEARED로 돌아가 outer 행마다 다시 실행됨.
 - `access pred` 의 `l.id` 는 outer val_list 의 `TYPE_CONSTANT` (regu가 outer val_list slot을 참조) → **원격 SQL에 포함되지 않음**, 리스트 행 읽을 때 로컬에서만 평가.
 
 `query_alias` 확인:
@@ -452,20 +454,6 @@ flowchart TB
   row1 -->|"래퍼 mainblock 말미: clear_head_lists(aptr) → DBLink XASL CLEARED\ndptr loop: clear_head_lists_with_truncate → 래퍼 XASL CLEARED"| row2
   row2 -->|"(반복)"| rowN
 ```
-
-> **핵심**: 래퍼 XASL mainblock 실행 말미에 `qexec_clear_head_lists(xasl->aptr_list)`
-> (query_executor.c L16087)가 호출되어 DBLink XASL의 status가 CLEARED로 리셋된다.
-> DBLink XASL는 `XASL_ZERO_CORR_LEVEL` 플래그가 없으므로 skip되지 않고 매번 clear된다.
->
-> **`XASL_ZERO_CORR_LEVEL` 미설정 원인**: 옵티마이저 단계에서
-> `query_rewrite_select.c` L112가 `mq_copypush_sargable_terms(래퍼 XASL, DBLink_spec)`를 호출한다.
-> 이때 `pt_check_pushable_term`은 DBLink XASL의 `derived_table`이 `PT_DBLINK_TABLE`이 아닌 `PT_SELECT`이므로
-> correlated 술어 `_dbl.id = l.id`의 push를 허용한다.
-> `mq_copypush_sargable_terms_helper` (view_transform.c L4734)는 push 성공 시
-> DBLink XASL의 `correlation_level`을 0 → 2로 변경한다 (`statement->correlation_level + 1`).
-> 이 변경이 XASL 생성 **이전**에 일어나므로, `parser_generate_xasl_proc(DBLink XASL)` (L18096)는
-> `correlation_level == 0` 조건을 충족하지 못해 `XASL_ZERO_CORR_LEVEL`을 설정하지 않는다.
-> 그 결과 DBLink는 outer 행 N회마다 재실행된다.
 
 ### 6.2 텍스트 형식 상세 흐름
 
@@ -678,10 +666,10 @@ correlated 집계의 경우 outer 참조(`l.id`)를 정적 conn_sql 문자열에
 
 | 항목 | 현재 (AS-IS) | 개선 후 (TO-BE) |
 |------|-------------|-----------------|
-| 원격 execute 횟수 | **N회** (outer 행마다, WHERE 없이 전체 fetch) | **N회** (outer 행마다, `WHERE id=?` 포함) |
+| 원격 execute | outer 행마다 (WHERE 없이 전체 fetch) | outer 행마다 (`WHERE id=?` 포함) |
 | 원격 전송 행 수 | 매 실행마다 전체 행 | 매 실행마다 매칭 행만 |
-| 로컬 필터링 | N회 리스트 스캔 + predicate 평가 | 불필요 (원격에서 필터) |
-| 네트워크 전송 | 전체 행 × N회 전송 | 매칭 행만 × N회 전송 |
+| 로컬 필터링 | outer 행마다 리스트 스캔 + predicate 평가 | 불필요 (원격에서 필터) |
+| 네트워크 전송 | 전체 행 × outer 행 수 | 매칭 행만 × outer 행 수 |
 | 효율 조건 | - | 원격 테이블 크고, 매칭 비율 낮을수록 유리 |
 
 > **AS-IS 오해 정정**: DBLink는 "1회만" 실행되는 것이 아니라 outer 행마다 재실행된다.
@@ -746,3 +734,7 @@ ORDER BY o.order_id;
 3. 로컬에서 instnum_pred (`LIMIT 1`) 적용 → 최종 1행.
 
 ※ LIMIT push-down은 CBRD-26601 범위 밖이므로 원격 SQL에 LIMIT 없음. instnum 필터는 로컬에 그대로 유지된다.
+
+---
+
+**본 작업 흐름**: 다음 문서 → [02 PRD](02_dblink_correlated_optimization_prd.md)
