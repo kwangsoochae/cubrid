@@ -3,7 +3,7 @@
 | 항목 | 내용 |
 |------|------|
 | 이슈 | CBRD-26601 |
-| 관련 문서 | [AS-IS/TO-BE 한계](dblink_correlated_as_is_to_be_limits.md) |
+| 관련 문서 | [Design Doc](03_dblink_correlated_Desgin_Doc.md), [Tasks](04_dblink_correlated_Tasks.md) |
 | 목적 | SELECT 절 correlated 스칼라 서브쿼리에서 TO-BE(outer 행마다 re-execute)가 AS-IS(원격 1회 전체 fetch)보다 불리해지는 worst case 조건(outer 행 수가 많고 remote가 작은 경우, outer correlation 키의 cardinality가 낮은 경우)을 분석한다. |
 
 ---

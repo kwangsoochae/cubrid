@@ -278,6 +278,7 @@ sequenceDiagram
 
 ## 참고 문서
 
-- 상세 소스 분석: `CBRD-26601_dblink_correlated/docs/dblink_correlated_source_analysis.md`
-- 최적화 설계: `CBRD-26601_dblink_correlated/docs/dblink_correlated_optimization_design_doc.md`
-- PRD: `CBRD-26601_dblink_correlated/docs/dblink_correlated_optimization_prd.md`
+- 상세 소스 분석: `CBRD-26601_dblink_correlated/docs/01_dblink_correlated_Source_Analysis.md`
+- 최적화 설계: `CBRD-26601_dblink_correlated/docs/03_dblink_correlated_Desgin_Doc.md`
+- PRD: `CBRD-26601_dblink_correlated/docs/02_dblink_correlated_PRD.md`
+- Tasks / Tests: `CBRD-26601_dblink_correlated/docs/04_dblink_correlated_Tasks.md`, `CBRD-26601_dblink_correlated/docs/05_dblink_correlated_Tests.md`

@@ -3,7 +3,7 @@
 | 항목 | 내용 |
 |------|------|
 | 문서 유형 | 작업 개요서 |
-| 관련 | [구조적 한계](dblink_correlated_as_is_to_be_limits.md) §6 (LIMIT push-down 불가 사유) |
+| 관련 | [LIMIT push-down 제한](dblink_correlated_LIMIT_push_down_restriction.md) |
 
 ---
 
@@ -79,5 +79,5 @@
 
 ## 4. 참고 문서
 
-- [구조적 한계](dblink_correlated_as_is_to_be_limits.md) — LIMIT이 로컬에 남는 이유(§6.1), push-down 불가 코드 위치 (dblink 맥락)
-- [소스 분석](dblink_correlated_source_analysis.md) — AS-IS 실행 경로, push-down 경로
+- [LIMIT push-down 제한](dblink_correlated_LIMIT_push_down_restriction.md) — dblink 맥락에서 LIMIT·push-down 제약
+- [소스 분석](01_dblink_correlated_Source_Analysis.md) — AS-IS 실행 경로, push-down 경로

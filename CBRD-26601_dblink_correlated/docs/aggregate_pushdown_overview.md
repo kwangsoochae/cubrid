@@ -3,7 +3,7 @@
 | 항목 | 내용 |
 |------|------|
 | 문서 유형 | 작업 개요서 |
-| 관련 | [구조적 한계](dblink_correlated_as_is_to_be_limits.md) §6 (집계 push-down 불가 사유) |
+| 관련 | [소스 분석](01_dblink_correlated_Source_Analysis.md) (집계/dblink push-down 경로) |
 
 ---
 
@@ -84,5 +84,4 @@
 
 ## 4. 참고 문서
 
-- [구조적 한계](dblink_correlated_as_is_to_be_limits.md) — 집계 push-down 불가 코드 위치(§6.2), push 대상이 WHERE term만인 점 (dblink 맥락)
-- [소스 분석](dblink_correlated_source_analysis.md) — push-down 경로, pt_copypush_terms
+- [소스 분석](01_dblink_correlated_Source_Analysis.md) — push-down 경로, `pt_copypush_terms` (dblink 맥락)

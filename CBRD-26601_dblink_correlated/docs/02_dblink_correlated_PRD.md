@@ -213,7 +213,7 @@ AS-IS                              TO-BE
 
 ## 9. 구현 단계 요약 (1차)
 
-상세 설계는 [03 Design Doc](03_dblink_correlated_optimization_design_doc.md) 참고.
+상세 설계는 [03 Design Doc](03_dblink_correlated_Desgin_Doc.md) 참고.
 
 | 단계 | 내용 |
 |------|------|
@@ -246,8 +246,8 @@ AS-IS                              TO-BE
 
 ## 11. 참고 문서
 
-- [01 소스 분석](01_dblink_correlated_source_analysis.md) — AS-IS 코드 경로
-- [03 Design Doc](03_dblink_correlated_optimization_design_doc.md) — 상세 설계 (§9 참고)
+- [01 소스 분석](01_dblink_correlated_Source_Analysis.md) — AS-IS 코드 경로
+- [03 Design Doc](03_dblink_correlated_Desgin_Doc.md) — 상세 설계 (§9 참고)
 
 ---
 

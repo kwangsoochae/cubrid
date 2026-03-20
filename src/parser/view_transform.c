@@ -6597,6 +6597,253 @@ mq_push_paths (PARSER_CONTEXT * parser, PT_NODE * statement, void *void_arg, int
   return statement;
 }
 
+/* CBRD-26601 T1-1: detect remote.col = outer.col equalities in subquery WHERE (Phase 1 rules).
+ * mq_detect_dblink_corr_eq returns the count; Phase 1 pushdown applies only when the caller sees count == 1. */
+
+static PT_NODE *
+mq_dblink_corr_strip_cast (PT_NODE * expr)
+{
+  PT_NODE *e = expr;
+
+  while (e != NULL && PT_IS_EXPR_NODE_WITH_OPERATOR (e, PT_CAST))
+    {
+      e = e->info.expr.arg1;
+    }
+  return e;
+}
+
+static bool
+mq_is_colref_under_dblink_spec (PT_NODE * expr, UINTPTR dblink_spec_id)
+{
+  PT_NODE *e = mq_dblink_corr_strip_cast (expr);
+
+  if (e == NULL)
+    {
+      return false;
+    }
+  if (e->node_type == PT_NAME)
+    {
+      return e->info.name.spec_id == dblink_spec_id;
+    }
+  if (e->node_type == PT_DOT_)
+    {
+      PT_NODE *a2 = e->info.dot.arg2;
+
+      return (a2 != NULL && a2->node_type == PT_NAME && a2->info.name.spec_id == dblink_spec_id);
+    }
+  return false;
+}
+
+static bool
+mq_is_outer_correlated_colref (PT_NODE * expr, UINTPTR dblink_spec_id)
+{
+  PT_NODE *e = mq_dblink_corr_strip_cast (expr);
+
+  if (e == NULL)
+    {
+      return false;
+    }
+  if (e->node_type == PT_NAME)
+    {
+      return e->info.name.correlation_level > 0 && e->info.name.spec_id != dblink_spec_id;
+    }
+  if (e->node_type == PT_DOT_)
+    {
+      PT_NODE *a2 = e->info.dot.arg2;
+
+      return (a2 != NULL && a2->node_type == PT_NAME && a2->info.name.correlation_level > 0
+	      && a2->info.name.spec_id != dblink_spec_id);
+    }
+  return false;
+}
+
+static bool
+mq_is_corr_dblink_eq_expr (PT_NODE * eq, UINTPTR dblink_spec_id)
+{
+  PT_NODE *a1;
+  PT_NODE *a2;
+
+  if (eq == NULL || eq->node_type != PT_EXPR || eq->info.expr.op != PT_EQ)
+    {
+      return false;
+    }
+  a1 = eq->info.expr.arg1;
+  a2 = eq->info.expr.arg2;
+  return (mq_is_colref_under_dblink_spec (a1, dblink_spec_id) && mq_is_outer_correlated_colref (a2, dblink_spec_id))
+    || (mq_is_colref_under_dblink_spec (a2, dblink_spec_id) && mq_is_outer_correlated_colref (a1, dblink_spec_id));
+}
+
+static void
+mq_corr_dblink_eq_extract_cols (PT_NODE * eq, UINTPTR dblink_spec_id, PT_NODE ** remote_col, PT_NODE ** outer_col)
+{
+  PT_NODE *a1 = eq->info.expr.arg1;
+  PT_NODE *a2 = eq->info.expr.arg2;
+
+  *remote_col = NULL;
+  *outer_col = NULL;
+  if (mq_is_colref_under_dblink_spec (a1, dblink_spec_id) && mq_is_outer_correlated_colref (a2, dblink_spec_id))
+    {
+      *remote_col = mq_dblink_corr_strip_cast (a1);
+      *outer_col = mq_dblink_corr_strip_cast (a2);
+    }
+  else if (mq_is_colref_under_dblink_spec (a2, dblink_spec_id) && mq_is_outer_correlated_colref (a1, dblink_spec_id))
+    {
+      *remote_col = mq_dblink_corr_strip_cast (a2);
+      *outer_col = mq_dblink_corr_strip_cast (a1);
+    }
+}
+
+/* Combined per-term scanner for mq_detect_dblink_corr_eq. One pre+post walk per CNF term. */
+typedef struct mq_dblink_term_scan MQ_DBLINK_TERM_SCAN;
+struct mq_dblink_term_scan
+{
+  UINTPTR dblink_spec_id;
+  bool forbidden;		/* PT_HOST_VAR / PT_OR / PT_NOT / subquery found */
+  int corr_eq_count;		/* # of remote.col = outer.col in this term */
+  PT_NODE *corr_eq;		/* first corr eq node (NULL if none) */
+  PT_NODE *remote_col;		/* DBLink-side column of first corr eq */
+  PT_NODE *outer_col;		/* outer correlated column of first corr eq */
+  int total_outer_cnt;		/* outer refs in entire term */
+  int eq_outer_cnt;		/* outer refs inside first corr eq subtree */
+  int corr_eq_depth;		/* > 0 while visiting inside first corr eq */
+};
+
+static PT_NODE *
+mq_dblink_term_scan_pre (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int *continue_walk)
+{
+  MQ_DBLINK_TERM_SCAN *s = (MQ_DBLINK_TERM_SCAN *) arg;
+
+  (void) parser;
+  *continue_walk = PT_CONTINUE_WALK;
+
+  if (s->forbidden)
+    {
+      *continue_walk = PT_STOP_WALK;
+      return node;
+    }
+
+  if (node->node_type == PT_HOST_VAR || node->node_type == PT_SELECT
+      || PT_IS_EXPR_NODE_WITH_OPERATOR (node, PT_OR) || PT_IS_EXPR_NODE_WITH_OPERATOR (node, PT_NOT))
+    {
+      s->forbidden = true;
+      *continue_walk = PT_STOP_WALK;
+      return node;
+    }
+
+  if (PT_IS_EXPR_NODE_WITH_OPERATOR (node, PT_EQ) && mq_is_corr_dblink_eq_expr (node, s->dblink_spec_id))
+    {
+      s->corr_eq_count++;
+      if (s->corr_eq == NULL)
+	{
+	  s->corr_eq = node;
+	  mq_corr_dblink_eq_extract_cols (node, s->dblink_spec_id, &s->remote_col, &s->outer_col);
+	  s->corr_eq_depth++;
+	}
+      return node;
+    }
+
+  if (node->node_type == PT_NAME && node->info.name.correlation_level > 0
+      && node->info.name.spec_id != s->dblink_spec_id)
+    {
+      s->total_outer_cnt++;
+      if (s->corr_eq_depth > 0)
+	{
+	  s->eq_outer_cnt++;
+	}
+      *continue_walk = PT_LEAF_WALK;
+    }
+
+  return node;
+}
+
+static PT_NODE *
+mq_dblink_term_scan_post (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int *continue_walk)
+{
+  MQ_DBLINK_TERM_SCAN *s = (MQ_DBLINK_TERM_SCAN *) arg;
+
+  (void) parser;
+  (void) continue_walk;
+  if (node == s->corr_eq)
+    {
+      s->corr_eq_depth--;
+    }
+  return node;
+}
+
+/*
+ * mq_detect_dblink_corr_eq () - T1-1: count remote.col = outer.col equalities in flattened CNF WHERE.
+ *   Returns total count (>= 0), or -1 on forbidden pattern (PT_HOST_VAR, PT_OR, PT_NOT, subquery,
+ *   more than one corr-eq per AND-term, outer refs in a term without a single corr-eq, etc.).
+ *   When remote_cols_out/outer_cols_out/max_keys store mode is used, returns -1 if the count would
+ *   exceed max_keys (buffers are not partially filled).
+ *   Pass NULL/NULL/0 for detect-only; pass arrays + max_keys to fill parallel remote/outer column refs.
+ *   PT_DBLINK_INFO population is T1-2 (caller).
+ */
+static int
+mq_detect_dblink_corr_eq (PARSER_CONTEXT * parser, PT_NODE * subquery, PT_NODE * dblink_spec,
+			   PT_NODE * remote_cols_out[], PT_NODE * outer_cols_out[], int max_keys)
+{
+  PT_NODE *where;
+  PT_NODE *term;
+  UINTPTR dblink_sid;
+  int total_corr = 0;
+  MQ_DBLINK_TERM_SCAN scan;
+  bool do_store = (remote_cols_out != NULL && outer_cols_out != NULL && max_keys > 0);
+
+  if (parser == NULL || subquery == NULL || dblink_spec == NULL || subquery->node_type != PT_SELECT)
+    {
+      return -1;
+    }
+
+  where = subquery->info.query.q.select.where;
+  if (where == NULL)
+    {
+      return 0;
+    }
+
+  dblink_sid = dblink_spec->info.spec.id;
+
+  for (term = where; term != NULL; term = term->next)
+    {
+      memset (&scan, 0, sizeof (scan));
+      scan.dblink_spec_id = dblink_sid;
+      (void) parser_walk_tree (parser, term, mq_dblink_term_scan_pre, &scan, mq_dblink_term_scan_post, &scan);
+
+      if (scan.forbidden || scan.corr_eq_count > 1)
+	{
+	  return -1;
+	}
+
+      if (scan.corr_eq_count == 0)
+	{
+	  if (scan.total_outer_cnt > 0)
+	    {
+	      return -1;
+	    }
+	  continue;
+	}
+
+      if (scan.total_outer_cnt != scan.eq_outer_cnt)
+	{
+	  return -1;
+	}
+
+      if (do_store && total_corr >= max_keys)
+	{
+	  return -1;
+	}
+      if (do_store)
+	{
+	  remote_cols_out[total_corr] = scan.remote_col;
+	  outer_cols_out[total_corr] = scan.outer_col;
+	}
+
+      total_corr++;
+    }
+
+  return total_corr;
+}
+
 /*
  * mq_rewrite_dblink_as_subquery () - rewrite dblink as a subquery
  *   return: PT_NODE *
@@ -6619,6 +6866,9 @@ mq_rewrite_dblink_as_subquery (PARSER_CONTEXT * parser, PT_NODE * node, void *ar
       if ((derived_table = spec->info.spec.derived_table)
 	  && spec->info.spec.derived_table_type == PT_DERIVED_DBLINK_TABLE)
 	{
+	  /* T1-1: detection only; T1-2 records result and appends conn_sql. */
+	  (void) mq_detect_dblink_corr_eq (parser, node, spec, NULL, NULL, 0);
+
 	  derived = mq_rewrite_dblink_as_derived (parser, derived_table);
 	  if (derived == NULL)
 	    {

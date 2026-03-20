@@ -3370,6 +3370,8 @@ typedef struct host_vars_info
   int *index;
 } PT_HOST_VAR_IDX_INFO;
 
+#define PT_DBLINK_MAX_CORR_KEYS 8	/* max correlated push-down keys; Phase 1 uses only [0] */
+
 typedef struct pt_dblink_info
 {
   PT_NODE *conn;		/* name for DBLINK */
@@ -3389,6 +3391,12 @@ typedef struct pt_dblink_info
   PT_NODE *owner_list;
 
   void *remote_col_list;	/* remote table's column list */
+
+  /* CBRD-26601 T1-2: correlated equality push-down keys (Phase 1: count==1, Phase 2+: up to MAX).
+   * Non-owning aliases into the enclosing subquery WHERE tree — do NOT add to pt_apply_dblink_table. */
+  int corr_key_count;
+  PT_NODE *corr_key_remote_cols[PT_DBLINK_MAX_CORR_KEYS];	/* DBLink-side column ref */
+  PT_NODE *corr_key_outer_refs[PT_DBLINK_MAX_CORR_KEYS];	/* outer correlated column ref */
 
 } PT_DBLINK_INFO;
 

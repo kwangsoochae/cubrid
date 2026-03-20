@@ -3,8 +3,8 @@
 | 항목 | 내용 |
 |------|------|
 | 이슈 | CBRD-26601 |
-| 관련 문서 | [02 PRD](02_dblink_correlated_optimization_prd.md), [03 Design Doc](03_dblink_correlated_optimization_design_doc.md), [01 소스 분석](01_dblink_correlated_source_analysis.md) |
-| 테스트 상세 | [05 Tests](05_dblink_correlated_optimization_tests.md) |
+| 관련 문서 | [02 PRD](02_dblink_correlated_PRD.md), [03 Design Doc](03_dblink_correlated_Desgin_Doc.md), [01 소스 분석](01_dblink_correlated_Source_Analysis.md) |
+| 테스트 상세 | [05 Tests](05_dblink_correlated_Tests.md) |
 
 **의존 관계**: Step 0 → Step 1 → Step 2 → Step 3 → Step 4. Step 5(직렬화)는 Step 2 완료 후 병행 가능. Step 6(테스트)는 Step 4 완료 후.
 
@@ -72,12 +72,31 @@
 
 - **플랜 A (1순위)**: `pt_to_dblink_table_spec_list()`에 진입 가능하면(T0-1 C-1 확인) 여기서 `corr_key_regu_list` 채움(T2-1).
 - **플랜 B (fallback)**: `PT_IS_SUBQUERY` 경로만 타는 경우 `pt_to_subquery_table_spec_list()`에서 `dblink_spec_node`의 corr 필드 및 `where_part` 처리(T2-1, T4-1)를 함께 수행한다. Step 0(C-1) 결과에 따라 A/B를 확정한다. (설계 근거: Design Doc 5.1, C-1)
+- **T1-1 / T1-2 경계 (유지)**: **T1-1**은 서브쿼리 `WHERE`에서 상관 등치를 판별하는 **탐지 함수(및 호출)**까지만 담당한다. **`PT_DBLINK_INFO` 필드 추가**, **`conn_sql` append**, 탐지 결과 저장은 **T1-2**에서 수행한다. (PR·리뷰는 이 분할을 그대로 따른다.)
 
 | ID | 작업 | 파일/위치 | 완료 |
 |----|------|-----------|:----:|
-| T1-1 | 서브쿼리 WHERE에서 `remote.col = outer.col` 단일 등치 조건 탐지 함수 추가. 탐지 조건: (1) 한 쪽이 DBLink 컬럼 ref, (2) 반대쪽이 outer query 컬럼 ref(TYPE_CONSTANT / correlation). 앱 `?`(PT_HOST_VAR) 포함 시 탐지 실패(기존 방식 유지). | `src/parser/view_transform.c` | [ ] |
-| T1-2 | 탐지된 correlation 조건을 `PT_DBLINK_INFO`에 기록: `corr_key_remote_col`, `corr_key_outer_ref` 저장. `conn_sql`(원격 SQL)에 `WHERE remote.col = ?` append. 이미 WHERE가 있는 경우 `AND remote.col = ?` append. | `src/parser/parse_tree.h` `PT_DBLINK_INFO`, `src/parser/view_transform.c` | [ ] |
+| T1-1 | 서브쿼리 WHERE에서 `remote.col = outer.col` **상관 등치 1개** 탐지 함수 추가(아래 §T1-1 설계 결정). 탐지 조건: (1) 한 쪽이 DBLink 컬럼 ref, (2) 반대쪽이 outer query 컬럼 ref(correlation / 이후 XASL에서 TYPE_CONSTANT regu). 앱 `?`(PT_HOST_VAR) 포함 시 탐지 실패(기존 방식 유지). | `src/parser/view_transform.c` | [x] |
+| T1-2 | 탐지된 correlation 조건을 `PT_DBLINK_INFO`에 기록: `corr_key_remote_cols[]`, `corr_key_outer_refs[]`, `corr_key_count`. `conn_sql`(원격 SQL)에 `WHERE remote.col = ?` append. 이미 WHERE가 있는 경우 `AND remote.col = ?` append. | `src/parser/parse_tree.h` `PT_DBLINK_INFO`, `src/parser/view_transform.c` | [ ] |
+
+**T1-2 연동 참고**: `mq_detect_dblink_corr_eq`는 저장 시 `max_keys`(보통 `PT_DBLINK_MAX_CORR_KEYS`) 초과면 **-1**. `corr_key_*`는 WHERE와 노드를 공유하므로 `pt_apply_dblink_table`에 넣지 않음 — `parse_tree.h` 주석 및 [00 진행서 §4](00_dblink_correlated_progress.md).
 | T1-3 | `use_dblink_corr_pushdown` 세션 파라미터 추가 (boolean, 기본값 `yes`). `mq_rewrite_dblink_as_subquery` 탐지 진입부에서 파라미터 값을 확인하여 `no`이면 탐지 로직 전체를 스킵하고 기존 방식 유지. | `src/base/system_parameter.h/c`, `src/parser/view_transform.c` | [ ] |
+
+### T1-1 설계 결정 (Phase 1 — Tasks 문서 기준)
+
+**“단일 등치” 정의**: push-down에 쓸 **상관 등치**(`DBLink 쪽 컬럼 = outer 쪽 컬럼`)는 **서브쿼리 `WHERE` 안에서 정확히 한 번**만 나와야 한다. `T0-2` / `T1-2`의 **키 1개(`corr_key_count == 1`)** 모델과 맞춘다.
+
+**등식 좌우(교환)**: `r.id = l.id`와 **`l.id = r.id`** 는 동일하게 탐지 성공으로 본다. 구현은 `PT_EQ` **양쪽** 중 한쪽이 DBLink 컬럼·다른 쪽이 outer 상관이면 된다.
+
+| 케이스 | Phase 1 동작 | 비고 |
+|--------|--------------|------|
+| `r.id = l.id` 만 있음 (또는 `l.id = r.id`) | 탐지 **성공** | 기본 케이스 |
+| `r.id = l.id AND r.status = 'A'` (등) 상관 등치 1개 + **비상관** 조건(상수 필터, `r`만 참조하는 조건 등) | 탐지 **성공** | 나머지 AND 항은 그대로 로컬/원격 정책(T4-1/T6-9)에 맡김 |
+| `r.id = l.id AND r.code = l.code` (등) **상관 등치 2개 이상** | 탐지 **실패** | 바인드 슬롯·`corr_key_regu_list`가 1키 전제; 복합 키는 Phase 2 등에서 별도 설계 |
+| `OR` 등으로 **하나의 AND-CNF로 단순화하기 어려운 WHERE**(예: `(r.id = l.id OR …)`, 상관 등치가 OR 아래에만 존재) | 탐지 **실패** | FR-7 보수적 유지 |
+| `NOT`, WHERE 내 서브쿼리, 기타 복잡 서브트리에 걸린 상관 등치 | 탐지 **실패** | 구현 단계에서 필요 시 허용 범위를 좁혀도 됨; 문서상 Phase 1은 실패가 기본 |
+
+**정리**: 구현 시 AND 리프(또는 CNF leaf)를 훑어 **패턴에 맞는 상관 등치의 개수를 세고, 정확히 1일 때만 성공**으로 두면 T6-9와 모순 없이 일관된다. **다른 리프가 outer를 참조하나 등치가 아니면**(예: `r.x > l.id`) Phase 1 **실패**(Design Doc §3.1 보수적 규칙과 동일).
 
 ### Step 1 점검
 
@@ -94,9 +113,12 @@
 - **T1-1 탐지 성공**:
   ```sql
   SELECT l.id, (SELECT r.name FROM remote_t@conn r WHERE r.id = l.id LIMIT 1)
-  FROM local_t l
+  FROM local_t l;
+  -- 등식 좌우 교환
+  SELECT l.id, (SELECT r.name FROM remote_t@conn r WHERE l.id = r.id LIMIT 1)
+  FROM local_t l;
   ```
-  - gdb: 탐지 함수에서 `remote.id = l.id` → 탐지 성공, `corr_key` 기록 확인
+  - gdb: `remote`/`outer` 판별이 좌우 어느 쪽이든 1회 성공
 
 - **T1-1 탐지 실패 (기존 방식 유지)**:
   ```sql
@@ -104,6 +126,8 @@
   WHERE r.id = l.id AND r.val = ?
   -- OR 조건
   WHERE r.id = l.id OR r.code = l.code
+  -- 상관 등치 2개 이상 (Phase 1 설계 결정)
+  WHERE r.id = l.id AND r.code = l.code
   -- correlated 아님
   WHERE r.id = 1
   ```
@@ -240,7 +264,7 @@ FROM local_t l WHERE l.id IS NULL;
 ## 완료 체크리스트
 
 - [x] **Step 0** — T0-1 [x], T0-2 [x]
-- [ ] **Step 1** — T1-1 [ ], T1-2 [ ], T1-3 [ ]
+- [ ] **Step 1** — T1-1 [x], T1-2 [ ], T1-3 [ ]
 - [ ] **Step 2** — T2-1 [ ]
 - [ ] **Step 3** — T3-1 [ ], T3-2 [ ], T3-3 [ ]
 - [ ] **Step 4** — T4-1 [ ]
@@ -258,3 +282,7 @@ FROM local_t l WHERE l.id IS NULL;
 | 2026-03-16 | FR-9 반영: T1-3(`use_dblink_corr_pushdown` 세션 파라미터), T6-7(파라미터 OFF 시 AS-IS 유지 검증) 추가; PRD 매핑·체크리스트 업데이트 |
 | 2026-03-18 | T3-4 제거: 이전 행 키 비교 최적화는 Phase 2 추가 개선 사항 (Design Doc §7.1) — Tasks 범위 밖 |
 | 2026-03-19 | 리뷰 반영: Step 1 플랜 A/B 명시, T2-1·T4-1 보강, T3-2 전용 함수 대안, T6-3/T6-7 AS-IS 표현 정리, T6-8·T6-9 추가 |
+| 2026-03-20 | T1-1 모호함 정리: §「T1-1 설계 결정」— 상관 등치 1개만 성공, 추가 AND 비상관 허용, 복합 상관 등치·OR 등 실패; T1-1 행·점검 SQL 보강 |
+| 2026-03-20 | Step 1: T1-1/T1-2 경계 명시(분할 유지), 등식 좌우 교환 허용, 점검 SQL 보강; Design Doc §1.1/§3.1 동기 |
+| 2026-03-20 | 상단 관련 문서 링크를 저장소 기준 파일명으로 통일(`02_*_PRD`, `03_*_Desgin_Doc`, `01_*_Source_Analysis`, `05_*_Tests`). 구 `04_*_optimization_tasks.md`는 스텁만 유지. |
+| 2026-03-20 | T1-1 구현: `view_transform.c`에 `mq_detect_dblink_corr_eq()` 및 헬퍼, `mq_rewrite_dblink_as_subquery`에서 호출(결과 저장은 T1-2). |

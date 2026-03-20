@@ -737,4 +737,4 @@ ORDER BY o.order_id;
 
 ---
 
-**본 작업 흐름**: 다음 문서 → [02 PRD](02_dblink_correlated_optimization_prd.md)
+**본 작업 흐름**: 다음 문서 → [02 PRD](02_dblink_correlated_PRD.md)

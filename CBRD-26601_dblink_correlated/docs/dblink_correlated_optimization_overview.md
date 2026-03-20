@@ -4,7 +4,7 @@
 |------|------|
 | 문서 유형 | 작업 개요서 |
 | 이슈 | CBRD-26601 (또는 후속 이슈) |
-| 관련 | `dblink_correlated_optimization_design_doc.md`, `dblink_correlated_as_is_to_be_limits.md` |
+| 관련 | `03_dblink_correlated_Desgin_Doc.md`, `NA_dblink_correlated_worst_case.md` (파일명은 저장소 기준 최신) |
 
 ---
 
@@ -78,7 +78,8 @@ AS-IS에서는 correlated 조건이 로컬 `access_pred`에서만 평가되지�
 
 ## 4. 참고·연계 문서
 
-- `dblink_correlated_source_analysis.md` — AS-IS 실행 경로, XASL 구조, aptr/dptr 동작 분석
-- `dblink_correlated_optimization_design_doc.md` — TO-BE 설계, 전체 실행 흐름 다이어그램, `dblink_scan_reset` 확장 설계
-- `dblink_correlated_as_is_to_be_limits.md` — AS-IS/TO-BE 구조적 한계 및 worst case 정리 (correlated 조건 push-down이 해결하는 부분과, 여전히 남는 한계 구분)
+- `01_dblink_correlated_Source_Analysis.md` — AS-IS 실행 경로, XASL 구조, aptr/dptr 동작 분석
+- `03_dblink_correlated_Desgin_Doc.md` — TO-BE 설계, 전체 실행 흐름 다이어그램, `dblink_scan_reset` 확장 설계
+- `NA_dblink_correlated_worst_case.md` — worst case·AS-IS/TO-BE 비교 보조
+- `04_dblink_correlated_Tasks.md` — 구현 태스크
 

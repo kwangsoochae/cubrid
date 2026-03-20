@@ -3,7 +3,7 @@
 | 항목 | 내용 |
 |------|------|
 | 이슈 | CBRD-26601 |
-| 기준 문서 | [02 PRD](02_dblink_correlated_optimization_prd.md), [01 소스 분석](01_dblink_correlated_source_analysis.md) |
+| 기준 문서 | [02 PRD](02_dblink_correlated_PRD.md), [01 소스 분석](01_dblink_correlated_Source_Analysis.md) |
 | 기준 브랜치 | develop |
 | 대상 | SELECT 절 correlated 스칼라 서브쿼리 안의 DBLink (1차) |
 
@@ -14,13 +14,14 @@
 ## 1. 개요
 
 이 문서는 PRD의 FR-1 ~ FR-8, FR-9 및 NFR-1 ~ NFR-3을 구현하기 위한 레이어별 설계를 기술한다.
-AS-IS 코드 분석은 [01 소스 분석](01_dblink_correlated_source_analysis.md)을 참고한다.
+AS-IS 코드 분석은 [01 소스 분석](01_dblink_correlated_Source_Analysis.md)을 참고한다.
 
 ### 1.1 핵심 설계 원칙
 
 - **보수적 탐지**: 탐지 불확실 시 기존 동작(AS-IS) 유지.
 - **기존 경로 최소 변경**: rewrite 흐름은 그대로 유지, push-down 대상에만 추가 처리.
-- **단일 등치 한정**: `remote.col = outer.col` 패턴만 허용 (1차).
+- **단일 상관 등치 한정 (1차)**: 서브쿼리 `WHERE`에서 `remote.col = outer.col` 형태의 **상관 등치가 정확히 하나**일 때만 push-down 후보. 추가 `AND`로 붙는 **비상관** 조건은 허용 ([04 Tasks](04_dblink_correlated_Tasks.md) §「T1-1 설계 결정」과 동일).
+- **등식 교환**: `r.id = l.id` 와 `l.id = r.id` 는 동등하게 탐지한다.
 
 ### 1.2 변경 대상 레이어 요약
 
@@ -93,18 +94,27 @@ struct dblink_scan_info {
 
 **진입점**: `mq_rewrite_dblink_as_subquery()` (develop:6607)
 
+#### 구현 작업 분할 ([04 Tasks](04_dblink_correlated_Tasks.md) T1-1 / T1-2)
+
+| 태스크 | 담당 |
+|--------|------|
+| **T1-1** | 서브쿼리 `WHERE`에서 상관 등치 **탐지** (`detect_corr_key` 등). `PT_EQ` 양변 중 DBLink 컬럼 / outer 상관 식별(좌우 무관). |
+| **T1-2** | `PT_DBLINK_INFO`에 `corr_key_remote_col`, `corr_key_outer_ref` **저장**, **`conn_sql`에 `?` 조건 append**. |
+
+탐지와 메타데이터·SQL 반영을 한 PR에 넣을 수는 있으나, **문서·리뷰 기준 분할은 위 표를 유지**한다.
+
 #### 처리 흐름
 
 ```
 mq_rewrite_dblink_as_subquery()
   ├─ spec->derived_table_type == PT_DERIVED_DBLINK_TABLE 확인
-  ├─ [신규] detect_corr_key(parser, spec, subquery_where)
-  │    ├─ WHERE 절 순회: remote.col = outer.col 단일 등치 탐지
+  ├─ [신규, T1-1] detect_corr_key(parser, spec, subquery_where)
+  │    ├─ WHERE(CNF AND 리프) 순회: 상관 등치 **정확히 1개** (remote↔outer, = 만) — 좌우 교환 허용
   │    ├─ PT_HOST_VAR 포함 시 → 실패 반환 (기존 방식)
-  │    ├─ OR 조건 포함 시 → 실패 반환 (기존 방식)
-  │    ├─ 성공 시 PT_DBLINK_INFO.corr_key_remote_col, corr_key_outer_ref 기록
-  │    └─ 성공 시 (초기안) view_transform 단계에서 conn_sql에 "WHERE remote.col = ?" (또는 "AND remote.col = ?") append
-  │         또는 XASL 생성 단계(pt_to_dblink_table_spec_list)에서 PT_DBLINK_INFO 기반으로 conn_sql을 구성하도록 조정 가능 (5.4 참고)
+  │    ├─ 상관 등치 2개 이상, OR/비단순 CNF, NOT·WHERE 서브쿼리 등 → 실패 (Phase 1, Tasks §T1-1 참고)
+  │    └─ 성공 시 T1-2에서 PT_DBLINK_INFO·conn_sql 반영
+  ├─ [T1-2] 성공 시 PT_DBLINK_INFO.corr_key_remote_col, corr_key_outer_ref 기록 + conn_sql append
+  │         (또는 conn_sql 일부를 XASL 생성 단계에서 구성 — 5.4 참고)
   └─ rewrite는 기존과 동일하게 진행 (PT_IS_SUBQUERY로 변환)
 ```
 
@@ -112,11 +122,18 @@ mq_rewrite_dblink_as_subquery()
 
 | 조건 | 결과 |
 |------|------|
-| `PT_EQ` 노드, 한 쪽 = DBLink 컬럼, 반대쪽 = outer col ref | 탐지 성공 |
+| `PT_EQ` 노드, **한쪽** = DBLink 컬럼 ref, **반대쪽** = outer col ref (**순서 무관**) | 성공 여부는 **상관 등치 총개수·보수적 규칙**으로 판단 |
+| 상관 등치 **1개** + `AND`로만 연결된 **비상관** 추가 조건 | 탐지 성공 |
+| 상관 등치 **2개 이상** | 탐지 실패 |
 | `PT_HOST_VAR` 포함 | 탐지 실패 |
-| `PT_OR` 포함 | 탐지 실패 |
-| 등치가 아닌 비교 (`PT_GT`, `PT_LT` 등) | 탐지 실패 |
+| `PT_OR` 등 **단일 AND-CNF로 정리 불가**한 WHERE | 탐지 실패 |
+| 등치가 아닌 비교 (`PT_GT`, `PT_LT` 등) | 상관 등치로 **카운트하지 않음**; 다만 그 리프가 **outer를 참조**하면 위 보수적 규칙으로 **실패** |
+| `NOT`, WHERE 내 서브쿼리 등 복잡 트리 | Phase 1 기본 **실패** |
 | 기타 불확실 케이스 | 탐지 실패 (기존 방식 유지) |
+
+상세 케이스 표는 [04 Tasks — §T1-1 설계 결정](04_dblink_correlated_Tasks.md)을 기준으로 한다.
+
+> **보수적 규칙 (AND 리프)**: 인정하는 상관 조건은 **`remote 컬럼 = outer 컬럼` 등치 하나**뿐이다. **다른 AND 리프에서 outer를 참조**하는데 등치가 아니면(예: `r.x > l.id`) Phase 1 **실패**. outer를 쓰지 않는 비교·상수 필터(예: `r.status = 'A'`)는 허용.
 
 #### outer ref 판별 방법
 
@@ -633,9 +650,9 @@ outer query(local_t)에 join 조건 외의 조건이 없을 때 push-down을 억
 
 ## 8. 참고 문서
 
-- [02 PRD](02_dblink_correlated_optimization_prd.md) — 요구사항
-- [01 소스 분석](01_dblink_correlated_source_analysis.md) — AS-IS 소스 분석
-- [04 Tasks](04_dblink_correlated_optimization_tasks.md) — 구현 태스크
+- [02 PRD](02_dblink_correlated_PRD.md) — 요구사항
+- [01 소스 분석](01_dblink_correlated_Source_Analysis.md) — AS-IS 소스 분석
+- [04 Tasks](04_dblink_correlated_Tasks.md) — 구현 태스크(§T1-1 설계 결정·경계와 본 문서 동기)
 
 ---
 
@@ -650,3 +667,5 @@ outer query(local_t)에 join 조건 외의 조건이 없을 때 push-down을 억
 | 2026-03-18 | C-2 확인 완료 (코드 직접 분석). Option 1(corr DBLink clear skip) 채택. §3.4/3.5/3.6/5.2/6 assert 및 불변 조건 추가. |
 | 2026-03-18 | §3.5/3.6 신규 함수 `dblink_execute_corr` → `scan_reset_scan_block` + `dblink_scan_reset(scan_info, vd)` 확장으로 교체 (`dblink_join_improve` 패턴 적용). §1.2 테이블 `scan_manager.c` 행 추가. |
 | 2026-03-19 | 리뷰 반영: 문서 상단 라인 번호 유의사항, §1.1 AS-IS 유지 표현, §3.2 플랜 B 명시, §3.3 access_pred 제거 대상 한정, §3.4 corr_key_count==0 분기 명시, §3.6 N회 제거, §4.1 pack 함수명 C-5 참고 주석 |
+| 2026-03-20 | §1.1 단일 상관 등치·등식 교환 원칙. §3.1 T1-1/T1-2 작업 분할표·처리 흐름·탐지 표를 [04 Tasks §T1-1](04_dblink_correlated_Tasks.md)와 동기. §8 Tasks 링크 정정. |
+| 2026-03-20 | §1·§8 등 본 문서 및 PRD/소스 분석 상호 링크 파일명을 `02_dblink_correlated_PRD.md`, `01_dblink_correlated_Source_Analysis.md` 등 저장소 실제 이름으로 통일. |

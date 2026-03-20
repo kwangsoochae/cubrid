@@ -3,7 +3,7 @@
 | 항목 | 내용 |
 |------|------|
 | 이슈 | CBRD-26601 |
-| 기준 문서 | [Design Doc](dblink_correlated_optimization_design_doc.md), [소스 분석](dblink_correlated_source_analysis.md) |
+| 기준 문서 | [Design Doc](03_dblink_correlated_Desgin_Doc.md), [소스 분석](01_dblink_correlated_Source_Analysis.md) |
 | 목적 | AS-IS·TO-BE 동작 특성, TO-BE worst case, 구조적 한계를 정리하여 설계·운영 시 참고 |
 
 ---
@@ -226,9 +226,9 @@ TO-BE의 한계(행마다 round-trip, 원격에서 “매칭 행 전체”가 �
 
 ## 9. 문서 참조
 
-- [Design Doc](dblink_correlated_optimization_design_doc.md) — TO-BE 설계 및 실행 흐름.
-- [소스 분석](dblink_correlated_source_analysis.md) — AS-IS 실행 경로 및 코드 위치.
-- [PRD](dblink_correlated_optimization_prd.md) — 요구사항.
+- [Design Doc](03_dblink_correlated_Desgin_Doc.md) — TO-BE 설계 및 실행 흐름.
+- [소스 분석](01_dblink_correlated_Source_Analysis.md) — AS-IS 실행 경로 및 코드 위치.
+- [PRD](02_dblink_correlated_PRD.md) — 요구사항.
 
 ---
 
