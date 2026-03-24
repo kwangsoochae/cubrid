@@ -3,7 +3,7 @@
 | 항목 | 내용 |
 |------|------|
 | 이슈 | CBRD-26601 |
-| 관련 문서 | [02 PRD](02_dblink_correlated_PRD.md), [03 Design Doc](03_dblink_correlated_Desgin_Doc.md), [01 소스 분석](01_dblink_correlated_Source_Analysis.md) |
+| 관련 문서 | [02 PRD](02_dblink_correlated_PRD.md), [03 Design Doc](03_dblink_correlated_Desgin_Doc.md), [01 소스 분석](01_dblink_correlated_Source_Analysis.md), [07 비상관 vs 상관 WHERE](07_dblink_uncorrelated_vs_correlated_where.md) |
 | 테스트 상세 | [05 Tests](05_dblink_correlated_Tests.md) |
 
 **의존 관계**: Step 0 → Step 1 → Step 2 → Step 3 → Step 4. Step 5(직렬화)는 Step 2 완료 후 병행 가능. Step 6(테스트)는 Step 4 완료 후.
@@ -15,7 +15,7 @@
 | PRD 요구사항 | 대응 태스크 |
 |--------------|-------------|
 | FR-1 `remote.col = outer.col` 등치 탐지 | T1-1 |
-| FR-2 `conn_sql`에 `WHERE col = ?` append | T1-2 |
+| FR-2 `conn_sql`에 `WHERE col = ?` append | T1-2(메타·§유의 5 배치), T2-1(`rewritten == NULL` 시 보강) |
 | FR-3 `corr_key_count` / `corr_key_regu_list` 추가 | T0-2, T2-1 |
 | FR-4 open 시 prepare만, execute 지연 | T3-1 |
 | FR-5 outer 행 평가 시 bind + execute | T3-2 |
@@ -68,19 +68,19 @@
 
 ## Step 1: 탐지 (Parser / View transform)
 
-**배경**: `mq_rewrite_dblink_as_subquery`(`view_transform.c:6607`)에서 correlation 조건(`remote.col = outer.col`)을 탐지하고 `PT_DBLINK_INFO`에 기록한다. **rewrite는 기존과 동일하게 PT_IS_SUBQUERY로 변환 유지** — 이후 XASL은 보통 `pt_to_spec_list()` → `pt_to_subquery_table_spec_list()` 경로를 탄다.
+**배경**: `mq_rewrite_dblink_as_subquery`에서 correlation 조건(`remote.col = outer.col`)을 탐지하고 `PT_DBLINK_INFO`에 **메타**(`corr_key_*`)만 기록한다. **원격 SQL에 `= ?`를 붙이는 시점**은 `rewritten`이 확정된 뒤로 나눈다(아래 §T1-2 유의 5). **rewrite는 기존과 동일하게 PT_IS_SUBQUERY로 변환 유지** — 이후 XASL은 보통 `pt_to_spec_list()` → `pt_to_subquery_table_spec_list()` 경로를 탄다.
 
 - **플랜 A (1순위)**: `pt_to_dblink_table_spec_list()`에 진입 가능하면(T0-1 C-1 확인) 여기서 `corr_key_regu_list` 채움(T2-1).
 - **플랜 B (fallback)**: `PT_IS_SUBQUERY` 경로만 타는 경우 `pt_to_subquery_table_spec_list()`에서 `dblink_spec_node`의 corr 필드 및 `where_part` 처리(T2-1, T4-1)를 함께 수행한다. Step 0(C-1) 결과에 따라 A/B를 확정한다. (설계 근거: Design Doc 5.1, C-1)
-- **T1-1 / T1-2 경계 (유지)**: **T1-1**은 서브쿼리 `WHERE`에서 상관 등치를 판별하는 **탐지 함수(및 호출)**까지만 담당한다. **`PT_DBLINK_INFO` 필드 추가**, **`conn_sql` append**, 탐지 결과 저장은 **T1-2**에서 수행한다. (PR·리뷰는 이 분할을 그대로 따른다.)
+- **T1-1 / T1-2 경계 (유지)**: **T1-1**은 서브쿼리 `WHERE`에서 상관 등치를 판별하는 **탐지 함수(및 호출)**까지만 담당한다. **T1-2**는 탐지 성공 시 **`PT_DBLINK_INFO`에 `corr_key_*` 기록**(`mq_rewrite_dblink_as_subquery`). **`conn_sql`/`rewritten`에 `WHERE`·`AND` + `= ?` 문자열을 붙이는 일**은 §T1-2 유의 5의 **두 지점**(`pt_copypush_terms` 직후, 또는 T2-1에서 `rewritten == NULL`일 때)에서 `mq_dblink_append_corr_pred_sql`로 수행한다 — **한 케이스당 append 한 번**. (PR·리뷰는 태스크 ID는 유지하되, 문자열 반영 위치는 위 표를 기준으로 한다.)
 
 | ID | 작업 | 파일/위치 | 완료 |
 |----|------|-----------|:----:|
 | T1-1 | 서브쿼리 WHERE에서 `remote.col = outer.col` **상관 등치 1개** 탐지 함수 추가(아래 §T1-1 설계 결정). 탐지 조건: (1) 한 쪽이 DBLink 컬럼 ref, (2) 반대쪽이 outer query 컬럼 ref(correlation / 이후 XASL에서 TYPE_CONSTANT regu). 앱 `?`(PT_HOST_VAR) 포함 시 탐지 실패(기존 방식 유지). | `src/parser/view_transform.c` | [x] |
-| T1-2 | 탐지된 correlation 조건을 `PT_DBLINK_INFO`에 기록: `corr_key_remote_cols[]`, `corr_key_outer_refs[]`, `corr_key_count`. `conn_sql`(원격 SQL)에 `WHERE remote.col = ?` append. 이미 WHERE가 있는 경우 `AND remote.col = ?` append. | `src/parser/parse_tree.h` `PT_DBLINK_INFO`, `src/parser/view_transform.c` | [ ] |
+| T1-2 | 탐지 성공 시 `PT_DBLINK_INFO`에 `corr_key_remote_cols[]`, `corr_key_outer_refs[]`, `corr_key_count` 기록(`mq_rewrite_dblink_as_subquery`). **여기서는 SQL 문자열 append 없음.** 원격 `WHERE`/`AND` + `= ?`는 §T1-2 유의 5에 따라 `pt_copypush_terms(PT_DBLINK_TABLE)`에서 `rewritten` 할당 직후, 또는 T2-1에서 `rewritten == NULL`일 때 `mq_dblink_append_corr_pred_sql`로 반영. | `src/parser/parse_tree.h` `PT_DBLINK_INFO`, `src/parser/view_transform.c`, `pt_copypush_terms`, `xasl_generation.c`(T2-1) | [x] |
+| T1-3 | `use_dblink_corr_pushdown` 세션 파라미터 추가 (boolean, 기본값 `yes`). `mq_rewrite_dblink_as_subquery` 탐지 진입부에서 파라미터 값을 확인하여 `no`이면 탐지 로직 전체를 스킵하고 기존 방식 유지. | `src/base/system_parameter.h/c`, `src/parser/view_transform.c` | [ ] |
 
 **T1-2 연동 참고**: `mq_detect_dblink_corr_eq`는 저장 시 `max_keys`(보통 `PT_DBLINK_MAX_CORR_KEYS`) 초과면 **-1**. `corr_key_*`는 WHERE와 노드를 공유하므로 `pt_apply_dblink_table`에 넣지 않음 — `parse_tree.h` 주석 및 [00 진행서 §4](00_dblink_correlated_progress.md).
-| T1-3 | `use_dblink_corr_pushdown` 세션 파라미터 추가 (boolean, 기본값 `yes`). `mq_rewrite_dblink_as_subquery` 탐지 진입부에서 파라미터 값을 확인하여 `no`이면 탐지 로직 전체를 스킵하고 기존 방식 유지. | `src/base/system_parameter.h/c`, `src/parser/view_transform.c` | [ ] |
 
 ### T1-1 설계 결정 (Phase 1 — Tasks 문서 기준)
 
@@ -97,6 +97,34 @@
 | `NOT`, WHERE 내 서브쿼리, 기타 복잡 서브트리에 걸린 상관 등치 | 탐지 **실패** | 구현 단계에서 필요 시 허용 범위를 좁혀도 됨; 문서상 Phase 1은 실패가 기본 |
 
 **정리**: 구현 시 AND 리프(또는 CNF leaf)를 훑어 **패턴에 맞는 상관 등치의 개수를 세고, 정확히 1일 때만 성공**으로 두면 T6-9와 모순 없이 일관된다. **다른 리프가 outer를 참조하나 등치가 아니면**(예: `r.x > l.id`) Phase 1 **실패**(Design Doc §3.1 보수적 규칙과 동일).
+
+**탐지 함수와의 대응**: `mq_detect_dblink_corr_eq`는 위 “성공”에 해당하는 **총개수**를 반환하고, 금지·오류 시 **-1**이다. **Phase 1에서 `PT_DBLINK_INFO`/conn_sql을 채울지**는 **반환값이 정확히 1인 경우에만** 한다(아래 §T1-2 유의사항 1).
+
+### T1-2 설계·구현 유의사항 (리뷰 반영)
+
+1. **탐지 API 반환값 vs Phase 1 적용**  
+   `mq_detect_dblink_corr_eq`는 금지 패턴·오류 시 **-1**, 그 외에는 WHERE 전체를 AND-term 단위로 훑어 상관 등치 **총개수**를 반환한다(≥0). **Phase 1**에서 `PT_DBLINK_INFO`/`conn_sql`을 채울지 여부는 **호출자가 `반환값 == 1`인지**로만 판단한다. 예: 서로 다른 AND term에 상관 등치가 **하나씩**이면 총개수는 **2**이며, 문서 표의 “탐지 실패(Phase 1 비적용)”에 해당하지만 API는 반드시 **-1이 아닐 수 있다**. `ret != 1` 또는 `ret < 0`이면 push-down 경로를 쓰지 않는다.
+
+2. **`corr_key_*` 수명·소유권**  
+   `corr_key_remote_cols[]` / `corr_key_outer_refs[]`는 **부모 SELECT의 `WHERE` 서브트리**를 가리키는 비소유(non-owning) 포인터이고, `PT_DBLINK_INFO`는 **중첩 `PT_DBLINK_TABLE`**에 붙는다. T4-1 등 이후 단계에서 **WHERE 조건을 제거·치환·복사**하면 포인터가 무효화될 수 있으므로, 변환 순서와 “접근_pred 제거” 시점을 설계·PR에서 명시한다.
+
+3. **`corr_key_*` 초기화**  
+   `PT_DBLINK_TABLE` 초기화가 `pt_init_func_null_function`인 경우 **`corr_key_count`·배열이 초기화되지 않을 수 있다**. T1-2에서 기록하기 **직전**에 `corr_key_count = 0` 및 `corr_key_*[i] = NULL`을 두거나, 필요 시 init 경로를 보강한다.
+
+4. **`conn_sql`(원격 SQL) 문자열 — `mq_dblink_append_corr_pred_sql` 규칙**  
+   Step 0 **C-3**과 동일: `pdblink->rewritten`이 있으면 기존 문자열에 **`WHERE` 키워드 유무**에 따라 **`AND remote_col = ?`** 또는 **`WHERE remote_col = ?`** (`mq_dblink_sql_has_where_keyword`). 없으면 `qstr`에서 베이스를 만들고 동일 규칙 적용. **원격 컬럼 식별자**는 `PT_NODE` 출력이 기존 DBLink SQL 규칙과 일치해야 한다.
+
+5. **`rewritten` 확정 시점별 append (고정 설계 — post-walk 없음)**  
+   `mq_rewrite_dblink_as_subquery`에서는 **`corr_key_*` 메타만** 기록하고 **SQL append는 하지 않는다.**  
+   `pt_copypush_terms(PT_DBLINK_TABLE)`가 `dinfo->rewritten`을 `qstr` 기준으로 **새로 만들면** 그 전에 붙인 상관 `= ?`는 의미가 없어지므로, **문자열은 `rewritten`이 최종으로 정해진 직후** 한 번만 붙인다:
+
+   | 케이스 | `rewritten`이 생기는 경로 | append 위치 |
+   |--------|---------------------------|-------------|
+   | **혼합** (상관 + 비상관·copy-push 등) | `mq_rewrite` → `pt_copypush_terms`가 `SELECT * FROM (…) cublink WHERE …` 형태로 할당 | **`pt_copypush_terms`**에서 `query->info.dblink_table.rewritten = rewritten` **직후**, `corr_key_count > 0`이면 `mq_dblink_append_corr_pred_sql` |
+   | **순수 상관** (copy-push가 해당 DBLink에 `rewritten`을 만들지 않음) | 할당 없이 **NULL** 유지 | **T2-1** `pt_to_dblink_table_spec_list` / **`pt_to_subquery_table_spec_list`**(플랜 B)에서 `conn_sql` 확정 직전, **`rewritten == NULL && corr_key_count > 0`**이면 동일 함수로 append |
+
+   이렇게 하면 **경로당 append 한 번**, `mq_translate` 뒤 **전역 post-walk**는 쓰지 않아도 된다.  
+   `mq_dblink_append_corr_pred_sql`을 `xasl_generation.c`에서 호출하려면 **static 해제·헤더 선언** 또는 **공용 헬퍼 파일**로 이동이 필요할 수 있다.
 
 ### Step 1 점검
 
@@ -132,7 +160,7 @@
   WHERE r.id = 1
   ```
 
-- **T1-2**: 원격 SQL(conn_sql 또는 `pdblink->rewritten` 기반 문자열)에 `WHERE id = ?` 포함 여부 확인 (gdb 또는 `query_alias` 로그)
+- **T1-2 메타**: `corr_key_count == 1` 및 `corr_key_remote_cols[0]` 설정 확인(gdb). **문자열**: 혼합이면 `pt_copypush_terms` 이후 `rewritten`에 `= ?`, 순수 상관이면 T2-1 이후 `conn_sql`/`rewritten`에 `= ?` (§T1-2 유의 5).
 
 ---
 
@@ -140,13 +168,13 @@
 
 | ID | 작업 | 파일/위치 | 완료 |
 |----|------|-----------|:----:|
-| T2-1 | **플랜 A**: `pt_to_dblink_table_spec_list()`에서 `PT_DBLINK_INFO.corr_key_count > 0`이고 PT_HOST_VAR 없을 때 `dblink_spec_node.corr_key_count` 및 `corr_key_regu_list` 채우기. **플랜 B**: 동일 조건을 `pt_to_subquery_table_spec_list()` 내 DBLink 하위 XASL 생성 경로에서 채운다(T0-1 C-1 불가 시). `corr_key_regu_list`는 outer val_list 슬롯을 가리키는 TYPE_CONSTANT regu(현재 `access_pred`와 동일 슬롯). | `src/parser/xasl_generation.c` `pt_to_dblink_table_spec_list()`, `pt_to_subquery_table_spec_list()` | [ ] |
+| T2-1 | **플랜 A**: `pt_to_dblink_table_spec_list()`에서 `PT_DBLINK_INFO.corr_key_count > 0`이고 PT_HOST_VAR 없을 때 `dblink_spec_node.corr_key_count` 및 `corr_key_regu_list` 채우기. **플랜 B**: 동일 조건을 `pt_to_subquery_table_spec_list()` 내 DBLink 하위 XASL 생성 경로에서 채운다(T0-1 C-1 불가 시). `corr_key_regu_list`는 outer val_list 슬롯을 가리키는 TYPE_CONSTANT regu(현재 `access_pred`와 동일 슬롯). **추가**: `rewritten == NULL && corr_key_count > 0`이면 이 시점에 `mq_dblink_append_corr_pred_sql`로 `rewritten`을 채운 뒤 `conn_sql`에 반영(순수 상관·copy-push 미진입 케이스 — §T1-2 유의 5). | `src/parser/xasl_generation.c` `pt_to_dblink_table_spec_list()`, `pt_to_subquery_table_spec_list()` | [ ] |
 
 ### Step 2 점검
 
 - **T2-1**: gdb — 플랜 A면 `pt_to_dblink_table_spec_list` 리턴 후, 플랜 B면 해당 경로에서 동일 확인
   - `dblink_node->corr_key_count > 0` 확인
-  - `dblink_node->conn_sql`에 `WHERE id = ?` 포함 확인
+  - `dblink_node->conn_sql`에 `WHERE id = ?` 또는 `AND id = ?` 포함 확인(§T1-2 유의 5: 순수 상관이면 T2-1에서 `rewritten` 보강 후 반영)
   - `corr_key_regu_list[0]`이 outer val_list의 `l.id` 슬롯을 참조하는지 확인
 - **push-down 불가**: PT_HOST_VAR 포함 시 `corr_key_count == 0` 유지 확인
 
@@ -264,7 +292,7 @@ FROM local_t l WHERE l.id IS NULL;
 ## 완료 체크리스트
 
 - [x] **Step 0** — T0-1 [x], T0-2 [x]
-- [ ] **Step 1** — T1-1 [x], T1-2 [ ], T1-3 [ ]
+- [ ] **Step 1** — T1-1 [x], T1-2 [x], T1-3 [ ]
 - [ ] **Step 2** — T2-1 [ ]
 - [ ] **Step 3** — T3-1 [ ], T3-2 [ ], T3-3 [ ]
 - [ ] **Step 4** — T4-1 [ ]
@@ -286,3 +314,4 @@ FROM local_t l WHERE l.id IS NULL;
 | 2026-03-20 | Step 1: T1-1/T1-2 경계 명시(분할 유지), 등식 좌우 교환 허용, 점검 SQL 보강; Design Doc §1.1/§3.1 동기 |
 | 2026-03-20 | 상단 관련 문서 링크를 저장소 기준 파일명으로 통일(`02_*_PRD`, `03_*_Desgin_Doc`, `01_*_Source_Analysis`, `05_*_Tests`). 구 `04_*_optimization_tasks.md`는 스텁만 유지. |
 | 2026-03-20 | T1-1 구현: `view_transform.c`에 `mq_detect_dblink_corr_eq()` 및 헬퍼, `mq_rewrite_dblink_as_subquery`에서 호출(결과 저장은 T1-2). |
+| 2026-03-24 | §T1-2 유의 5 고정: **메타만**(`mq_rewrite_dblink_as_subquery`) / **rewritten 확정 직후** append(`pt_copypush_terms`) / **`rewritten == NULL`이면 T2-1**에서 append. post-walk(방법 A) 설명 제거·대체. T1-2 표·T2-1·Step 점검 문구 동기. |

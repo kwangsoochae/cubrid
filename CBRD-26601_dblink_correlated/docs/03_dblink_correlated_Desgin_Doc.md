@@ -3,7 +3,7 @@
 | 항목 | 내용 |
 |------|------|
 | 이슈 | CBRD-26601 |
-| 기준 문서 | [02 PRD](02_dblink_correlated_PRD.md), [01 소스 분석](01_dblink_correlated_Source_Analysis.md) |
+| 기준 문서 | [02 PRD](02_dblink_correlated_PRD.md), [01 소스 분석](01_dblink_correlated_Source_Analysis.md), [07 비상관 vs 상관 WHERE](07_dblink_uncorrelated_vs_correlated_where.md) |
 | 기준 브랜치 | develop |
 | 대상 | SELECT 절 correlated 스칼라 서브쿼리 안의 DBLink (1차) |
 
@@ -27,8 +27,9 @@ AS-IS 코드 분석은 [01 소스 분석](01_dblink_correlated_Source_Analysis.m
 
 | 레이어 | 파일 | 변경 내용 |
 |--------|------|-----------|
-| 탐지 | `view_transform.c` | `mq_rewrite_dblink_as_subquery` 내 corr 조건 탐지 |
-| XASL 생성 | `xasl_generation.c` | `pt_to_dblink_table_spec_list`에서 `corr_key_regu_list` 채우기 |
+| 탐지·메타 | `view_transform.c` | `mq_rewrite_dblink_as_subquery` 내 corr 탐지 및 `PT_DBLINK_INFO.corr_key_*` 기록(SQL append 없음 — [04 Tasks](04_dblink_correlated_Tasks.md) §T1-2 유의 5) |
+| copy-push 직후 | `view_transform.c` | `pt_copypush_terms(PT_DBLINK_TABLE)`에서 `rewritten` 할당 직후 상관 `= ?` append(혼합 케이스) |
+| XASL 생성 | `xasl_generation.c` | `pt_to_dblink_table_spec_list` / `pt_to_subquery_table_spec_list`: `corr_key_regu_list` 채우기; `rewritten == NULL && corr_key_count > 0`이면 `mq_dblink_append_corr_pred_sql`(순수 상관) |
 | XASL 생성 | `xasl_generation.c` | `pt_to_subquery_table_spec_list`에서 push-down 조건 제거 |
 | 데이터 구조 | `xasl.h`, `dblink_scan.h` | corr_key 필드 추가 |
 | 런타임 | `dblink_scan.c` | open = prepare만; `dblink_scan_reset`에 `vd` 추가 + corr_key bind+execute |
@@ -98,8 +99,8 @@ struct dblink_scan_info {
 
 | 태스크 | 담당 |
 |--------|------|
-| **T1-1** | 서브쿼리 `WHERE`에서 상관 등치 **탐지** (`detect_corr_key` 등). `PT_EQ` 양변 중 DBLink 컬럼 / outer 상관 식별(좌우 무관). |
-| **T1-2** | `PT_DBLINK_INFO`에 `corr_key_remote_col`, `corr_key_outer_ref` **저장**, **`conn_sql`에 `?` 조건 append**. |
+| **T1-1** | 서브쿼리 `WHERE`에서 상관 등치 **탐지** (`mq_detect_dblink_corr_eq` 등). `PT_EQ` 양변 중 DBLink 컬럼 / outer 상관 식별(좌우 무관). |
+| **T1-2** | `PT_DBLINK_INFO`에 `corr_key_remote_col`, `corr_key_outer_ref` **저장**만 (`mq_rewrite_dblink_as_subquery`). **`conn_sql`/`rewritten`에 `?` append**는 `pt_copypush_terms` 직후 또는 T2-1(`rewritten == NULL`) — [04 Tasks](04_dblink_correlated_Tasks.md) §T1-2 유의 5. |
 
 탐지와 메타데이터·SQL 반영을 한 PR에 넣을 수는 있으나, **문서·리뷰 기준 분할은 위 표를 유지**한다.
 
@@ -108,14 +109,18 @@ struct dblink_scan_info {
 ```
 mq_rewrite_dblink_as_subquery()
   ├─ spec->derived_table_type == PT_DERIVED_DBLINK_TABLE 확인
-  ├─ [신규, T1-1] detect_corr_key(parser, spec, subquery_where)
+  ├─ [T1-1] mq_detect_dblink_corr_eq(…)
   │    ├─ WHERE(CNF AND 리프) 순회: 상관 등치 **정확히 1개** (remote↔outer, = 만) — 좌우 교환 허용
   │    ├─ PT_HOST_VAR 포함 시 → 실패 반환 (기존 방식)
   │    ├─ 상관 등치 2개 이상, OR/비단순 CNF, NOT·WHERE 서브쿼리 등 → 실패 (Phase 1, Tasks §T1-1 참고)
-  │    └─ 성공 시 T1-2에서 PT_DBLINK_INFO·conn_sql 반영
-  ├─ [T1-2] 성공 시 PT_DBLINK_INFO.corr_key_remote_col, corr_key_outer_ref 기록 + conn_sql append
-  │         (또는 conn_sql 일부를 XASL 생성 단계에서 구성 — 5.4 참고)
+  │    └─ 성공 시 [T1-2] PT_DBLINK_INFO.corr_key_* 기록만 (SQL 문자열 append 없음)
   └─ rewrite는 기존과 동일하게 진행 (PT_IS_SUBQUERY로 변환)
+
+mq_rewrite → pt_copypush_terms(PT_DBLINK_TABLE) (해당 시)
+  └─ rewritten 할당 직후, corr_key_count > 0 이면 mq_dblink_append_corr_pred_sql (혼합 케이스)
+
+pt_to_dblink_table_spec_list / pt_to_subquery_table_spec_list (T2-1)
+  └─ rewritten == NULL && corr_key_count > 0 이면 mq_dblink_append_corr_pred_sql (순수 상관)
 ```
 
 #### 탐지 조건 (`detect_corr_key`)
@@ -140,14 +145,17 @@ mq_rewrite_dblink_as_subquery()
 outer ref는 `TYPE_CONSTANT` regu (outer val_list 슬롯)로 나타난다.
 `correlation_level == 1`인 컬럼 참조가 해당 슬롯을 가리킨다.
 
-#### conn_sql append 규칙
+#### conn_sql / `rewritten` append 규칙
+
+`mq_dblink_append_corr_pred_sql`이 `pdblink->rewritten`(또는 `qstr` 베이스)에 다음을 붙인다:
 
 ```
 기존: "/* DBLINK SELECT */ SELECT name, id FROM remote_t r"
 추가: "WHERE r.id = ?"  (또는 기존 WHERE 있으면 " AND r.id = ?")
 ```
 
-> **확인 포인트**: `conn_sql`에 기존 WHERE 절이 있는지 판별하는 방법 — `pdblink->qstr` 또는 `pdblink->rewritten`에서 `WHERE` 키워드 유무 확인 필요.
+> **배치**: `mq_rewrite_dblink_as_subquery`에서는 **append하지 않음**. **혼합**은 `pt_copypush_terms`에서 `rewritten` 확정 직후, **순수 상관**(`rewritten == NULL`)은 T2-1에서 — [04 Tasks §T1-2 유의 5](04_dblink_correlated_Tasks.md).  
+> **확인 포인트**: `conn_sql`에 기존 WHERE 절이 있는지 판별 — `pdblink->qstr` 또는 `pdblink->rewritten`에서 `WHERE` 키워드 유무(`mq_dblink_sql_has_where_keyword`).
 
 ---
 
@@ -160,6 +168,8 @@ C-1에서 `pt_to_dblink_table_spec_list` 진입이 불가한 경우, corr_key_re
 
 ```
 pt_to_dblink_table_spec_list()
+  ├─ [신규, T1-2 §유의 5] rewritten == NULL && PT_DBLINK_INFO.corr_key_count > 0 이면:
+  │    └─ mq_dblink_append_corr_pred_sql (순수 상관 — copy-push가 rewritten을 만들지 않은 경우)
   ├─ [기존] conn_sql, conn_url 등 dblink_spec_node 생성
   ├─ [신규] PT_DBLINK_INFO.corr_key_count > 0 && host_var_count == 0 이면:
   │    ├─ dblink_node->corr_key_count = PT_DBLINK_INFO.corr_key_count
@@ -669,3 +679,4 @@ outer query(local_t)에 join 조건 외의 조건이 없을 때 push-down을 억
 | 2026-03-19 | 리뷰 반영: 문서 상단 라인 번호 유의사항, §1.1 AS-IS 유지 표현, §3.2 플랜 B 명시, §3.3 access_pred 제거 대상 한정, §3.4 corr_key_count==0 분기 명시, §3.6 N회 제거, §4.1 pack 함수명 C-5 참고 주석 |
 | 2026-03-20 | §1.1 단일 상관 등치·등식 교환 원칙. §3.1 T1-1/T1-2 작업 분할표·처리 흐름·탐지 표를 [04 Tasks §T1-1](04_dblink_correlated_Tasks.md)와 동기. §8 Tasks 링크 정정. |
 | 2026-03-20 | §1·§8 등 본 문서 및 PRD/소스 분석 상호 링크 파일명을 `02_dblink_correlated_PRD.md`, `01_dblink_correlated_Source_Analysis.md` 등 저장소 실제 이름으로 통일. |
+| 2026-03-24 | §1.2·§3.1·§3.2: `conn_sql`/`rewritten` append를 **메타만 / `pt_copypush_terms` 직후 / T2-1(`rewritten==NULL`)** 로 정리. [04 Tasks §T1-2 유의 5](04_dblink_correlated_Tasks.md)와 동기. |

@@ -23,6 +23,7 @@
 #ident "$Id$"
 
 #include <assert.h>
+#include <ctype.h>
 
 #include "authenticate.h"
 #include "view_transform.h"
@@ -4186,6 +4187,16 @@ pt_copypush_terms (PARSER_CONTEXT * parser, PT_NODE * spec, PT_NODE * query, PT_
 
       query->info.dblink_table.rewritten = rewritten;
 
+      /* [CBRD-26601] T1-2: corr pred after rewritten is final (mixed case; mq_rewrite_dblink does not append). */
+      if (query->info.dblink_table.corr_key_count > 0 && query->info.dblink_table.corr_key_remote_cols[0] != NULL)
+	{
+	  if (!mq_dblink_append_corr_pred_sql (parser, &query->info.dblink_table,
+					       query->info.dblink_table.corr_key_remote_cols[0]))
+	    {
+	      mq_dblink_clear_corr_keys (&query->info.dblink_table);
+	    }
+	}
+
       parser->custom_print = save_custom;
 
 #if 0
@@ -6597,7 +6608,7 @@ mq_push_paths (PARSER_CONTEXT * parser, PT_NODE * statement, void *void_arg, int
   return statement;
 }
 
-/* CBRD-26601 T1-1: detect remote.col = outer.col equalities in subquery WHERE (Phase 1 rules).
+/* [CBRD-26601] T1-1: detect remote.col = outer.col equalities in subquery WHERE (Phase 1 rules).
  * mq_detect_dblink_corr_eq returns the count; Phase 1 pushdown applies only when the caller sees count == 1. */
 
 static PT_NODE *
@@ -6771,13 +6782,13 @@ mq_dblink_term_scan_post (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, in
 }
 
 /*
- * mq_detect_dblink_corr_eq () - T1-1: count remote.col = outer.col equalities in flattened CNF WHERE.
+ * mq_detect_dblink_corr_eq () - [CBRD-26601] T1-1: count remote.col = outer.col equalities in flattened CNF WHERE.
  *   Returns total count (>= 0), or -1 on forbidden pattern (PT_HOST_VAR, PT_OR, PT_NOT, subquery,
  *   more than one corr-eq per AND-term, outer refs in a term without a single corr-eq, etc.).
  *   When remote_cols_out/outer_cols_out/max_keys store mode is used, returns -1 if the count would
  *   exceed max_keys (buffers are not partially filled).
  *   Pass NULL/NULL/0 for detect-only; pass arrays + max_keys to fill parallel remote/outer column refs.
- *   PT_DBLINK_INFO population is T1-2 (caller).
+ *   PT_DBLINK_INFO population is [CBRD-26601] T1-2 (caller).
  */
 static int
 mq_detect_dblink_corr_eq (PARSER_CONTEXT * parser, PT_NODE * subquery, PT_NODE * dblink_spec,
@@ -6844,6 +6855,161 @@ mq_detect_dblink_corr_eq (PARSER_CONTEXT * parser, PT_NODE * subquery, PT_NODE *
   return total_corr;
 }
 
+/* [CBRD-26601] T1-2: clear correlated key slots (non-owning pointers). */
+void
+mq_dblink_clear_corr_keys (PT_DBLINK_INFO * dinfo)
+{
+  int i;
+
+  dinfo->corr_key_count = 0;
+  for (i = 0; i < PT_DBLINK_MAX_CORR_KEYS; i++)
+    {
+      dinfo->corr_key_remote_cols[i] = NULL;
+      dinfo->corr_key_outer_refs[i] = NULL;
+    }
+}
+
+/* True if [start, start+len) contains WHERE as an SQL keyword (case-insensitive, word-bounded). */
+static bool
+mq_dblink_sql_has_where_keyword (const char *start, size_t len)
+{
+  size_t i;
+
+  if (start == NULL || len < 5)
+    {
+      return false;
+    }
+  for (i = 0; i + 5 <= len; i++)
+    {
+      if (toupper ((unsigned char) start[i]) != 'W')
+	{
+	  continue;
+	}
+      if (toupper ((unsigned char) start[i + 1]) != 'H')
+	{
+	  continue;
+	}
+      if (toupper ((unsigned char) start[i + 2]) != 'E')
+	{
+	  continue;
+	}
+      if (toupper ((unsigned char) start[i + 3]) != 'R')
+	{
+	  continue;
+	}
+      if (toupper ((unsigned char) start[i + 4]) != 'E')
+	{
+	  continue;
+	}
+      if (i > 0 && (isalnum ((unsigned char) start[i - 1]) || start[i - 1] == '_'))
+	{
+	  continue;
+	}
+      if (i + 5 < len && (isalnum ((unsigned char) start[i + 5]) || start[i + 5] == '_'))
+	{
+	  continue;
+	}
+      return true;
+    }
+  return false;
+}
+
+static PARSER_VARCHAR *
+mq_dblink_print_remote_col (PARSER_CONTEXT * parser, PT_NODE * remote_col)
+{
+  PARSER_VARCHAR *out;
+  unsigned int save;
+
+  if (remote_col == NULL)
+    {
+      return NULL;
+    }
+  save = parser->custom_print;
+  parser->custom_print |= PT_SUPPRESS_RESOLVED | PT_PRINT_SUPPRESS_FOR_DBLINK;
+  out = pt_print_bytes (parser, remote_col);
+  parser->custom_print = save;
+  return out;
+}
+
+/* Build base PARSER_VARCHAR for di->rewritten when NULL (VALUE string or printed qstr). */
+static PARSER_VARCHAR *
+mq_dblink_build_rewritten_base_sql (PARSER_CONTEXT * parser, PT_DBLINK_INFO * di)
+{
+  PARSER_VARCHAR *v;
+  unsigned int save;
+
+  assert (di->rewritten == NULL);
+  if (di->qstr == NULL)
+    {
+      return NULL;
+    }
+  if (di->qstr->node_type == PT_VALUE && di->qstr->info.value.data_value.str != NULL)
+    {
+      return pt_append_bytes (parser, NULL, (const char *) di->qstr->info.value.data_value.str->bytes,
+			      di->qstr->info.value.data_value.str->length);
+    }
+  save = parser->custom_print;
+  parser->custom_print |= PT_SUPPRESS_RESOLVED | PT_PRINT_SUPPRESS_FOR_DBLINK;
+  v = pt_print_bytes (parser, di->qstr);
+  parser->custom_print = save;
+  return v;
+}
+
+/* [CBRD-26601] T1-2: append " WHERE col = ?" or " AND col = ?" to di->rewritten (or set rewritten from qstr first). */
+bool
+mq_dblink_append_corr_pred_sql (PARSER_CONTEXT * parser, PT_DBLINK_INFO * di, PT_NODE * remote_col)
+{
+  PARSER_VARCHAR *col_sql;
+  PARSER_VARCHAR *base;
+  bool has_where;
+
+  col_sql = mq_dblink_print_remote_col (parser, remote_col);
+  if (col_sql == NULL || col_sql->length == 0)
+    {
+      return false;
+    }
+
+  if (di->rewritten != NULL)
+    {
+      base = di->rewritten;
+      has_where = mq_dblink_sql_has_where_keyword ((const char *) base->bytes, (size_t) base->length);
+    }
+  else
+    {
+      base = mq_dblink_build_rewritten_base_sql (parser, di);
+      if (base == NULL)
+	{
+	  return false;
+	}
+      has_where = mq_dblink_sql_has_where_keyword ((const char *) base->bytes, (size_t) base->length);
+    }
+
+  if (has_where)
+    {
+      base = pt_append_bytes (parser, base, " AND ", 5);
+    }
+  else
+    {
+      base = pt_append_bytes (parser, base, " WHERE ", 7);
+    }
+  if (base == NULL)
+    {
+      return false;
+    }
+  base = pt_append_varchar (parser, base, col_sql);
+  if (base == NULL)
+    {
+      return false;
+    }
+  base = pt_append_bytes (parser, base, " = ?", 4);
+  if (base == NULL)
+    {
+      return false;
+    }
+  di->rewritten = base;
+  return true;
+}
+
 /*
  * mq_rewrite_dblink_as_subquery () - rewrite dblink as a subquery
  *   return: PT_NODE *
@@ -6855,6 +7021,10 @@ mq_rewrite_dblink_as_subquery (PARSER_CONTEXT * parser, PT_NODE * node, void *ar
 {
   PT_NODE *spec, *derived = NULL;
   PT_NODE *derived_table;
+  PT_DBLINK_INFO *dinfo;
+  int ncorr;
+
+  (void) arg;
 
   if (node->node_type != PT_SELECT)
     {
@@ -6866,8 +7036,20 @@ mq_rewrite_dblink_as_subquery (PARSER_CONTEXT * parser, PT_NODE * node, void *ar
       if ((derived_table = spec->info.spec.derived_table)
 	  && spec->info.spec.derived_table_type == PT_DERIVED_DBLINK_TABLE)
 	{
-	  /* T1-1: detection only; T1-2 records result and appends conn_sql. */
-	  (void) mq_detect_dblink_corr_eq (parser, node, spec, NULL, NULL, 0);
+	  dinfo = &derived_table->info.dblink_table;
+	  mq_dblink_clear_corr_keys (dinfo);
+
+	  ncorr = mq_detect_dblink_corr_eq (parser, node, spec, dinfo->corr_key_remote_cols, dinfo->corr_key_outer_refs,
+					    PT_DBLINK_MAX_CORR_KEYS);
+	  if (ncorr == 1)
+	    {
+	      /* [CBRD-26601] T1-2: corr_key_* only; append in pt_copypush_terms or pt_to_dblink_table_spec_list (see Tasks). */
+	      dinfo->corr_key_count = 1;
+	    }
+	  else
+	    {
+	      mq_dblink_clear_corr_keys (dinfo);
+	    }
 
 	  derived = mq_rewrite_dblink_as_derived (parser, derived_table);
 	  if (derived == NULL)
