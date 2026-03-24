@@ -3393,10 +3393,13 @@ typedef struct pt_dblink_info
   void *remote_col_list;	/* remote table's column list */
 
   /* [CBRD-26601] T1-2: correlated equality push-down keys (Phase 1: count==1, Phase 2+: up to MAX).
-   * Non-owning aliases into the enclosing subquery WHERE tree — do NOT add to pt_apply_dblink_table. */
+   * PT_NODE* fields are non-owning aliases — do NOT add to pt_apply_dblink_table.
+   * corr_key_remote_cols/outer_refs may be modified by later parse transforms; use corr_key_col_names for SQL building.
+   * corr_key_col_names[i] is a pt_append_string copy taken at detection time — stable across all transforms. */
   int corr_key_count;
-  PT_NODE *corr_key_remote_cols[PT_DBLINK_MAX_CORR_KEYS];	/* DBLink-side column ref */
+  PT_NODE *corr_key_remote_cols[PT_DBLINK_MAX_CORR_KEYS];	/* DBLink-side column ref (may be stale after transforms) */
   PT_NODE *corr_key_outer_refs[PT_DBLINK_MAX_CORR_KEYS];	/* outer correlated column ref */
+  const char *corr_key_col_names[PT_DBLINK_MAX_CORR_KEYS];	/* column name copy, stable — use for SQL building */
 
 } PT_DBLINK_INFO;
 

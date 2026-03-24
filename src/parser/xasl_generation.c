@@ -13002,9 +13002,9 @@ pt_to_dblink_table_spec_list (PARSER_CONTEXT * parser, PT_NODE * spec, PT_NODE *
   int count = 0;
 
   /* [CBRD-26601] T2-1: pure correlated — pt_copypush_terms did not set rewritten; build before conn_sql */
-  if (pdblink->rewritten == NULL && pdblink->corr_key_count > 0 && pdblink->corr_key_remote_cols[0] != NULL)
+  if (pdblink->rewritten == NULL && pdblink->corr_key_count > 0 && pdblink->corr_key_col_names[0] != NULL)
     {
-      if (!mq_dblink_append_corr_pred_sql (parser, pdblink, pdblink->corr_key_remote_cols[0]))
+      if (!mq_dblink_append_corr_pred_sql (parser, pdblink))
 	{
 	  mq_dblink_clear_corr_keys (pdblink);
 	}

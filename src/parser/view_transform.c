@@ -4188,10 +4188,9 @@ pt_copypush_terms (PARSER_CONTEXT * parser, PT_NODE * spec, PT_NODE * query, PT_
       query->info.dblink_table.rewritten = rewritten;
 
       /* [CBRD-26601] T1-2: corr pred after rewritten is final (mixed case; mq_rewrite_dblink does not append). */
-      if (query->info.dblink_table.corr_key_count > 0 && query->info.dblink_table.corr_key_remote_cols[0] != NULL)
+      if (query->info.dblink_table.corr_key_count > 0 && query->info.dblink_table.corr_key_col_names[0] != NULL)
 	{
-	  if (!mq_dblink_append_corr_pred_sql (parser, &query->info.dblink_table,
-					       query->info.dblink_table.corr_key_remote_cols[0]))
+	  if (!mq_dblink_append_corr_pred_sql (parser, &query->info.dblink_table))
 	    {
 	      mq_dblink_clear_corr_keys (&query->info.dblink_table);
 	    }
@@ -6792,7 +6791,7 @@ mq_dblink_term_scan_post (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, in
  */
 static int
 mq_detect_dblink_corr_eq (PARSER_CONTEXT * parser, PT_NODE * subquery, PT_NODE * dblink_spec,
-			   PT_NODE * remote_cols_out[], PT_NODE * outer_cols_out[], int max_keys)
+			  PT_NODE * remote_cols_out[], PT_NODE * outer_cols_out[], int max_keys)
 {
   PT_NODE *where;
   PT_NODE *term;
@@ -6866,6 +6865,7 @@ mq_dblink_clear_corr_keys (PT_DBLINK_INFO * dinfo)
     {
       dinfo->corr_key_remote_cols[i] = NULL;
       dinfo->corr_key_outer_refs[i] = NULL;
+      dinfo->corr_key_col_names[i] = NULL;
     }
 }
 
@@ -6914,21 +6914,37 @@ mq_dblink_sql_has_where_keyword (const char *start, size_t len)
   return false;
 }
 
-static PARSER_VARCHAR *
-mq_dblink_print_remote_col (PARSER_CONTEXT * parser, PT_NODE * remote_col)
+/* [CBRD-26601] T1-2: extract column name string from a remote_col node at detection time.
+ * Returns a pt_append_string copy (stable across transforms) or NULL on failure.
+ * Handles PT_NAME and PT_DOT_(table.col) forms; CAST wrappers must be stripped before calling. */
+static const char *
+mq_dblink_extract_col_name (PARSER_CONTEXT * parser, PT_NODE * remote_col)
 {
-  PARSER_VARCHAR *out;
-  unsigned int save;
+  const char *original;
 
   if (remote_col == NULL)
     {
       return NULL;
     }
-  save = parser->custom_print;
-  parser->custom_print |= PT_SUPPRESS_RESOLVED | PT_PRINT_SUPPRESS_FOR_DBLINK;
-  out = pt_print_bytes (parser, remote_col);
-  parser->custom_print = save;
-  return out;
+  if (remote_col->node_type == PT_NAME)
+    {
+      original = remote_col->info.name.original;
+    }
+  else if (remote_col->node_type == PT_DOT_ && remote_col->info.dot.arg2 != NULL
+	   && remote_col->info.dot.arg2->node_type == PT_NAME)
+    {
+      original = remote_col->info.dot.arg2->info.name.original;
+    }
+  else
+    {
+      return NULL;
+    }
+  if (original == NULL || original[0] == '\0')
+    {
+      return NULL;
+    }
+  /* Make an independent copy so later in-place string extensions cannot corrupt it. */
+  return pt_append_string (parser, NULL, original);
 }
 
 /* Build base PARSER_VARCHAR for di->rewritten when NULL (VALUE string or printed qstr). */
@@ -6955,16 +6971,16 @@ mq_dblink_build_rewritten_base_sql (PARSER_CONTEXT * parser, PT_DBLINK_INFO * di
   return v;
 }
 
-/* [CBRD-26601] T1-2: append " WHERE col = ?" or " AND col = ?" to di->rewritten (or set rewritten from qstr first). */
+/* [CBRD-26601] T1-2: append " WHERE col = ?" or " AND col = ?" to di->rewritten (or set rewritten from qstr first).
+ * Uses di->corr_key_col_names[0] — the stable column name copy captured at detection time. */
 bool
-mq_dblink_append_corr_pred_sql (PARSER_CONTEXT * parser, PT_DBLINK_INFO * di, PT_NODE * remote_col)
+mq_dblink_append_corr_pred_sql (PARSER_CONTEXT * parser, PT_DBLINK_INFO * di)
 {
-  PARSER_VARCHAR *col_sql;
   PARSER_VARCHAR *base;
   bool has_where;
+  const char *col_name = di->corr_key_col_names[0];
 
-  col_sql = mq_dblink_print_remote_col (parser, remote_col);
-  if (col_sql == NULL || col_sql->length == 0)
+  if (col_name == NULL || col_name[0] == '\0')
     {
       return false;
     }
@@ -6996,7 +7012,7 @@ mq_dblink_append_corr_pred_sql (PARSER_CONTEXT * parser, PT_DBLINK_INFO * di, PT
     {
       return false;
     }
-  base = pt_append_varchar (parser, base, col_sql);
+  base = pt_append_nulstring (parser, base, col_name);
   if (base == NULL)
     {
       return false;
@@ -7043,8 +7059,17 @@ mq_rewrite_dblink_as_subquery (PARSER_CONTEXT * parser, PT_NODE * node, void *ar
 					    PT_DBLINK_MAX_CORR_KEYS);
 	  if (ncorr == 1)
 	    {
-	      /* [CBRD-26601] T1-2: corr_key_* only; append in pt_copypush_terms or pt_to_dblink_table_spec_list (see Tasks). */
-	      dinfo->corr_key_count = 1;
+	      /* [CBRD-26601] T1-2: capture col name now — corr_key_remote_cols[0] may be modified by later transforms. */
+	      dinfo->corr_key_col_names[0] =
+		mq_dblink_extract_col_name (parser, dinfo->corr_key_remote_cols[0]);
+	      if (dinfo->corr_key_col_names[0] != NULL)
+		{
+		  dinfo->corr_key_count = 1;
+		}
+	      else
+		{
+		  mq_dblink_clear_corr_keys (dinfo);
+		}
 	    }
 	  else
 	    {
