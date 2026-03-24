@@ -526,8 +526,10 @@ enum param_id
 
   PRM_ID_HOSTVAR_PEEKING,
 
+  PRM_ID_USE_DBLINK_CORR_PUSHDOWN,
+
   /* change PRM_LAST_ID when adding new system parameters */
-  PRM_LAST_ID = PRM_ID_HOSTVAR_PEEKING
+  PRM_LAST_ID = PRM_ID_USE_DBLINK_CORR_PUSHDOWN
 };
 typedef enum param_id PARAM_ID;
 

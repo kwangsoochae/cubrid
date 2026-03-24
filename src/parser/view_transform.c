@@ -41,6 +41,7 @@
 #include "virtual_object.h"
 #include "dbtype.h"
 #include "boot.h"
+#include "system_parameter.h"
 
 #define MAX_STACK_OBJECTS 500
 
@@ -7038,7 +7039,6 @@ mq_rewrite_dblink_as_subquery (PARSER_CONTEXT * parser, PT_NODE * node, void *ar
   PT_NODE *spec, *derived = NULL;
   PT_NODE *derived_table;
   PT_DBLINK_INFO *dinfo;
-  int ncorr;
 
   (void) arg;
 
@@ -7055,25 +7055,29 @@ mq_rewrite_dblink_as_subquery (PARSER_CONTEXT * parser, PT_NODE * node, void *ar
 	  dinfo = &derived_table->info.dblink_table;
 	  mq_dblink_clear_corr_keys (dinfo);
 
-	  ncorr = mq_detect_dblink_corr_eq (parser, node, spec, dinfo->corr_key_remote_cols, dinfo->corr_key_outer_refs,
-					    PT_DBLINK_MAX_CORR_KEYS);
-	  if (ncorr == 1)
+	  if (prm_get_bool_value (PRM_ID_USE_DBLINK_CORR_PUSHDOWN))
 	    {
-	      /* [CBRD-26601] T1-2: capture col name now — corr_key_remote_cols[0] may be modified by later transforms. */
-	      dinfo->corr_key_col_names[0] =
-		mq_dblink_extract_col_name (parser, dinfo->corr_key_remote_cols[0]);
-	      if (dinfo->corr_key_col_names[0] != NULL)
+	      int ncorr;
+
+	      ncorr = mq_detect_dblink_corr_eq (parser, node, spec, dinfo->corr_key_remote_cols,
+					      dinfo->corr_key_outer_refs, PT_DBLINK_MAX_CORR_KEYS);
+	      if (ncorr == 1)
 		{
-		  dinfo->corr_key_count = 1;
+		  /* [CBRD-26601] T1-2: capture col name now — corr_key_remote_cols[0] may be modified by later transforms. */
+		  dinfo->corr_key_col_names[0] = mq_dblink_extract_col_name (parser, dinfo->corr_key_remote_cols[0]);
+		  if (dinfo->corr_key_col_names[0] != NULL)
+		    {
+		      dinfo->corr_key_count = 1;
+		    }
+		  else
+		    {
+		      mq_dblink_clear_corr_keys (dinfo);
+		    }
 		}
 	      else
 		{
 		  mq_dblink_clear_corr_keys (dinfo);
 		}
-	    }
-	  else
-	    {
-	      mq_dblink_clear_corr_keys (dinfo);
 	    }
 
 	  derived = mq_rewrite_dblink_as_derived (parser, derived_table);

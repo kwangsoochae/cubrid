@@ -78,7 +78,7 @@
 |----|------|-----------|:----:|
 | T1-1 | 서브쿼리 WHERE에서 `remote.col = outer.col` **상관 등치 1개** 탐지 함수 추가(아래 §T1-1 설계 결정). 탐지 조건: (1) 한 쪽이 DBLink 컬럼 ref, (2) 반대쪽이 outer query 컬럼 ref(correlation / 이후 XASL에서 TYPE_CONSTANT regu). 앱 `?`(PT_HOST_VAR) 포함 시 탐지 실패(기존 방식 유지). | `src/parser/view_transform.c` | [x] |
 | T1-2 | 탐지 성공 시 `PT_DBLINK_INFO`에 `corr_key_remote_cols[]`, `corr_key_outer_refs[]`, `corr_key_count` 기록(`mq_rewrite_dblink_as_subquery`). **여기서는 SQL 문자열 append 없음.** 원격 `WHERE`/`AND` + `= ?`는 §T1-2 유의 5에 따라 `pt_copypush_terms(PT_DBLINK_TABLE)`에서 `rewritten` 할당 직후, 또는 T2-1에서 `rewritten == NULL`일 때 `mq_dblink_append_corr_pred_sql`로 반영. | `src/parser/parse_tree.h` `PT_DBLINK_INFO`, `src/parser/view_transform.c`, `pt_copypush_terms`, `xasl_generation.c`(T2-1) | [x] |
-| T1-3 | `use_dblink_corr_pushdown` 세션 파라미터 추가 (boolean, 기본값 `yes`). `mq_rewrite_dblink_as_subquery` 탐지 진입부에서 파라미터 값을 확인하여 `no`이면 탐지 로직 전체를 스킵하고 기존 방식 유지. | `src/base/system_parameter.h/c`, `src/parser/view_transform.c` | [ ] |
+| T1-3 | `use_dblink_corr_pushdown` 세션 파라미터 추가 (boolean, 기본값 `yes`). `mq_rewrite_dblink_as_subquery` 탐지 진입부에서 파라미터 값을 확인하여 `no`이면 탐지 로직 전체를 스킵하고 기존 방식 유지. | `src/base/system_parameter.h/c`, `src/parser/view_transform.c` | [x] |
 
 **T1-2 연동 참고**: `mq_detect_dblink_corr_eq`는 저장 시 `max_keys`(보통 `PT_DBLINK_MAX_CORR_KEYS`) 초과면 **-1**. `corr_key_*`는 WHERE와 노드를 공유하므로 `pt_apply_dblink_table`에 넣지 않음 — `parse_tree.h` 주석 및 [00 진행서 §4](00_dblink_correlated_progress.md).
 
@@ -292,7 +292,7 @@ FROM local_t l WHERE l.id IS NULL;
 ## 완료 체크리스트
 
 - [x] **Step 0** — T0-1 [x], T0-2 [x]
-- [ ] **Step 1** — T1-1 [x], T1-2 [x], T1-3 [ ]
+- [x] **Step 1** — T1-1 [x], T1-2 [x], T1-3 [x]
 - [ ] **Step 2** — T2-1 [ ]
 - [ ] **Step 3** — T3-1 [ ], T3-2 [ ], T3-3 [ ]
 - [ ] **Step 4** — T4-1 [ ]
@@ -315,3 +315,4 @@ FROM local_t l WHERE l.id IS NULL;
 | 2026-03-20 | 상단 관련 문서 링크를 저장소 기준 파일명으로 통일(`02_*_PRD`, `03_*_Desgin_Doc`, `01_*_Source_Analysis`, `05_*_Tests`). 구 `04_*_optimization_tasks.md`는 스텁만 유지. |
 | 2026-03-20 | T1-1 구현: `view_transform.c`에 `mq_detect_dblink_corr_eq()` 및 헬퍼, `mq_rewrite_dblink_as_subquery`에서 호출(결과 저장은 T1-2). |
 | 2026-03-24 | §T1-2 유의 5 고정: **메타만**(`mq_rewrite_dblink_as_subquery`) / **rewritten 확정 직후** append(`pt_copypush_terms`) / **`rewritten == NULL`이면 T2-1**에서 append. post-walk(방법 A) 설명 제거·대체. T1-2 표·T2-1·Step 점검 문구 동기. |
+| 2026-03-24 | T1-3 구현: `PRM_ID_USE_DBLINK_CORR_PUSHDOWN`(`use_dblink_corr_pushdown`, 기본 yes, `PRM_FOR_QRY_STRING`), `mq_rewrite_dblink_as_subquery`에서 OFF 시 탐지 스킵. Step 1 체크리스트 완료. |
