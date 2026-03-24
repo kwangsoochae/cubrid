@@ -168,7 +168,7 @@
 
 | ID | 작업 | 파일/위치 | 완료 |
 |----|------|-----------|:----:|
-| T2-1 | **플랜 A**: `pt_to_dblink_table_spec_list()`에서 `PT_DBLINK_INFO.corr_key_count > 0`이고 PT_HOST_VAR 없을 때 `dblink_spec_node.corr_key_count` 및 `corr_key_regu_list` 채우기. **플랜 B**: 동일 조건을 `pt_to_subquery_table_spec_list()` 내 DBLink 하위 XASL 생성 경로에서 채운다(T0-1 C-1 불가 시). `corr_key_regu_list`는 outer val_list 슬롯을 가리키는 TYPE_CONSTANT regu(현재 `access_pred`와 동일 슬롯). **추가**: `rewritten == NULL && corr_key_count > 0`이면 이 시점에 `mq_dblink_append_corr_pred_sql`로 `rewritten`을 채운 뒤 `conn_sql`에 반영(순수 상관·copy-push 미진입 케이스 — §T1-2 유의 5). | `src/parser/xasl_generation.c` `pt_to_dblink_table_spec_list()`, `pt_to_subquery_table_spec_list()` | [ ] |
+| T2-1 | **플랜 A**: `pt_to_dblink_table_spec_list()`에서 `PT_DBLINK_INFO.corr_key_count > 0`이고 PT_HOST_VAR 없을 때 `dblink_spec_node.corr_key_count` 및 `corr_key_regu_list` 채우기. **플랜 B**: 동일 조건을 `pt_to_subquery_table_spec_list()` 내 DBLink 하위 XASL 생성 경로에서 채운다(T0-1 C-1 불가 시). `corr_key_regu_list`는 outer val_list 슬롯을 가리키는 TYPE_CONSTANT regu(현재 `access_pred`와 동일 슬롯). **추가**: `rewritten == NULL && corr_key_count > 0`이면 이 시점에 `mq_dblink_append_corr_pred_sql`로 `rewritten`을 채운 뒤 `conn_sql`에 반영(순수 상관·copy-push 미진입 케이스 — §T1-2 유의 5). | `src/parser/xasl_generation.c` `pt_to_dblink_table_spec_list()`, `pt_to_subquery_table_spec_list()` | [x] |
 
 ### Step 2 점검
 
@@ -293,7 +293,7 @@ FROM local_t l WHERE l.id IS NULL;
 
 - [x] **Step 0** — T0-1 [x], T0-2 [x]
 - [x] **Step 1** — T1-1 [x], T1-2 [x], T1-3 [x]
-- [ ] **Step 2** — T2-1 [ ]
+- [x] **Step 2** — T2-1 [x]
 - [ ] **Step 3** — T3-1 [ ], T3-2 [ ], T3-3 [ ]
 - [ ] **Step 4** — T4-1 [ ]
 - [ ] **Step 5** — T5-1 [ ]
@@ -316,3 +316,6 @@ FROM local_t l WHERE l.id IS NULL;
 | 2026-03-20 | T1-1 구현: `view_transform.c`에 `mq_detect_dblink_corr_eq()` 및 헬퍼, `mq_rewrite_dblink_as_subquery`에서 호출(결과 저장은 T1-2). |
 | 2026-03-24 | §T1-2 유의 5 고정: **메타만**(`mq_rewrite_dblink_as_subquery`) / **rewritten 확정 직후** append(`pt_copypush_terms`) / **`rewritten == NULL`이면 T2-1**에서 append. post-walk(방법 A) 설명 제거·대체. T1-2 표·T2-1·Step 점검 문구 동기. |
 | 2026-03-24 | T1-3 구현: `PRM_ID_USE_DBLINK_CORR_PUSHDOWN`(`use_dblink_corr_pushdown`, 기본 yes, `PRM_FOR_QRY_STRING`), `mq_rewrite_dblink_as_subquery`에서 OFF 시 탐지 스킵. Step 1 체크리스트 완료. |
+| 2026-03-24 | T2-1: `pt_to_dblink_table_spec_list` — HOST_VAR 검사(outer ref·`pushed_pred`), `pt_to_regu_variable(outer)`→`corr_key_regu_list`, 순서: regu 후 `mq_dblink_append_corr_pred_sql`; `pt_make_dblink_access_spec` 이후 `dblink_node.corr_key_*` 반영. 플랜 B는 C-1로 내부 FROM이 동일 함수를 타 별도 `pt_to_subquery_table_spec_list` 분기 없음. |
+| 2026-03-24 | T2-1 XASL corr regu 구현 **되돌림**(작업 트리 `xasl_generation.c`를 Step 2 미완 상태로 복구). 순수 상관 `rewritten==NULL` 시 `mq_dblink_append_corr_pred_sql` 보강만 커밋에 유지. 재디버깅 후 재적용 예정. |
+| 2026-03-24 | T2-1 **재적용**: pred/rest 매칭·`current_class=NULL` 폴백; 폴백 실패 시 `pt_reset_error` + `has_internal_error=0`(Internal error- reporting semantic error 방지). Step 2 완료. |

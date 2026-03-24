@@ -13000,6 +13000,25 @@ pt_to_dblink_table_spec_list (PARSER_CONTEXT * parser, PT_NODE * spec, PT_NODE *
   PT_DBLINK_INFO *pdblink = &(dblink_table->info.dblink_table);
   char *sql;
   int count = 0;
+  REGU_VARIABLE_LIST corr_key_regu_list = NULL;
+  int hv_chk = 0;
+
+  /* [CBRD-26601] T2-1: host variables — Phase 1 corr pushdown does not combine with these */
+  if (pdblink->corr_key_count > 0)
+    {
+      if (pdblink->corr_key_outer_refs[0] != NULL)
+	{
+	  parser_walk_tree (parser, pdblink->corr_key_outer_refs[0], pt_host_vars_count, &hv_chk, NULL, NULL);
+	}
+      if (hv_chk == 0 && pdblink->pushed_pred != NULL)
+	{
+	  parser_walk_tree (parser, pdblink->pushed_pred, pt_host_vars_count, &hv_chk, NULL, NULL);
+	}
+      if (hv_chk > 0)
+	{
+	  mq_dblink_clear_corr_keys (pdblink);
+	}
+    }
 
   /* [CBRD-26601] T2-1: pure correlated — pt_copypush_terms did not set rewritten; build before conn_sql */
   if (pdblink->rewritten == NULL && pdblink->corr_key_count > 0 && pdblink->corr_key_col_names[0] != NULL)
@@ -13036,6 +13055,52 @@ pt_to_dblink_table_spec_list (PARSER_CONTEXT * parser, PT_NODE * spec, PT_NODE *
   regu_attributes_pred =
     pt_to_regu_variable_list (parser, pred_attrs, UNBOX_AS_VALUE, tbl_info->value_list, pred_offsets);
 
+  /* [CBRD-26601] T2-1: outer bind regu — outer_ref (e.g. l.id) is not a DBLink output column; it will never appear
+   * in pred_attrs/rest_attrs (those hold only this spec's own columns from tbl_info->attribute_list).
+   * Build via pt_to_regu_variable with current_class = NULL, matching the setup that
+   * pt_to_subquery_table_spec_list applies before pt_to_pred_expr for correlated references. */
+  if (pdblink->corr_key_count > 0 && pdblink->corr_key_outer_refs[0] != NULL)
+    {
+      PT_NODE *outer_ref = pdblink->corr_key_outer_refs[0];
+      PT_NODE *saved_next = NULL;
+      PT_NODE *saved_class = NULL;
+      REGU_VARIABLE *rv = NULL;
+
+      if (parser->symbols)
+	{
+	  saved_class = parser->symbols->current_class;
+	  parser->symbols->current_class = NULL;
+	}
+      saved_next = outer_ref->next;
+      outer_ref->next = NULL;
+      rv = pt_to_regu_variable (parser, outer_ref, UNBOX_AS_VALUE);
+      outer_ref->next = saved_next;
+      if (parser->symbols)
+	{
+	  parser->symbols->current_class = saved_class;
+	}
+
+      if (rv == NULL || pt_has_error (parser))
+	{
+	  mq_dblink_clear_corr_keys (pdblink);
+	  pt_reset_error (parser);
+	  parser->flag.has_internal_error = 0;
+	}
+      else
+	{
+	  regu_alloc (corr_key_regu_list);
+	  if (corr_key_regu_list == NULL)
+	    {
+	      mq_dblink_clear_corr_keys (pdblink);
+	    }
+	  else
+	    {
+	      corr_key_regu_list->next = NULL;
+	      corr_key_regu_list->value = *rv;
+	    }
+	}
+    }
+
   if (pdblink->rewritten)
     {
       sql = pt_append_string (parser, "/* DBLINK SELECT */ ", (char *) pdblink->rewritten->bytes);
@@ -13062,6 +13127,12 @@ pt_to_dblink_table_spec_list (PARSER_CONTEXT * parser, PT_NODE * spec, PT_NODE *
 				       (char *) pdblink->user->info.value.data_value.str->bytes,
 				       (char *) pdblink->pwd->info.value.data_value.str->bytes,
 				       pdblink->host_vars.count, pdblink->host_vars.index, (char *) sql);
+
+  if (access != NULL && pdblink->corr_key_count > 0 && corr_key_regu_list != NULL)
+    {
+      access->s.dblink_node.corr_key_count = pdblink->corr_key_count;
+      access->s.dblink_node.corr_key_regu_list = corr_key_regu_list;
+    }
 
   return access;
 }

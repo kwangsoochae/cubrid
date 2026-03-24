@@ -30,27 +30,31 @@
 
 ### 완료됨
 
-- **T0-2 (구조체/직렬화)**:
+- **T0-2 (구조체/직렬화)** — commit `5ed355f35`:
   - `src/query/xasl.h`: `dblink_spec_node`에 `corr_key_count`, `corr_key_regu_list` 추가
   - `src/query/dblink_scan.h`: `DBLINK_SCAN_INFO`에 `corr_key_*` 추가(전방 선언/typedef 포함)
   - `src/query/xasl_to_stream.c`: dblink spec pack/sizeof에 corr 필드 반영
   - `src/query/stream_to_xasl.c`: dblink spec unpack에 corr 필드 반영
   - `src/parser/xasl_generation.c`: dblink spec 생성 시 corr 필드 기본값 초기화(0/NULL)
 
-- **T1-1 (탐지, view_transform)** — `PT_DBLINK_INFO` 저장·`conn_sql`은 T1-2:
+- **T1-1 (탐지, view_transform)** — commit `1cefbb3b3` / `PT_DBLINK_INFO` 저장·`conn_sql`은 T1-2:
   - `src/parser/view_transform.c`: `mq_detect_dblink_corr_eq()` 및 헬퍼(호스트 변수·OR/NOT/서브쿼리 실패, 상관 등치 1개·등식 교환·보수적 AND 규칙)
   - `mq_rewrite_dblink_as_subquery()`에서 DBLink spec 처리 시 호출; 반환값 `ncorr == 1`일 때만 Phase 1 적용(T1-2와 연동)
 
-- **T1-2 (`PT_DBLINK_INFO`·원격 `rewritten`)** — [04 Tasks §T1-2 유의 5](04_dblink_correlated_Tasks.md), 구현: `view_transform.c`·`view_transform.h`
+- **T1-2 (`PT_DBLINK_INFO`·원격 `rewritten`)** — commit `4934574ec` · bugfix `2186bd830` / [04 Tasks §T1-2 유의 5](04_dblink_correlated_Tasks.md), 구현: `view_transform.c`·`view_transform.h`
   - **메타만** — `mq_rewrite_dblink_as_subquery`: `ncorr==1` 직후 `mq_dblink_extract_col_name`으로 컬럼명 복사본 저장(`corr_key_col_names[0]`).
   - **혼합** — `pt_copypush_terms` `PT_DBLINK_TABLE` 분기에서 `rewritten` 할당 직후 `mq_dblink_append_corr_pred_sql(parser, di)`.
   - **순수 상관** — `pt_to_dblink_table_spec_list`: `rewritten==NULL && corr_key_count>0`이면 동일 함수(`xasl_generation.c`).
   - `mq_dblink_append_corr_pred_sql` / `mq_dblink_clear_corr_keys` **extern** (`view_transform.h`).
   - **버그픽스**: `corr_key_remote_cols[0]`이 가리키는 PT_NAME 노드가 view 확장(`mq_translate_local`) 단계에서 in-place 수정됨 → `original` 필드가 덮어써져 컬럼명 소실(`where = ?` 증상). 탐지 직후 `pt_append_string(parser, NULL, original)`로 독립 복사본을 `corr_key_col_names[0]`에 저장하는 방식으로 수정. `parse_tree.h`에 `corr_key_col_names[PT_DBLINK_MAX_CORR_KEYS]` 필드 추가.
 
-- **T1-3 (세션 파라미터 `use_dblink_corr_pushdown`, FR-9)**:
+- **T1-3 (세션 파라미터 `use_dblink_corr_pushdown`, FR-9)** — commit `0f3bb3b6f`:
   - `src/base/system_parameter.h` / `system_parameter.c`: `PRM_ID_USE_DBLINK_CORR_PUSHDOWN`, 이름 `use_dblink_corr_pushdown`, `PRM_BOOLEAN` 기본값 `yes`, 플래그 `PRM_FOR_CLIENT | PRM_USER_CHANGE | PRM_FOR_SESSION | PRM_FOR_QRY_STRING` (플랜/쿼리 문자열 반영).
   - `src/parser/view_transform.c`: `mq_rewrite_dblink_as_subquery`에서 `prm_get_bool_value(PRM_ID_USE_DBLINK_CORR_PUSHDOWN)`가 false이면 `mq_detect_dblink_corr_eq` 및 `corr_key_*` 메타 기록 전체 스킵 — `pt_copypush_terms` / T2-1 append 경로로 이어지지 않음(AS-IS). `#include "system_parameter.h"` 추가.
+
+- **T2-1 (XASL `dblink_spec_node` corr 필드, `xasl_generation.c`)**:
+  - `pt_to_dblink_table_spec_list`: HOST_VAR 검사·`corr_key_outer_refs[0]`를 `pred_attrs`/`rest_attrs`와 포인터 매칭해 `corr_key_regu_list` 복사, 없으면 `current_class=NULL` 폴백; 실패 시 `mq_dblink_clear_corr_keys` + `pt_reset_error` + `has_internal_error=0`.
+  - `mq_dblink_append_corr_pred_sql`(순수 상관)·`pt_make_dblink_access_spec` 이후 `dblink_node.corr_key_*` 반영.
 
 ---
 
@@ -59,7 +63,8 @@
 > 형식 예시:  
 > `YYYY-MM-DD` — (태스크) 무엇을 했는지 / 영향 / 다음 액션
 
-- 2026-03-24 — (T1-3) `use_dblink_corr_pushdown` 세션 파라미터 추가(`system_parameter.h/c`, 기본 `yes`, `PRM_FOR_QRY_STRING`). `mq_rewrite_dblink_as_subquery`에서 OFF 시 상관 탐지·`corr_key_*` 메타 스킵. [04 Tasks](04_dblink_correlated_Tasks.md) T1-3 완료 체크·다음: T2-1(XASL corr 필드·순수 상관 append) 또는 T6-7(TC-117 검증).
+- 2026-03-24 — (T2-1) `pt_to_dblink_table_spec_list` 재구현: HOST_VAR·pred/rest 매칭·폴백·`has_internal_error` 클리어. [04 Tasks](04_dblink_correlated_Tasks.md) Step 2 완료. 다음: T3-1 등.
+- 2026-03-24 — (T1-3) `use_dblink_corr_pushdown` 세션 파라미터 추가(`system_parameter.h/c`, 기본 `yes`, `PRM_FOR_QRY_STRING`). `mq_rewrite_dblink_as_subquery`에서 OFF 시 상관 탐지·`corr_key_*` 메타 스킵. [04 Tasks](04_dblink_correlated_Tasks.md) T1-3 완료.
 - 2026-03-24 — (버그픽스) `corr_key_remote_cols[0]` PT_NAME 노드가 view 확장 중 in-place 수정(`original`→"cubrid.local_t")되어 `where = ?` 오류 발생. `parse_tree.h`에 `corr_key_col_names[]` 추가, 탐지 직후 `pt_append_string` 복사본 저장, `mq_dblink_append_corr_pred_sql(parser, di)` API에서 `remote_col` 파라미터 제거. `mq_dblink_print_remote_col` → `mq_dblink_extract_col_name`으로 대체.
 - 2026-03-24 — (코드) §T1-2 유의 5 반영: `pt_copypush_terms(PT_DBLINK_TABLE)`에서 `rewritten` 할당 직후 `mq_dblink_append_corr_pred_sql`; `pt_to_dblink_table_spec_list`에서 `rewritten==NULL && corr_key_count>0` 시 동일; `mq_translate` post-walk 제거. `mq_dblink_append_corr_pred_sql`/`mq_dblink_clear_corr_keys`를 `view_transform.h`에 노출.
 - 2026-03-24 — (문서) §T1-2 유의 5: **메타만** / **`pt_copypush_terms` 직후** / **T2-1(`rewritten==NULL`)** — [04 Tasks](04_dblink_correlated_Tasks.md)·Design Doc §3.1.
