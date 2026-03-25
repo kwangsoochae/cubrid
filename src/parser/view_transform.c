@@ -4193,7 +4193,7 @@ pt_copypush_terms (PARSER_CONTEXT * parser, PT_NODE * spec, PT_NODE * query, PT_
 	{
 	  if (!mq_dblink_append_corr_pred_sql (parser, &query->info.dblink_table))
 	    {
-	      mq_dblink_clear_corr_keys (&query->info.dblink_table);
+	      mq_dblink_clear_corr_keys (parser, &query->info.dblink_table);
 	    }
 	}
 
@@ -6855,11 +6855,25 @@ mq_detect_dblink_corr_eq (PARSER_CONTEXT * parser, PT_NODE * subquery, PT_NODE *
   return total_corr;
 }
 
-/* [CBRD-26601] T1-2: clear correlated key slots (non-owning pointers). */
+/* [CBRD-26601] T1-2: clear correlated key slots; free owning corr_key_outer_copy trees.
+ * Call when abandoning correlated push-down (host var conflict, append_corr_pred failure, pt_to_regu_variable failure,
+ * regu_alloc failure, etc.). Do not call on successful pt_to_dblink_table_spec_list — corr_key_outer_copy must remain
+ * until parse-tree teardown; regu may reference nodes inside the copy. */
 void
-mq_dblink_clear_corr_keys (PT_DBLINK_INFO * dinfo)
+mq_dblink_clear_corr_keys (PARSER_CONTEXT * parser, PT_DBLINK_INFO * dinfo)
 {
   int i;
+
+  assert (parser != NULL && dinfo != NULL);
+
+  for (i = 0; i < PT_DBLINK_MAX_CORR_KEYS; i++)
+    {
+      if (dinfo->corr_key_outer_copy[i] != NULL)
+	{
+	  parser_free_tree (parser, dinfo->corr_key_outer_copy[i]);
+	  dinfo->corr_key_outer_copy[i] = NULL;
+	}
+    }
 
   dinfo->corr_key_count = 0;
   for (i = 0; i < PT_DBLINK_MAX_CORR_KEYS; i++)
@@ -7053,30 +7067,38 @@ mq_rewrite_dblink_as_subquery (PARSER_CONTEXT * parser, PT_NODE * node, void *ar
 	  && spec->info.spec.derived_table_type == PT_DERIVED_DBLINK_TABLE)
 	{
 	  dinfo = &derived_table->info.dblink_table;
-	  mq_dblink_clear_corr_keys (dinfo);
+	  mq_dblink_clear_corr_keys (parser, dinfo);
 
 	  if (prm_get_bool_value (PRM_ID_USE_DBLINK_CORR_PUSHDOWN))
 	    {
 	      int ncorr;
 
 	      ncorr = mq_detect_dblink_corr_eq (parser, node, spec, dinfo->corr_key_remote_cols,
-					      dinfo->corr_key_outer_refs, PT_DBLINK_MAX_CORR_KEYS);
+						dinfo->corr_key_outer_refs, PT_DBLINK_MAX_CORR_KEYS);
 	      if (ncorr == 1)
 		{
-		  /* [CBRD-26601] T1-2: capture col name now — corr_key_remote_cols[0] may be modified by later transforms. */
+		  /* [CBRD-26601] T1-2: capture remote col name and outer expr copy — raw refs may go stale after transforms. */
 		  dinfo->corr_key_col_names[0] = mq_dblink_extract_col_name (parser, dinfo->corr_key_remote_cols[0]);
-		  if (dinfo->corr_key_col_names[0] != NULL)
+		  if (dinfo->corr_key_col_names[0] == NULL)
 		    {
-		      dinfo->corr_key_count = 1;
+		      mq_dblink_clear_corr_keys (parser, dinfo);
 		    }
 		  else
 		    {
-		      mq_dblink_clear_corr_keys (dinfo);
+		      dinfo->corr_key_outer_copy[0] = parser_copy_tree (parser, dinfo->corr_key_outer_refs[0]);
+		      if (dinfo->corr_key_outer_copy[0] == NULL)
+			{
+			  mq_dblink_clear_corr_keys (parser, dinfo);
+			}
+		      else
+			{
+			  dinfo->corr_key_count = 1;
+			}
 		    }
 		}
 	      else
 		{
-		  mq_dblink_clear_corr_keys (dinfo);
+		  mq_dblink_clear_corr_keys (parser, dinfo);
 		}
 	    }
 

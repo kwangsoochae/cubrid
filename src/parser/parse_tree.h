@@ -3393,12 +3393,16 @@ typedef struct pt_dblink_info
   void *remote_col_list;	/* remote table's column list */
 
   /* [CBRD-26601] T1-2: correlated equality push-down keys (Phase 1: count==1, Phase 2+: up to MAX).
-   * PT_NODE* fields are non-owning aliases — do NOT add to pt_apply_dblink_table.
-   * corr_key_remote_cols/outer_refs may be modified by later parse transforms; use corr_key_col_names for SQL building.
-   * corr_key_col_names[i] is a pt_append_string copy taken at detection time — stable across all transforms. */
+   * corr_key_remote_cols/outer_refs are non-owning aliases into the parent WHERE — do NOT add to pt_apply_dblink_table.
+   * They may be modified or reallocated by later parse transforms; use corr_key_col_names for remote SQL and
+   * corr_key_outer_copy for XASL (parser_copy_tree at detection).
+   * corr_key_outer_copy is freed only in mq_dblink_clear_corr_keys when push-down is abandoned — not on XASL success.
+   * While push-down stays active, each corr_key_outer_copy[i] lives for the parse-tree / statement lifetime; regu from
+   * pt_to_regu_variable may reference nodes under that copy, so it must not be freed before statement teardown. */
   int corr_key_count;
   PT_NODE *corr_key_remote_cols[PT_DBLINK_MAX_CORR_KEYS];	/* DBLink-side column ref (may be stale after transforms) */
-  PT_NODE *corr_key_outer_refs[PT_DBLINK_MAX_CORR_KEYS];	/* outer correlated column ref */
+  PT_NODE *corr_key_outer_refs[PT_DBLINK_MAX_CORR_KEYS];	/* outer correlated column ref (non-owning) */
+  PT_NODE *corr_key_outer_copy[PT_DBLINK_MAX_CORR_KEYS];	/* owning copy for XASL; lifetime = parse tree if not cleared */
   const char *corr_key_col_names[PT_DBLINK_MAX_CORR_KEYS];	/* column name copy, stable — use for SQL building */
 
 } PT_DBLINK_INFO;

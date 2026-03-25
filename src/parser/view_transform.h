@@ -103,5 +103,5 @@ extern PT_NODE *mq_has_click_counter (PARSER_CONTEXT * parser, PT_NODE * node, v
 
 /* [CBRD-26601] T1-2: remote SQL "WHERE/AND col = ?" — see pt_copypush_terms, pt_to_dblink_table_spec_list */
 extern bool mq_dblink_append_corr_pred_sql (PARSER_CONTEXT * parser, PT_DBLINK_INFO * di);
-extern void mq_dblink_clear_corr_keys (PT_DBLINK_INFO * dinfo);
+extern void mq_dblink_clear_corr_keys (PARSER_CONTEXT * parser, PT_DBLINK_INFO * dinfo);
 #endif /* _VIEW_TRANSFORM_H_ */
