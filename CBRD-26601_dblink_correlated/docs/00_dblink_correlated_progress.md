@@ -57,6 +57,18 @@
   - `pt_to_dblink_table_spec_list`: HOST_VAR 검사·`corr_key_outer_copy[0]`로 `pt_to_regu_variable` → `corr_key_regu_list`(이전: 비소유 `corr_key_outer_refs[0]` 직접 사용); 실패 시 `mq_dblink_clear_corr_keys(parser, pdblink)` + `pt_reset_error` + `has_internal_error=0`.
   - `mq_dblink_append_corr_pred_sql`(순수 상관)·`pt_make_dblink_access_spec` 이후 `dblink_node.corr_key_*` 반영.
 
+- **T3-1 (런타임 open — FR-4, prepare만)** — `dblink_scan.c`, `query_executor.c`:
+  - `dblink_open_scan`: `cci_prepare` 성공 후 `spec->s.dblink_node`의 `corr_key_count`, `corr_key_regu_list`를 `DBLINK_SCAN_INFO`로 복사. `corr_key_count > 0`이면 `col_info=NULL`, `col_cnt=0`, `cursor=CCI_CURSOR_FIRST`로 반환 — `cci_execute`·호스트 `dblink_bind_param`·`cci_get_result_info` 생략.
+  - `query_executor.c` `scan_open_scan` 분기 `TARGET_DBLINK`: `corr_key_count <= 0`일 때만 `val_list->val_cnt`와 `scan_info.col_cnt` 일치 검사(상관 push 시 open 직후 `col_cnt` 미확정).
+  - 테스트 문서: [05 Tests §5.5](05_dblink_correlated_Tests.md) T3 gdb·최소 SQL.
+
+- **T3-2 (런타임 rebind + execute — FR-5)** — `dblink_scan.c`, `scan_manager.c`:
+  - `dblink_bind_one_param`: 단일 `DB_VALUE` → `cci_bind_param` (기존 `dblink_bind_param` 루프에서 재사용).
+  - `dblink_scan_reset(thread_p, scan_info, vd)`: `corr_key_count>0`이면 `corr_key_regu_list`에 대해 `fetch_peek_dbval` → `dblink_bind_one_param` → `cci_execute` → `col_info` 없으면 `cci_get_result_info`.
+  - `scan_reset_scan_block` `S_DBLINK_SCAN`: `dblink_scan_reset(thread_p, …, s_id->vd)`.
+  - `scan_next_dblink_scan`: `corr_key_count>0 && col_info==NULL`이면 첫 `dblink_scan_next` 전에 reset 호출(첫 outer 행에서도 메타·결과 준비).
+  - 다음: **T3-3**(NULL 키 시 execute 스킵 등).
+
 ---
 
 ## 3) 진행 로그 (최신이 위)
@@ -64,6 +76,8 @@
 > 형식 예시:  
 > `YYYY-MM-DD` — (태스크) 무엇을 했는지 / 영향 / 다음 액션
 
+- 2026-03-25 — (**T3-2**) `dblink_bind_one_param` / `dblink_scan_reset(thread_p,…,vd)`(fetch_peek_dbval+corr bind+execute+get_result_info), `scan_manager` reset·`scan_next_dblink_scan` 첫 fetch 보강. 다음: **T3-3** NULL 키.
+- 2026-03-25 — (**T3-1**) `dblink_open_scan` prepare-only 분기·`query_executor.c` TARGET_DBLINK 컬럼 수 검사 완화·[05 §5.5](05_dblink_correlated_Tests.md).
 - 2026-03-24 — (T1-2/T2-1) 상관 **outer** 컬럼도 비소유 `corr_key_outer_refs`만으로는 XASL 단계에서 노드가 무효화될 수 있어, 탐지 직후 `corr_key_outer_copy[0] = parser_copy_tree(...)` 저장. `mq_dblink_clear_corr_keys(parser, di)` 시그니처에 `parser` 추가·`parser_free_tree`로 copy 해제. `pt_to_dblink_table_spec_list`는 `corr_key_outer_copy[0]`만 사용; 성공 시에는 clear 호출 안 함(파스 트리 수명). `parse_tree.h`/`view_transform.c`/`xasl_generation.c` 주석.
 - 2026-03-24 — (T2-1) `pt_to_dblink_table_spec_list` 재구현: HOST_VAR·pred/rest 매칭·폴백·`has_internal_error` 클리어. [04 Tasks](04_dblink_correlated_Tasks.md) Step 2 완료. 다음: T3-1 등.
 - 2026-03-24 — (T1-3) `use_dblink_corr_pushdown` 세션 파라미터 추가(`system_parameter.h/c`, 기본 `yes`, `PRM_FOR_QRY_STRING`). `mq_rewrite_dblink_as_subquery`에서 OFF 시 상관 탐지·`corr_key_*` 메타 스킵. [04 Tasks](04_dblink_correlated_Tasks.md) T1-3 완료.
@@ -126,6 +140,22 @@
 |------|-------|------|------|------|
 | `xasl_generation.c` | static | 수정 | `pt_to_dblink_table_spec_list` | HOST_VAR 검사·`corr_key_outer_copy[0]`→`pt_to_regu_variable`→`corr_key_regu_list` 빌드; `dblink_node.corr_key_*` 세팅 |
 
+### T3-1 — DBLink 런타임 open (`dblink_scan.c`, `query_executor.c`)
+
+| 파일 | scope | 구분 | 함수 | 설명 |
+|------|-------|------|------|------|
+| `dblink_scan.c` | extern | 수정 | `dblink_open_scan` | `corr_key_count>0` 시 prepare만·`corr_key_*` scan_info 복사·조기 반환; 그 외 기존 bind+execute+`get_result_info` |
+| `query_executor.c` | — | 수정 | `scan_open_scan` 내 `TARGET_DBLINK` 분기 | `corr_key_count<=0`일 때만 `val_list->val_cnt` vs `scan_info.col_cnt` 검사 |
+
+### T3-2 — corr rebind + execute (`dblink_scan.c`, `scan_manager.c`)
+
+| 파일 | scope | 구분 | 함수 | 설명 |
+|------|-------|------|------|------|
+| `dblink_scan.c` | static | 신규 | `dblink_bind_one_param` | 단일 `DB_VALUE` → CCI bind |
+| `dblink_scan.c` | static | 수정 | `dblink_bind_param` | host var 루프에서 `dblink_bind_one_param` 호출 |
+| `dblink_scan.c` | extern | 수정 | `dblink_scan_reset` | `corr_key_count>0`: `fetch_peek_dbval`+bind+execute+`get_result_info`; 그 외 cursor만 |
+| `scan_manager.c` | — | 수정 | `scan_reset_scan_block` / `scan_next_dblink_scan` | `dblink_scan_reset(thread_p,…,vd)`; 첫 next 전 `col_info` 보강 |
+
 ---
 
 ## 5) 결정/가정 기록 (Decision Log)
@@ -139,4 +169,6 @@
 - **`corr_key_outer_copy[]` 안정성·수명**: `corr_key_outer_refs[]`는 부모 WHERE의 비소유 포인터로, 이후 transform으로 같은 주소가 다른 노드 타입으로 재사용되거나 무효화될 수 있음. 탐지 직후 `parser_copy_tree`로 `corr_key_outer_copy[]`에 소유 복사본을 둔다. `mq_dblink_clear_corr_keys`는 푸시다운 **포기** 시에만 호출해 copy를 `parser_free_tree`한다. **XASL 성공 경로에서는 clear하지 않음** — `pt_to_regu_variable` 결과 regu가 copy 서브트리를 참조할 수 있으며, 노드는 파스 트리/문 해제 시점까지 유지한다.
 - **T1-2 `conn_sql`/`rewritten` append 순서(고정)**: `mq_rewrite_dblink_as_subquery`에서는 **메타만**. `rewritten`이 **`pt_copypush_terms`에서 확정**되면 그 할당 **직후** `mq_dblink_append_corr_pred_sql`. **`rewritten == NULL`**이면 **T2-1**에서 append. `mq_dblink_append_corr_pred_sql` 공용 호출을 위해 **헤더 노출 또는 헬퍼 이동**이 필요할 수 있음. 상세는 [04 Tasks §T1-2 유의 5](04_dblink_correlated_Tasks.md).
 - **FR-9 / T1-3 `use_dblink_corr_pushdown`**: 세션 파라미터 기본 `yes`. `no`이면 `mq_rewrite_dblink_as_subquery`에서 탐지·메타를 건너뛰어 correlated push-down 경로 미진입(AS-IS). `PRM_FOR_QRY_STRING`으로 플랜 캐시와 정합.
+- **T3-1 / `col_info` 지연**: 상관 push(`corr_key_count>0`) 시 open에서는 `cci_get_result_info`를 호출하지 않음. 결과 컬럼 메타는 **T3-2**에서 첫 `cci_execute` 직후(또는 동등 경로) 채우는 전제. 참고: `dblink_join_improve` 브랜치의 `join_key_*` 패턴과 동일.
+- **T3-1 / query_executor**: open 직후 `scan_info.col_cnt==0`이 정상이므로 `TARGET_DBLINK`에서 `corr_key_count>0`이면 val_list 대비 컬럼 개수 검증을 하지 않음.
 

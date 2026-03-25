@@ -367,3 +367,45 @@ cd CBRD-26601_dblink_correlated/test
 
 TC-108은 correlated 최적화와 무관한 **기본 dblink 경로**가 깨지지 않는지 확인하기 위한 회귀용 테스트이다.
 
+### 5.5 T3-1 / T3-2 런타임 최소 검증 (gdb·수동)
+
+| 항목 | 내용 |
+|------|------|
+| 전제 | `test/setup_remote.sql`, `test/setup_local.sql` 로 원·로컬 DB 및 `cubrid_conn` dblink 생성 |
+| 목적 | Tasks **T3-1**(open 시 `cci_prepare`만, `corr_key_*` → `scan_info`) · **T3-2**(reset 시 bind+execute) 단계별 확인 |
+
+**최소 SQL — 상관 push 경로 (`corr_key_count > 0` 기대)**
+
+```sql
+-- correlated 스칼라 서브쿼리 1건 (TC-101과 동일 패턴, 최소)
+SELECT l.id,
+  (SELECT r.name FROM remote_t@cubrid_conn r
+   WHERE r.id = l.id ORDER BY r.name LIMIT 1) AS remote_name
+FROM local_t l
+ORDER BY l.id;
+```
+
+**비교용 — 상관 없음 (`corr_key_count == 0`, 기존 open 경로)**
+
+```sql
+SELECT l.id,
+  (SELECT r.name FROM remote_t@cubrid_conn r
+   WHERE r.id = 1 ORDER BY r.name LIMIT 1) AS remote_name
+FROM local_t l
+ORDER BY l.id;
+```
+
+**gdb (예시)**
+
+- `b dblink_open_scan` → 상관 쿼리 실행 시 `corr_key_count > 0` 분기에서 **`cci_execute` 미호출** 확인.
+- `p scan_info->corr_key_count`, `p scan_info->corr_key_regu_list` 복사 여부 확인.
+- (T3-2 적용 후) `b dblink_scan_reset` 또는 `cci_bind_param` / `cci_execute` — 2번째 outer 행에서 재바인드·재실행 순서 확인.
+
+**세션 OFF (push-down 미적용, T3 경로 비진입)**
+
+```sql
+SET SYSTEM PARAMETERS 'use_dblink_corr_pushdown=no';
+-- 위 최소 SQL 동일 실행 → AS-IS 경로
+SET SYSTEM PARAMETERS 'use_dblink_corr_pushdown=yes';
+```
+

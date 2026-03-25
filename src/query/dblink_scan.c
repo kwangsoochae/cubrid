@@ -34,6 +34,7 @@
 #include "object_representation.h"
 #include "query_list.h"
 #include "regu_var.hpp"
+#include "fetch.h"
 
 #ifndef DBDEF_HEADER_
 #define DBDEF_HEADER_
@@ -382,10 +383,11 @@ dblink_make_date_time_tz (T_CCI_U_TYPE utype, DB_VALUE * value_p, T_CCI_DATE_TZ 
   return error;
 }
 
+/* Bind one DB_VALUE to CCI stmt param (host_vars path and correlation key path) */
 static int
-dblink_bind_param (int stmt_handle, VAL_DESCR * vd, DBLINK_HOST_VARS * host_vars)
+dblink_bind_one_param (int stmt_handle, int param_pos, DB_VALUE * dbval)
 {
-  int i, n, ret, num_size = 0;
+  int ret, num_size = 0;
   T_CCI_A_TYPE a_type;
   T_CCI_U_TYPE u_type;
   void *value;
@@ -403,139 +405,152 @@ dblink_bind_param (int stmt_handle, VAL_DESCR * vd, DBLINK_HOST_VARS * host_vars
 
   unsigned char type;
 
+  value = &dbval->data;
+  type = dbval->domain.general_info.type;
+  switch (type)
+    {
+    case DB_TYPE_BIT:
+    case DB_TYPE_VARBIT:
+      a_type = CCI_A_TYPE_BIT;
+      u_type = (type == DB_TYPE_BIT) ? CCI_U_TYPE_BIT : CCI_U_TYPE_VARBIT;
+      value = (void *) &cci_bit;
+      cci_bit.buf = (char *) db_get_bit (dbval, &num_size);
+      cci_bit.size = QSTR_NUM_BYTES (num_size);
+      break;
+    case DB_TYPE_JSON:
+      a_type = CCI_A_TYPE_STR;
+      u_type = CCI_U_TYPE_JSON;
+      value = (void *) db_get_json_raw_body (dbval);
+      break;
+    case DB_TYPE_SHORT:
+      a_type = CCI_A_TYPE_INT;
+      u_type = CCI_U_TYPE_SHORT;
+      break;
+    case DB_TYPE_INTEGER:
+      a_type = CCI_A_TYPE_INT;
+      u_type = CCI_U_TYPE_INT;
+      break;
+    case DB_TYPE_BIGINT:
+      a_type = CCI_A_TYPE_BIGINT;
+      u_type = CCI_U_TYPE_BIGINT;
+      break;
+    case DB_TYPE_NUMERIC:
+      a_type = CCI_A_TYPE_STR;
+      u_type = CCI_U_TYPE_NUMERIC;
+      value = (void *) numeric_db_value_print (dbval, num_str);
+      break;
+    case DB_TYPE_DOUBLE:
+    case DB_TYPE_FLOAT:
+      a_type = CCI_A_TYPE_DOUBLE;
+      u_type = CCI_U_TYPE_DOUBLE;
+      break;
+    case DB_TYPE_STRING:
+    case DB_TYPE_CHAR:
+      a_type = CCI_A_TYPE_STR;
+      u_type = CCI_U_TYPE_STRING;
+      value = (void *) db_get_string (dbval);
+      break;
+    case DB_TYPE_DATE:
+      a_type = CCI_A_TYPE_DATE;
+      u_type = CCI_U_TYPE_DATE;
+      db_date_decode ((DB_DATE *) value, &month, &day, &year);
+      cci_date.mon = month;
+      cci_date.day = day;
+      cci_date.yr = year;
+      value = &cci_date;
+      break;
+    case DB_TYPE_TIME:
+      a_type = CCI_A_TYPE_DATE;
+      u_type = CCI_U_TYPE_TIME;
+      db_time_decode (&dbval->data.time, &hh, &mm, &ss);
+      cci_date.hh = hh;
+      cci_date.mm = mm;
+      cci_date.ss = ss;
+      cci_date.ms = 0;
+      value = &cci_date;
+      break;
+    case DB_TYPE_DATETIME:
+      a_type = CCI_A_TYPE_DATE;
+      u_type = CCI_U_TYPE_DATETIME;
+      DATETIME_DECODE (cci_date, dbval->data.datetime, month, day, year, hh, mm, ss, ms);
+      value = &cci_date;
+      break;
+    case DB_TYPE_TIMESTAMP:
+      a_type = CCI_A_TYPE_DATE;
+      u_type = CCI_U_TYPE_TIMESTAMP;
+      timestamp = &dbval->data.utime;
+      db_timestamp_decode_ses (timestamp, &date, &time);
+      TIMESTAMP_DECODE (cci_date, date, time, month, day, year, hh, mm, ss);
+      value = &cci_date;
+      break;
+    case DB_TYPE_TIMESTAMPTZ:
+      a_type = CCI_A_TYPE_DATE;
+      u_type = CCI_U_TYPE_TIMESTAMPTZ;
+      timestamp = &dbval->data.timestamptz.timestamp;
+      zone_id = &dbval->data.timestamptz.tz_id;
+      db_timestamp_decode_w_tz_id (timestamp, zone_id, &date, &time);
+      TIMESTAMP_DECODE (cci_date, date, time, month, day, year, hh, mm, ss);
+      value = &cci_date;
+      break;
+    case DB_TYPE_TIMESTAMPLTZ:
+      a_type = CCI_A_TYPE_DATE;
+      u_type = CCI_U_TYPE_TIMESTAMPLTZ;
+      timestamp = &dbval->data.timestamptz.timestamp;
+      db_timestamp_decode_utc (timestamp, &date, &time);
+      TIMESTAMP_DECODE (cci_date, date, time, month, day, year, hh, mm, ss);
+      value = &cci_date;
+      break;
+    case DB_TYPE_DATETIMETZ:
+      a_type = CCI_A_TYPE_DATE;
+      u_type = CCI_U_TYPE_DATETIMETZ;
+      datetime = &dbval->data.datetimetz.datetime;
+      zone_id = &dbval->data.datetimetz.tz_id;
+      tz_utc_datetimetz_to_local (datetime, zone_id, &dt_local);
+      DATETIME_DECODE (cci_date, dt_local, month, day, year, hh, mm, ss, ms);
+      value = &cci_date;
+      break;
+    case DB_TYPE_DATETIMELTZ:
+      a_type = CCI_A_TYPE_DATE;
+      u_type = CCI_U_TYPE_DATETIMELTZ;
+      datetime = &dbval->data.datetimetz.datetime;
+      tz_datetimeltz_to_local (datetime, &dt_local);
+      DATETIME_DECODE (cci_date, dt_local, month, day, year, hh, mm, ss, ms);
+      value = &cci_date;
+      break;
+    case DB_TYPE_NULL:
+      a_type = CCI_A_TYPE_LAST;
+      value = NULL;
+      u_type = CCI_U_TYPE_NULL;
+      break;
+    default:
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK_UNSUPPORTED_TYPE, 1, "unknown");
+      return ER_DBLINK_UNSUPPORTED_TYPE;
+    }
+  ret = cci_bind_param (stmt_handle, param_pos, a_type, value, u_type, 0);
+  if (ret < 0)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK_INVALID_BIND_PARAM, 0);
+      return ER_DBLINK_INVALID_BIND_PARAM;
+    }
+  return NO_ERROR;
+}
+
+static int
+dblink_bind_param (int stmt_handle, VAL_DESCR * vd, DBLINK_HOST_VARS * host_vars)
+{
+  int i, n, ret;
+
   for (n = 0; n < host_vars->count; n++)
     {
       i = host_vars->index[n];
-      value = &vd->dbval_ptr[i].data;
-      type = vd->dbval_ptr[i].domain.general_info.type;
-      switch (type)
+      ret = dblink_bind_one_param (stmt_handle, n + 1, &vd->dbval_ptr[i]);
+      if (ret != NO_ERROR)
 	{
-	case DB_TYPE_BIT:
-	case DB_TYPE_VARBIT:
-	  a_type = CCI_A_TYPE_BIT;
-	  u_type = (type == DB_TYPE_BIT) ? CCI_U_TYPE_BIT : CCI_U_TYPE_VARBIT;
-	  value = (void *) &cci_bit;
-	  cci_bit.buf = (char *) db_get_bit (&vd->dbval_ptr[i], &num_size);
-	  cci_bit.size = QSTR_NUM_BYTES (num_size);
-	  break;
-	case DB_TYPE_JSON:
-	  a_type = CCI_A_TYPE_STR;
-	  u_type = CCI_U_TYPE_JSON;
-	  value = (void *) db_get_json_raw_body (&vd->dbval_ptr[i]);
-	  break;
-	case DB_TYPE_SHORT:
-	  a_type = CCI_A_TYPE_INT;
-	  u_type = CCI_U_TYPE_SHORT;
-	  break;
-	case DB_TYPE_INTEGER:
-	  a_type = CCI_A_TYPE_INT;
-	  u_type = CCI_U_TYPE_INT;
-	  break;
-	case DB_TYPE_BIGINT:
-	  a_type = CCI_A_TYPE_BIGINT;
-	  u_type = CCI_U_TYPE_BIGINT;
-	  break;
-	case DB_TYPE_NUMERIC:
-	  a_type = CCI_A_TYPE_STR;
-	  u_type = CCI_U_TYPE_NUMERIC;
-	  value = (void *) numeric_db_value_print (&vd->dbval_ptr[i], num_str);
-	  break;
-	case DB_TYPE_DOUBLE:
-	case DB_TYPE_FLOAT:
-	  a_type = CCI_A_TYPE_DOUBLE;
-	  u_type = CCI_U_TYPE_DOUBLE;
-	  break;
-	case DB_TYPE_STRING:
-	case DB_TYPE_CHAR:
-	  a_type = CCI_A_TYPE_STR;
-	  u_type = CCI_U_TYPE_STRING;
-	  value = (void *) db_get_string (&vd->dbval_ptr[i]);
-	  break;
-	case DB_TYPE_DATE:
-	  a_type = CCI_A_TYPE_DATE;
-	  u_type = CCI_U_TYPE_DATE;
-	  db_date_decode ((DB_DATE *) value, &month, &day, &year);
-	  cci_date.mon = month;
-	  cci_date.day = day;
-	  cci_date.yr = year;
-	  value = &cci_date;
-	  break;
-	case DB_TYPE_TIME:
-	  a_type = CCI_A_TYPE_DATE;
-	  u_type = CCI_U_TYPE_TIME;
-	  db_time_decode (&vd->dbval_ptr[i].data.time, &hh, &mm, &ss);
-	  cci_date.hh = hh;
-	  cci_date.mm = mm;
-	  cci_date.ss = ss;
-	  cci_date.ms = 0;
-	  value = &cci_date;
-	  break;
-	case DB_TYPE_DATETIME:
-	  a_type = CCI_A_TYPE_DATE;
-	  u_type = CCI_U_TYPE_DATETIME;
-	  DATETIME_DECODE (cci_date, vd->dbval_ptr[i].data.datetime, month, day, year, hh, mm, ss, ms);
-	  value = &cci_date;
-	  break;
-	case DB_TYPE_TIMESTAMP:
-	  a_type = CCI_A_TYPE_DATE;
-	  u_type = CCI_U_TYPE_TIMESTAMP;
-	  timestamp = &vd->dbval_ptr[i].data.utime;
-	  db_timestamp_decode_ses (timestamp, &date, &time);
-	  TIMESTAMP_DECODE (cci_date, date, time, month, day, year, hh, mm, ss);
-	  value = &cci_date;
-	  break;
-	case DB_TYPE_TIMESTAMPTZ:
-	  a_type = CCI_A_TYPE_DATE;
-	  u_type = CCI_U_TYPE_TIMESTAMPTZ;
-	  timestamp = &vd->dbval_ptr[i].data.timestamptz.timestamp;
-	  zone_id = &vd->dbval_ptr[i].data.timestamptz.tz_id;
-	  db_timestamp_decode_w_tz_id (timestamp, zone_id, &date, &time);
-	  TIMESTAMP_DECODE (cci_date, date, time, month, day, year, hh, mm, ss);
-	  value = &cci_date;
-	  break;
-	case DB_TYPE_TIMESTAMPLTZ:
-	  a_type = CCI_A_TYPE_DATE;
-	  u_type = CCI_U_TYPE_TIMESTAMPLTZ;
-	  timestamp = &vd->dbval_ptr[i].data.timestamptz.timestamp;
-	  db_timestamp_decode_utc (timestamp, &date, &time);
-	  TIMESTAMP_DECODE (cci_date, date, time, month, day, year, hh, mm, ss);
-	  value = &cci_date;
-	  break;
-	case DB_TYPE_DATETIMETZ:
-	  a_type = CCI_A_TYPE_DATE;
-	  u_type = CCI_U_TYPE_DATETIMETZ;
-	  datetime = &vd->dbval_ptr[i].data.datetimetz.datetime;
-	  zone_id = &vd->dbval_ptr[i].data.datetimetz.tz_id;
-	  tz_utc_datetimetz_to_local (datetime, zone_id, &dt_local);
-	  DATETIME_DECODE (cci_date, dt_local, month, day, year, hh, mm, ss, ms);
-	  value = &cci_date;
-	  break;
-	case DB_TYPE_DATETIMELTZ:
-	  a_type = CCI_A_TYPE_DATE;
-	  u_type = CCI_U_TYPE_DATETIMELTZ;
-	  datetime = &vd->dbval_ptr[i].data.datetimetz.datetime;
-	  tz_datetimeltz_to_local (datetime, &dt_local);
-	  DATETIME_DECODE (cci_date, dt_local, month, day, year, hh, mm, ss, ms);
-	  value = &cci_date;
-	  break;
-	case DB_TYPE_NULL:
-	  a_type = CCI_A_TYPE_LAST;	// for clear -Wmaybe-uninitialized
-	  value = NULL;
-	  u_type = CCI_U_TYPE_NULL;
-	  break;
-	default:
-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK_UNSUPPORTED_TYPE, 1, "unknown");
-	  return ER_DBLINK_UNSUPPORTED_TYPE;
-	}
-      ret = cci_bind_param (stmt_handle, n + 1, a_type, value, u_type, 0);
-      if (ret < 0)
-	{
-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK_INVALID_BIND_PARAM, 0);
-	  return ER_DBLINK_INVALID_BIND_PARAM;
+	  return ret;
 	}
     }
 
-  return S_SUCCESS;
+  return NO_ERROR;
 }
 
 int
@@ -746,6 +761,17 @@ dblink_open_scan (THREAD_ENTRY * thread_p, DBLINK_SCAN_INFO * scan_info, struct 
     {
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK, 1, err_buf.err_msg);
       return ER_DBLINK;
+    }
+
+  /* T3-1: copy correlation key meta; if push-down applies, prepare only (execute deferred to T3-2 reset) */
+  scan_info->corr_key_count = spec->s.dblink_node.corr_key_count;
+  scan_info->corr_key_regu_list = spec->s.dblink_node.corr_key_regu_list;
+  if (scan_info->corr_key_count > 0)
+    {
+      scan_info->col_info = NULL;
+      scan_info->col_cnt = 0;
+      scan_info->cursor = CCI_CURSOR_FIRST;
+      return NO_ERROR;
     }
 
   if (host_vars->count > 0)
@@ -1051,11 +1077,61 @@ close_exit:
  * dblink_scan_reset () - reset the cursor
  *   return: SCAN_CODE
  *   scan_info(in)      : information for dblink
+ *   vd(in)             : value descriptor (correlation key bind when corr_key_count > 0)
  */
 SCAN_CODE
-dblink_scan_reset (DBLINK_SCAN_INFO * scan_info)
+dblink_scan_reset (THREAD_ENTRY * thread_p, DBLINK_SCAN_INFO * scan_info, VAL_DESCR * vd)
 {
+  T_CCI_ERROR err_buf;
+  T_CCI_CUBRID_STMT stmt_type;
+  int ret;
+  regu_variable_list_node *regu_node;
+  DB_VALUE *peek_dbval = NULL;
+
   assert (scan_info->conn_handle >= 0 && scan_info->stmt_handle >= 0);
+
+  if (scan_info->corr_key_count > 0)
+    {
+      int param_pos = 1;
+
+      if (vd == NULL)
+	{
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK, 1, "vd required for correlation key bind");
+	  return S_ERROR;
+	}
+      for (regu_node = scan_info->corr_key_regu_list; regu_node != NULL; regu_node = regu_node->next, param_pos++)
+	{
+	  if (fetch_peek_dbval (thread_p, &regu_node->value, vd, NULL, NULL, NULL, &peek_dbval) != NO_ERROR)
+	    {
+	      return S_ERROR;
+	    }
+	  if (peek_dbval == NULL)
+	    {
+	      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK, 1, "correlation key value not resolved");
+	      return S_ERROR;
+	    }
+	  ret = dblink_bind_one_param (scan_info->stmt_handle, param_pos, peek_dbval);
+	  if (ret != NO_ERROR)
+	    {
+	      return S_ERROR;
+	    }
+	}
+      ret = cci_execute (scan_info->stmt_handle, 0, 0, &err_buf);
+      if (ret < 0)
+	{
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK, 1, err_buf.err_msg);
+	  return S_ERROR;
+	}
+      if (scan_info->col_info == NULL)
+	{
+	  scan_info->col_info = (void *) cci_get_result_info (scan_info->stmt_handle, &stmt_type, &scan_info->col_cnt);
+	  if (scan_info->col_info == NULL)
+	    {
+	      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK, 1, "unknown error");
+	      return S_ERROR;
+	    }
+	}
+    }
 
   scan_info->cursor = CCI_CURSOR_FIRST;
 

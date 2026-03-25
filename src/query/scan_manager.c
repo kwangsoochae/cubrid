@@ -4582,7 +4582,7 @@ scan_reset_scan_block (THREAD_ENTRY * thread_p, SCAN_ID * s_id)
       break;
 
     case S_DBLINK_SCAN:
-      status = dblink_scan_reset (&s_id->s.dblid.scan_info);
+      status = dblink_scan_reset (thread_p, &s_id->s.dblid.scan_info, s_id->vd);
       break;
 
     default:
@@ -7099,6 +7099,15 @@ scan_next_dblink_scan (THREAD_ENTRY * thread_p, SCAN_ID * scan_id)
   QFILE_TUPLE_RECORD tplrec = { NULL, 0 };
 
   vaidp = &scan_id->s.dblid;
+
+  /* T3-2: first tuple (or after open prepare-only): bind correlation keys + execute before fetch */
+  if (vaidp->scan_info.corr_key_count > 0 && vaidp->scan_info.col_info == NULL)
+    {
+      if (dblink_scan_reset (thread_p, &vaidp->scan_info, scan_id->vd) != S_SUCCESS)
+	{
+	  return S_ERROR;
+	}
+    }
 
   /* execute dblink scan */
 

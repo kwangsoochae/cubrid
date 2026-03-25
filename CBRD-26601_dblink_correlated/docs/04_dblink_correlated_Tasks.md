@@ -186,8 +186,8 @@
 
 | ID | 작업 | 파일/위치 | 완료 |
 |----|------|-----------|:----:|
-| T3-1 | `dblink_open_scan()`: `corr_key_count > 0`이면 `cci_prepare`만 수행, `cci_execute` 생략. spec → scan_info로 `corr_key_count`, `corr_key_regu_list` 복사. | `src/query/dblink_scan.c` `dblink_open_scan()`, `src/query/dblink_scan.h` `DBLINK_SCAN_INFO` | [ ] |
-| T3-2 | corr DBLink aptr 재실행 메커니즘: `qexec_execute_mainblock_internal`의 aptr 처리 루프(`query_executor.c:15292`)에서 `IS_CORR_DBLINK_XASL(aptr)` true인 경우 INITIAL/SUCCESS 분기. (a) INITIAL: `dblink_open_scan`(prepare만) 후 rebind+execute 트리거. (b) SUCCESS: list 정리 후 동일 트리거. **기본안**: `scan_reset_scan_block` → `dblink_scan_reset(scan_info, vd)`에서 `cci_bind_param` + `cci_execute`. **대안(플랜 B)**: `scan_manager`/`scan_reset_scan_block` 변경 파급이 크면 `dblink_scan_execute_corr(scan_info, vd)` 등 전용 함수를 두고 aptr 루프에서 직접 호출. 실패 시 에러 설정·상위 전파(NFR-2). | `src/query/query_executor.c`, `src/query/dblink_scan.c`, `src/query/scan_manager.c` (선택) | [ ] |
+| T3-1 | `dblink_open_scan()`: `corr_key_count > 0`이면 `cci_prepare`만 수행, `cci_execute`·`cci_get_result_info` 생략(`col_info=NULL`, `col_cnt=0`). spec → scan_info로 `corr_key_count`, `corr_key_regu_list` 복사. **추가**: `query_executor.c` `TARGET_DBLINK` open 직후 `corr_key_count > 0`이면 `val_list->val_cnt` vs `scan_info.col_cnt` 검사 생략(open 시 `col_cnt` 미확정). `DBLINK_SCAN_INFO` 필드는 T0-2 완료. | `src/query/dblink_scan.c` `dblink_open_scan()`, `src/query/query_executor.c`(TARGET_DBLINK) | [x] |
+| T3-2 | corr DBLink 재실행: **`dblink_bind_one_param`**(단일 `DB_VALUE` → CCI) + **`dblink_scan_reset(thread_p, scan_info, vd)`**에서 `corr_key_regu_list`에 대해 `fetch_peek_dbval` → bind → `cci_execute` → `col_info` 미설정 시 `cci_get_result_info`. **`scan_reset_scan_block`**: `S_DBLINK_SCAN` 시 위 reset 호출. **`scan_next_dblink_scan`**: `corr_key_count>0`이고 `col_info==NULL`이면 첫 fetch 전에 reset(첫 outer 행에서도 execute 보장). 실패 시 `ER_DBLINK` 등 상위 전파(NFR-2). (aptr/dptr 세부 루프는 executor 기존 `dptr_list`/`scan_reset` 경로에 의존 — [zz_xasl_dump](zz_xasl_dump_asis.txt) 참고.) | `src/query/dblink_scan.c`, `src/query/dblink_scan.h`, `src/query/scan_manager.c` | [x] |
 | T3-3 | NULL 처리: re-execute 직전 corr_key 값이 NULL이면 execute 스킵 → 빈 list → 0건(NULL 스칼라) 반환. | `src/query/dblink_scan.c` 또는 `query_executor.c` T3-2 내 | [ ] |
 
 ### Step 3 점검
@@ -294,7 +294,7 @@ FROM local_t l WHERE l.id IS NULL;
 - [x] **Step 0** — T0-1 [x], T0-2 [x]
 - [x] **Step 1** — T1-1 [x], T1-2 [x], T1-3 [x]
 - [x] **Step 2** — T2-1 [x]
-- [ ] **Step 3** — T3-1 [ ], T3-2 [ ], T3-3 [ ]
+- [ ] **Step 3** — T3-1 [x], T3-2 [x], T3-3 [ ]
 - [ ] **Step 4** — T4-1 [ ]
 - [ ] **Step 5** — T5-1 [ ]
 - [ ] **Step 6** — T6-1 [ ], T6-2 [ ], T6-3 [ ], T6-4 [ ], T6-5 [ ], T6-6 [ ], T6-7 [ ], T6-8 [ ], T6-9 [ ]
@@ -319,3 +319,5 @@ FROM local_t l WHERE l.id IS NULL;
 | 2026-03-24 | T2-1: `pt_to_dblink_table_spec_list` — HOST_VAR 검사(outer ref·`pushed_pred`), `pt_to_regu_variable(outer)`→`corr_key_regu_list`, 순서: regu 후 `mq_dblink_append_corr_pred_sql`; `pt_make_dblink_access_spec` 이후 `dblink_node.corr_key_*` 반영. 플랜 B는 C-1로 내부 FROM이 동일 함수를 타 별도 `pt_to_subquery_table_spec_list` 분기 없음. |
 | 2026-03-24 | T2-1 XASL corr regu 구현 **되돌림**(작업 트리 `xasl_generation.c`를 Step 2 미완 상태로 복구). 순수 상관 `rewritten==NULL` 시 `mq_dblink_append_corr_pred_sql` 보강만 커밋에 유지. 재디버깅 후 재적용 예정. |
 | 2026-03-24 | T2-1 **재적용**: pred/rest 매칭·`current_class=NULL` 폴백; 폴백 실패 시 `pt_reset_error` + `has_internal_error=0`(Internal error- reporting semantic error 방지). Step 2 완료. |
+| 2026-03-25 | **T3-1** 구현: `dblink_open_scan`에서 `corr_key_count>0` 시 prepare만·`corr_key_*` scan_info 복사; `query_executor.c` TARGET_DBLINK에서 상관 push 시 컬럼 수 검사 완화. [05 Tests §5.5](05_dblink_correlated_Tests.md)에 T3 gdb·최소 SQL 추가. |
+| 2026-03-25 | **T3-2** 구현: `dblink_bind_one_param` 분리; `dblink_scan_reset(thread_p,…,vd)`에서 corr bind+execute+`get_result_info`; `scan_reset_scan_block`·`scan_next_dblink_scan`에서 `vd` 전달 및 첫 fetch 전 reset. |
