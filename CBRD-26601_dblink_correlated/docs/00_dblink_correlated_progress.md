@@ -53,16 +53,16 @@
   - `src/base/system_parameter.h` / `system_parameter.c`: `PRM_ID_USE_DBLINK_CORR_PUSHDOWN`, 이름 `use_dblink_corr_pushdown`, `PRM_BOOLEAN` 기본값 `yes`, 플래그 `PRM_FOR_CLIENT | PRM_USER_CHANGE | PRM_FOR_SESSION | PRM_FOR_QRY_STRING` (플랜/쿼리 문자열 반영).
   - `src/parser/view_transform.c`: `mq_rewrite_dblink_as_subquery`에서 `prm_get_bool_value(PRM_ID_USE_DBLINK_CORR_PUSHDOWN)`가 false이면 `mq_detect_dblink_corr_eq` 및 `corr_key_*` 메타 기록 전체 스킵 — `pt_copypush_terms` / T2-1 append 경로로 이어지지 않음(AS-IS). `#include "system_parameter.h"` 추가.
 
-- **T2-1 (XASL `dblink_spec_node` corr 필드, `xasl_generation.c`)**:
+- **T2-1 (XASL `dblink_spec_node` corr 필드, `xasl_generation.c`)** — commit `e064a4603` · bugfix `4908707e0`:
   - `pt_to_dblink_table_spec_list`: HOST_VAR 검사·`corr_key_outer_copy[0]`로 `pt_to_regu_variable` → `corr_key_regu_list`(이전: 비소유 `corr_key_outer_refs[0]` 직접 사용); 실패 시 `mq_dblink_clear_corr_keys(parser, pdblink)` + `pt_reset_error` + `has_internal_error=0`.
   - `mq_dblink_append_corr_pred_sql`(순수 상관)·`pt_make_dblink_access_spec` 이후 `dblink_node.corr_key_*` 반영.
 
-- **T3-1 (런타임 open — FR-4, prepare만)** — `dblink_scan.c`, `query_executor.c`:
+- **T3-1 (런타임 open — FR-4, prepare만)** — commit `5024fe120` / `dblink_scan.c`, `query_executor.c`:
   - `dblink_open_scan`: `cci_prepare` 성공 후 `spec->s.dblink_node`의 `corr_key_count`, `corr_key_regu_list`를 `DBLINK_SCAN_INFO`로 복사. `corr_key_count > 0`이면 `col_info=NULL`, `col_cnt=0`, `cursor=CCI_CURSOR_FIRST`로 반환 — `cci_execute`·호스트 `dblink_bind_param`·`cci_get_result_info` 생략.
   - `query_executor.c` `scan_open_scan` 분기 `TARGET_DBLINK`: `corr_key_count <= 0`일 때만 `val_list->val_cnt`와 `scan_info.col_cnt` 일치 검사(상관 push 시 open 직후 `col_cnt` 미확정).
   - 테스트 문서: [05 Tests §5.5](05_dblink_correlated_Tests.md) T3 gdb·최소 SQL.
 
-- **T3-2 (런타임 rebind + execute — FR-5)** — `dblink_scan.c`, `scan_manager.c`:
+- **T3-2 (런타임 rebind + execute — FR-5)** — commit `5024fe120` / `dblink_scan.c`, `scan_manager.c`:
   - `dblink_bind_one_param`: 단일 `DB_VALUE` → `cci_bind_param` (기존 `dblink_bind_param` 루프에서 재사용).
   - `dblink_scan_reset(thread_p, scan_info, vd)`: `corr_key_count>0`이면 `corr_key_regu_list`에 대해 `fetch_peek_dbval` → `dblink_bind_one_param` → `cci_execute` → `col_info` 없으면 `cci_get_result_info`.
   - `scan_reset_scan_block` `S_DBLINK_SCAN`: `dblink_scan_reset(thread_p, …, s_id->vd)`.

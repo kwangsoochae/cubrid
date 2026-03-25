@@ -1,9 +1,6 @@
 # CBRD-26601 DBLink Correlated Subquery 최적화 — AS-IS vs TO-BE
 
-> 대상: 팀 코드 리뷰 / 설계 공유
-> 작성일: 2026-03-19
-
----
+> 
 
 ## 0. 예제 쿼리 (공통 기준)
 
@@ -45,7 +42,14 @@ SELECT o.order_id,
 ```
 0x2ee69850 [buildlist_proc] XASL_ZERO_CORR_LEVEL | TOP_MOST  ← orders 스캔
   val_list: [order_id:0x2ee1dea8] [amount:0x2ee1df20] [cust_id:0x2ee1df98]
+  outptr:   [TYPE_CONSTANT:order_id][type:INTEGER]
+            [TYPE_CONSTANT:amount][type:INTEGER]
+            [xasl:0x2ee69340][TYPE_CONSTANT:cust_name][type:VARCHAR]  ← dptr 실행 후 반환값
   └─ dptr: 0x2ee69340 [buildlist_proc] XASL_LINK_TO_REGU_VARIABLE  ← 스칼라 서브쿼리 래퍼
+               single tuple                                         ← 스칼라 서브쿼리 마커
+               instnum predicate: inst_num() <= 1                   ← LIMIT 1
+               │  DBLink XASL가 만든 list file을 스캔하다
+               │  첫 번째 행에서 중단 → 단일 값을 regu variable로 반환
                └─ aptr: 0x2ee1e7f0 [buildlist_proc]                ← DBLink XASL
                            access spec: dblink
                            conn_sql: 'SELECT name, cust_id FROM customer c'  ← WHERE 없음
@@ -88,7 +92,7 @@ WHERE c.cust_id = o.cust_id 는 원격이 아닌 로컬 실행 단계의 predica
   │
   ▼
 [xasl_generation.c] pt_to_dblink_table_spec_list()
-  conn_sql = "SELECT cust_id, name FROM customer c"  ← WHERE 없이 그대로 확정
+  conn_sql = "SELECT cust_id, name FROM customer c"  ← WHERE 없이
   WHERE c.cust_id = o.cust_id → access_pred (로컬 필터)로 변환
   │
   ▼
@@ -97,14 +101,6 @@ WHERE c.cust_id = o.cust_id 는 원격이 아닌 로컬 실행 단계의 predica
   → dblink_open_scan() → cci_prepare + cci_execute (WHERE 없음)
   → 원격 전체 테이블 fetch → access_pred로 로컬 필터링
 ```
-
-**핵심 문제점 요약**
-
-| 단계 | 문제 | 영향 |
-|------|------|------|
-| `mq_rewrite_dblink_as_subquery` | correlated 조건을 `conn_sql`에 포함하지 않음 | 원격 SQL에 WHERE 없음 |
-| `pt_to_dblink_table_spec_list` | `conn_sql` 그대로 확정 | 원격 DB에서 전체 테이블 반환 |
-| 런타임 `qexec_clear_head_lists` | outer row마다 DBLink XASL clear → 전체 재실행 | N회 전체 테이블 fetch |
 
 ---
 
@@ -160,20 +156,21 @@ SQL 텍스트 입력
 ```
 orders XASL [buildlist_proc] XASL_ZERO_CORR_LEVEL | TOP_MOST
   val_list: [order_id] [amount] [cust_id:slot-A]
+  outptr:   [TYPE_CONSTANT:order_id][type:INTEGER]
+            [TYPE_CONSTANT:amount][type:INTEGER]
+            [xasl:dptr][TYPE_CONSTANT:cust_name][type:VARCHAR]  ← dptr 실행 후 반환값
   └─ dptr: 스칼라 서브쿼리 래퍼 [buildlist_proc] XASL_LINK_TO_REGU_VARIABLE
+               single tuple                                     ← 스칼라 서브쿼리 마커
+               instnum predicate: inst_num() <= 1               ← LIMIT 1
                └─ aptr: DBLink XASL [buildlist_proc] XASL_CORR_DBLINK  ← 신규 플래그
                            access spec: dblink
                            conn_sql: 'SELECT name, cust_id FROM customer c
-                                      WHERE cust_id = ?'         ← WHERE 포함
+                                      WHERE cust_id = ?'        ← WHERE 포함 (pushdown)
+                           val_list: [name] [cust_id]
                            corr_key_count: 1
                            corr_key_regu_list: [TYPE_CONSTANT(slot-A)]  ← orders.cust_id 슬롯
+                           (access pred 없음 — WHERE로 pushdown됨)
 ```
-
-| 항목 | AS-IS | TO-BE |
-|------|-------|-------|
-| conn_sql | WHERE 없음 | `WHERE cust_id = ?` |
-| corr_key_regu_list | 없음 | orders.cust_id 슬롯 참조 |
-| DBLink XASL 플래그 | 없음 | `XASL_CORR_DBLINK` |
 
 ---
 
@@ -200,7 +197,7 @@ sequenceDiagram
     Exec->>SMgr: scan_open_dblink_scan()
     SMgr->>Scan: dblink_open_scan()
     Scan->>CCI: cci_prepare()
-    Scan->>CCI: cci_execute()  ← WHERE 없음
+    Scan->>CCI: cci_execute()
     Exec->>SMgr: scan_next_scan() (반복)
     SMgr->>Scan: scan_next_dblink_scan()
   end
@@ -247,7 +244,7 @@ sequenceDiagram
 | `dblink_scan.c` | `dblink_open_scan()` | `corr_key_count > 0`이면 prepare만, execute 안 함 |
 | `dblink_scan.c` | `dblink_scan_reset()` | 시그니처에 `vd` 추가; corr case: bind + execute |
 | `scan_manager.c` | `scan_reset_scan_block()` | `dblink_scan_reset`에 `vd` 전달 |
-| `query_executor.c` | `qexec_clear_head_lists()` | `XASL_CORR_DBLINK_XASL` → skip clear |
+| `query_executor.c` | `qexec_clear_head_lists()` | `XASL_CORR_DBLINK_XASL` → skip clear(결과 list file 없애기) |
 | `query_executor.c` | aptr loop (~L15371) | corr DBLink: 첫 행 open-only, 이후 행 rebind |
 
 ---
@@ -278,7 +275,8 @@ sequenceDiagram
 
 ## 참고 문서
 
-- 상세 소스 분석: `CBRD-26601_dblink_correlated/docs/01_dblink_correlated_Source_Analysis.md`
-- 최적화 설계: `CBRD-26601_dblink_correlated/docs/03_dblink_correlated_Desgin_Doc.md`
+- 소스 분석: `CBRD-26601_dblink_correlated/docs/01_dblink_correlated_Source_Analysis.md`
 - PRD: `CBRD-26601_dblink_correlated/docs/02_dblink_correlated_PRD.md`
-- Tasks / Tests: `CBRD-26601_dblink_correlated/docs/04_dblink_correlated_Tasks.md`, `CBRD-26601_dblink_correlated/docs/05_dblink_correlated_Tests.md`
+- 설계: `CBRD-26601_dblink_correlated/docs/03_dblink_correlated_Desgin_Doc.md`
+- Tasks : `CBRD-26601_dblink_correlated/docs/04_dblink_correlated_Tasks.md`
+- Tests: `CBRD-26601_dblink_correlated/docs/05_dblink_correlated_Tests.md`
