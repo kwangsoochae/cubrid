@@ -3313,6 +3313,11 @@ qexec_clear_head_lists_with_truncate (THREAD_ENTRY * thread_p, XASL_NODE * xasl_
 	  /* skip out zero correlation-level uncorrelated subquery */
 	  continue;
 	}
+      if (IS_REUSE_DBLINK_XASL (xasl))
+	{
+	  /* correlated DBLink: keep materialized list for outer-row reuse (CBRD-26640) */
+	  continue;
+	}
 
 
       if (xasl->list_id && !xasl->list_id->is_result_cached)
@@ -3373,6 +3378,11 @@ qexec_clear_head_lists (THREAD_ENTRY * thread_p, XASL_NODE * xasl_list)
       if (XASL_IS_FLAGED (xasl, XASL_ZERO_CORR_LEVEL))
 	{
 	  /* skip out zero correlation-level uncorrelated subquery */
+	  continue;
+	}
+      if (IS_REUSE_DBLINK_XASL (xasl))
+	{
+	  /* correlated DBLink: keep materialized list for outer-row reuse (CBRD-26640) */
 	  continue;
 	}
       /* clear XASL head node */
