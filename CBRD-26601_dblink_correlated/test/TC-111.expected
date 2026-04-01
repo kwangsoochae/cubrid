@@ -1,9 +1,0 @@
-           id  name                            remote_cnt
-=========================================================
-            1  'local_1'                                1
-            2  'local_2'                                2
-            3  'local_3'                                1
-            4  'local_4'                                0
-            5  'local_5'                                3
-
-5 rows selected.

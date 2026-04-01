@@ -1,9 +1,0 @@
-           id  name                  remote_name         
-=========================================================
-            5  'local_5'             'remote_e1'         
-            5  'local_5b'            'remote_e1'         
-            5  'local_5c'            'remote_e1'         
-            5  'local_5d'            'remote_e1'         
-            5  'local_5e'            'remote_e1'         
-
-5 rows selected.
