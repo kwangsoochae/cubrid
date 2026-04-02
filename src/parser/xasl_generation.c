@@ -499,6 +499,9 @@ static int pt_split_attrs (PARSER_CONTEXT * parser, TABLE_INFO * table_info, PT_
 static int pt_split_hash_attrs (PARSER_CONTEXT * parser, TABLE_INFO * table_info, PT_NODE * pred,
 				PT_NODE ** build_attrs, PT_NODE ** probe_attrs);
 
+static void pt_fill_dblink_corr_for_spec (PARSER_CONTEXT * parser, PT_DBLINK_INFO * pdblink, ACCESS_SPEC_TYPE * access,
+					  REGU_VARIABLE * corr_regu);
+
 static int pt_split_hash_attrs_for_HQ (PARSER_CONTEXT * parser, PT_NODE * pred, PT_NODE ** build_attrs,
 				       PT_NODE ** probe_attrs, PT_NODE ** pred_without_HQ);
 
@@ -12785,6 +12788,9 @@ pt_to_subquery_table_spec_list (PARSER_CONTEXT * parser, PT_NODE * spec, PT_NODE
   PT_NODE *pred_attrs = NULL, *rest_attrs = NULL, *build_attrs = NULL, *probe_attrs = NULL;
   int *pred_offsets = NULL, *rest_offsets = NULL;
 
+  /* CBRD-26601 T2-1 Plan B: inner SELECT from with PT_DERIVED_DBLINK_TABLE is XASL-lowered separately; corr_key_* is
+   * filled in pt_to_dblink_table_spec_list when that inner spec is built.  */
+
   subquery_proc = (XASL_NODE *) subquery->info.query.xasl;
 
   tbl_info = pt_find_table_info (spec->info.spec.id, parser->symbols->table_info);
@@ -12993,6 +12999,38 @@ pt_host_vars_index (PARSER_CONTEXT * parser, PT_NODE * term_list, void *arg, int
   return term_list;
 }
 
+/*
+ * pt_fill_dblink_corr_for_spec () - CBRD-26601 T2-1: copy correlated outer bind regs into TARGET_DBLINK spec.
+ *   corr_regu must come from pt_to_regu_variable (parser, pdblink->corr_key_outer_copy[0], ...).
+ */
+static void
+pt_fill_dblink_corr_for_spec (PARSER_CONTEXT * parser, PT_DBLINK_INFO * pdblink, ACCESS_SPEC_TYPE * access,
+			      REGU_VARIABLE * corr_regu)
+{
+  REGU_VARIABLE_LIST rlist = NULL;
+
+  (void) parser;
+
+  if (access == NULL || access->type != TARGET_DBLINK)
+    {
+      return;
+    }
+  if (corr_regu == NULL || pdblink->corr_key_count <= 0)
+    {
+      return;
+    }
+
+  regu_alloc (rlist);
+  if (rlist == NULL)
+    {
+      return;
+    }
+  rlist->value = *corr_regu;
+  rlist->next = NULL;
+  access->s.dblink_node.corr_key_count = pdblink->corr_key_count;
+  access->s.dblink_node.corr_key_regu_list = rlist;
+}
+
 static ACCESS_SPEC_TYPE *
 pt_to_dblink_table_spec_list (PARSER_CONTEXT * parser, PT_NODE * spec, PT_NODE * dblink_table,
 			      PT_NODE * src_derived_tbl, PT_NODE * where_p)
@@ -13001,6 +13039,7 @@ pt_to_dblink_table_spec_list (PARSER_CONTEXT * parser, PT_NODE * spec, PT_NODE *
   PT_DBLINK_INFO *pdblink = &(dblink_table->info.dblink_table);
   char *sql;
   int count = 0;
+  REGU_VARIABLE *corr_regu = NULL;
 
   /* CBRD-26601 T1-2: pure correlated — pt_copypush_terms did not set rewritten; build before conn_sql */
   if (pdblink->rewritten == NULL && pdblink->corr_key_count > 0 && pdblink->corr_key_col_names[0] != NULL)
@@ -13008,6 +13047,21 @@ pt_to_dblink_table_spec_list (PARSER_CONTEXT * parser, PT_NODE * spec, PT_NODE *
       if (!mq_dblink_append_corr_pred_sql (parser, pdblink))
 	{
 	  mq_dblink_clear_corr_keys (parser, pdblink);
+	}
+    }
+
+  /* CBRD-26601 T2-1: outer-column regu for per-row bind (same val_list slots as access_pred) */
+  if (pdblink->corr_key_count > 0 && pdblink->corr_key_outer_copy[0] != NULL)
+    {
+      corr_regu = pt_to_regu_variable (parser, pdblink->corr_key_outer_copy[0], UNBOX_AS_VALUE);
+      if (corr_regu == NULL || pt_has_error (parser))
+	{
+	  if (pt_has_error (parser))
+	    {
+	      pt_reset_error (parser);
+	    }
+	  mq_dblink_clear_corr_keys (parser, pdblink);
+	  corr_regu = NULL;
 	}
     }
 
@@ -13063,6 +13117,11 @@ pt_to_dblink_table_spec_list (PARSER_CONTEXT * parser, PT_NODE * spec, PT_NODE *
 				       (char *) pdblink->user->info.value.data_value.str->bytes,
 				       (char *) pdblink->pwd->info.value.data_value.str->bytes,
 				       pdblink->host_vars.count, pdblink->host_vars.index, (char *) sql);
+
+  if (access)
+    {
+      pt_fill_dblink_corr_for_spec (parser, pdblink, access, corr_regu);
+    }
 
   return access;
 }
