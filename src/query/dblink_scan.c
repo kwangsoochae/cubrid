@@ -686,29 +686,6 @@ error_exit:
   return ER_DBLINK;
 }
 
-/*
- * dblink_restore_cci_autocommit_if_saved () - restore CCI autocommit after dblink_open_scan forced false
- */
-static int
-dblink_restore_cci_autocommit_if_saved (DBLINK_SCAN_INFO * scan_info)
-{
-  int ret;
-  T_CCI_ERROR err_buf;
-
-  if (scan_info->conn_handle < 0 || !scan_info->cci_autocommit_saved)
-    {
-      return NO_ERROR;
-    }
-  scan_info->cci_autocommit_saved = 0;
-  ret = cci_set_autocommit (scan_info->conn_handle, (CCI_AUTOCOMMIT_MODE) scan_info->cci_autocommit_before);
-  if (ret < 0)
-    {
-      cci_get_err_msg (ret, err_buf.err_msg, sizeof (err_buf.err_msg));
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK, 1, err_buf.err_msg);
-      return ER_DBLINK;
-    }
-  return NO_ERROR;
-}
 
 /*
  * dblink_connect_and_prepare () - shared helper: acquire conn_handle, save/force-false autocommit,
@@ -780,31 +757,24 @@ dblink_connect_and_prepare (THREAD_ENTRY * thread_p, ACCESS_SPEC_TYPE * spec, DB
 	}
     }
 
-  /* Save current autocommit and force manual-commit for the duration of this scan. */
-  ret = cci_get_autocommit (scan_info->conn_handle);
-  if (ret < 0)
+  /* Force autocommit OFF for the duration of this scan.
+   * cursor_rewind (CBRD-26640) requires the CCI cursor to stay alive across outer rows;
+   * this is only necessary when auto_commit is true (false connections are already OFF). */
+  if (auto_commit)
     {
-      cci_get_err_msg (ret, err_buf.err_msg, sizeof (err_buf.err_msg));
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK, 1, err_buf.err_msg);
-      return ER_DBLINK;
-    }
-  scan_info->cci_autocommit_before = (char) ret;
-  scan_info->cci_autocommit_saved = 1;
-
-  ret = cci_set_autocommit (scan_info->conn_handle, CCI_AUTOCOMMIT_FALSE);
-  if (ret < 0)
-    {
-      cci_get_err_msg (ret, err_buf.err_msg, sizeof (err_buf.err_msg));
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK, 1, err_buf.err_msg);
-      scan_info->cci_autocommit_saved = 0;
-      return ER_DBLINK;
+      ret = cci_set_autocommit (scan_info->conn_handle, CCI_AUTOCOMMIT_FALSE);
+      if (ret < 0)
+	{
+	  cci_get_err_msg (ret, err_buf.err_msg, sizeof (err_buf.err_msg));
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK, 1, err_buf.err_msg);
+	  return ER_DBLINK;
+	}
     }
 
   scan_info->stmt_handle = cci_prepare (scan_info->conn_handle, sql_text, 0, &err_buf);
   if (scan_info->stmt_handle < 0)
     {
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK, 1, err_buf.err_msg);
-      (void) dblink_restore_cci_autocommit_if_saved (scan_info);
       if (auto_commit && scan_info->conn_handle >= 0)
 	{
 	  (void) cci_disconnect (scan_info->conn_handle, &err_buf);
@@ -820,7 +790,6 @@ dblink_connect_and_prepare (THREAD_ENTRY * thread_p, ACCESS_SPEC_TYPE * spec, DB
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK, 1, "unknown error");
       (void) cci_close_req_handle (scan_info->stmt_handle);
       scan_info->stmt_handle = -1;
-      (void) dblink_restore_cci_autocommit_if_saved (scan_info);
       return ER_DBLINK;
     }
 
@@ -956,7 +925,6 @@ dblink_open_scan (THREAD_ENTRY * thread_p, DBLINK_SCAN_INFO * scan_info, struct 
     {
       if ((ret = dblink_bind_param (scan_info->stmt_handle, vd, host_vars)) < 0)
 	{
-	  (void) dblink_restore_cci_autocommit_if_saved (scan_info);
 	  return ER_DBLINK;
 	}
     }
@@ -965,7 +933,6 @@ dblink_open_scan (THREAD_ENTRY * thread_p, DBLINK_SCAN_INFO * scan_info, struct 
   if (ret < 0)
     {
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK, 1, err_buf.err_msg);
-      (void) dblink_restore_cci_autocommit_if_saved (scan_info);
       return ER_DBLINK;
     }
   scan_info->cursor = CCI_CURSOR_FIRST;
@@ -1022,7 +989,6 @@ dblink_close_scan (DBLINK_SCAN_INFO * scan_info, bool is_final)
     {
       cci_get_err_msg (error, err_buf.err_msg, sizeof (err_buf.err_msg));
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK, 1, err_buf.err_msg);
-      (void) dblink_restore_cci_autocommit_if_saved (scan_info);
       if (auto_commit)
 	{
 	  (void) cci_disconnect (scan_info->conn_handle, &err_buf);
@@ -1031,16 +997,6 @@ dblink_close_scan (DBLINK_SCAN_INFO * scan_info, bool is_final)
       return S_ERROR;
     }
   scan_info->stmt_handle = -1;
-
-  if (dblink_restore_cci_autocommit_if_saved (scan_info) != NO_ERROR)
-    {
-      if (auto_commit && scan_info->conn_handle >= 0)
-	{
-	  (void) cci_disconnect (scan_info->conn_handle, &err_buf);
-	  scan_info->conn_handle = -1;
-	}
-      return S_ERROR;
-    }
 
   if (scan_info->conn_handle >= 0 && auto_commit)
     {
