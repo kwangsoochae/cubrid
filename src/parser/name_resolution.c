@@ -25,6 +25,7 @@
 #include "config.h"
 
 #include <assert.h>
+#include <cmath>
 #include <string.h>
 #include <unordered_map>
 
@@ -5452,6 +5453,160 @@ dblink_stats_resolve_class_name (const char *remote_table_name, T_CCI_COL_INFO *
   return single;
 }
 
+/* Build 'literal' with doubled single-quotes for Oracle. */
+static int
+dblink_oracle_quote_literal (char *dest, size_t dest_len, const char *src)
+{
+  size_t need = 3;
+  const char *p;
+
+  for (p = src; *p != '\0'; p++)
+    {
+      need += (*p == '\'') ? (size_t) 2 : (size_t) 1;
+    }
+  if (need > dest_len)
+    {
+      return ER_FAILED;
+    }
+  {
+    char *w = dest;
+
+    *w++ = '\'';
+    for (p = src; *p != '\0'; p++)
+      {
+	if (*p == '\'')
+	  {
+	    *w++ = '\'';
+	    *w++ = '\'';
+	  }
+	else
+	  {
+	    *w++ = *p;
+	  }
+      }
+    *w++ = '\'';
+    *w = '\0';
+  }
+  return NO_ERROR;
+}
+
+static void
+dblink_try_fetch_remote_stats_oracle (PT_DBLINK_INFO * dblink_table, int conn, const char *class_name)
+{
+  char owner[SM_MAX_USER_LENGTH];
+  char table[DB_MAX_IDENTIFIER_LENGTH];
+  char owner_lit[DB_MAX_IDENTIFIER_LENGTH * 2 + 4];
+  char table_lit[DB_MAX_IDENTIFIER_LENGTH * 2 + 4];
+  char sql_buf[512 + DB_MAX_IDENTIFIER_LENGTH * 8];
+  int stats_req = -1;
+  T_CCI_ERROR stats_err;
+  int cci_rc;
+  double num_rows_d = 0.0;
+  double blocks_d = 0.0;
+  int ind_nr = -1;
+  int ind_bl = -1;
+  const char *table_src;
+
+  if (class_name == NULL)
+    {
+      return;
+    }
+
+  /* Oracle ALL_TABLES requires OWNER; skip stats if class_name has no qualifier. */
+  if (sm_qualifier_name (class_name, owner, SM_MAX_USER_LENGTH) == NULL)
+    {
+      return;
+    }
+  table_src = sm_remove_qualifier_name (class_name);
+  if (table_src == NULL || table_src[0] == '\0')
+    {
+      return;
+    }
+  strncpy (table, table_src, DB_MAX_IDENTIFIER_LENGTH - 1);
+  table[DB_MAX_IDENTIFIER_LENGTH - 1] = '\0';
+  if (dblink_oracle_quote_literal (owner_lit, sizeof (owner_lit), owner) != NO_ERROR)
+    {
+      return;
+    }
+  if (dblink_oracle_quote_literal (table_lit, sizeof (table_lit), table) != NO_ERROR)
+    {
+      return;
+    }
+  snprintf (sql_buf, sizeof (sql_buf),
+	    "/* DBLINK SELECT */ SELECT NUM_ROWS, BLOCKS FROM ALL_TABLES WHERE OWNER = %s AND TABLE_NAME = %s",
+	    owner_lit, table_lit);
+
+  memset (&stats_err, 0, sizeof (stats_err));
+  stats_req = cci_prepare (conn, sql_buf, 0, &stats_err);
+  if (stats_req < 0)
+    {
+      return;
+    }
+
+  memset (&stats_err, 0, sizeof (stats_err));
+  cci_rc = cci_execute (stats_req, 0, 0, &stats_err);
+  if (cci_rc < 0)
+    {
+      cci_close_req_handle (stats_req);
+      return;
+    }
+
+  /* CGW/ODBC: position cursor before first fetch (same as dblink_scan_next). */
+  memset (&stats_err, 0, sizeof (stats_err));
+  cci_rc = cci_cursor (stats_req, 1, CCI_CURSOR_FIRST, &stats_err);
+  if (cci_rc < 0)
+    {
+      cci_close_req_handle (stats_req);
+      return;
+    }
+
+  memset (&stats_err, 0, sizeof (stats_err));
+  cci_rc = cci_fetch (stats_req, &stats_err);
+  if (cci_rc < 0)
+    {
+      cci_close_req_handle (stats_req);
+      return;
+    }
+
+  cci_rc = cci_get_data (stats_req, 1, CCI_A_TYPE_DOUBLE, &num_rows_d, &ind_nr);
+  if (cci_rc < 0)
+    {
+      cci_close_req_handle (stats_req);
+      return;
+    }
+  cci_rc = cci_get_data (stats_req, 2, CCI_A_TYPE_DOUBLE, &blocks_d, &ind_bl);
+  if (cci_rc < 0)
+    {
+      cci_close_req_handle (stats_req);
+      return;
+    }
+
+  if (ind_nr >= 0 && std::isfinite (num_rows_d) && num_rows_d > 0.0)
+    {
+      if (num_rows_d >= (double) INT_MAX)
+	{
+	  dblink_table->remote_ncard = INT_MAX;
+	}
+      else
+	{
+	  dblink_table->remote_ncard = (int) (num_rows_d + 0.5);
+	}
+    }
+  if (ind_bl >= 0 && std::isfinite (blocks_d) && blocks_d > 0.0)
+    {
+      if (blocks_d >= (double) INT_MAX)
+	{
+	  dblink_table->remote_tcard = INT_MAX;
+	}
+      else
+	{
+	  dblink_table->remote_tcard = (int) (blocks_d + 0.5);
+	}
+    }
+
+  cci_close_req_handle (stats_req);
+}
+
 /* Best-effort remote table row/page estimates for DBLink optimizer input. */
 static void
 dblink_try_fetch_remote_stats (PT_NODE * dblink, int conn, T_CCI_COL_INFO * col_info, int col_cnt)
@@ -5485,7 +5640,7 @@ dblink_try_fetch_remote_stats (PT_NODE * dblink, int conn, T_CCI_COL_INFO * col_
 	  }
 	memset (&stats_err, 0, sizeof (stats_err));
 	cci_rc =
-	  cci_get_class_num_objs (conn, (char *) class_name, 1 /* approximation */, &num_objs, &num_pages, &stats_err);
+	  cci_get_class_num_objs (conn, (char *) class_name, 1 /* approximation */ , &num_objs, &num_pages, &stats_err);
 	if (cci_rc == CCI_ER_NO_ERROR && num_objs > 0)
 	  {
 	    dblink_table->remote_ncard = num_objs;
@@ -5497,6 +5652,13 @@ dblink_try_fetch_remote_stats (PT_NODE * dblink, int conn, T_CCI_COL_INFO * col_
       }
       break;
     case CAS_CGW_DBMS_ORACLE:
+      {
+	const char *class_name =
+	  dblink_stats_resolve_class_name ((const char *) dblink_table->remote_table_name, col_info, col_cnt);
+
+	dblink_try_fetch_remote_stats_oracle (dblink_table, conn, class_name);
+      }
+      break;
     case CAS_CGW_DBMS_MYSQL:
     case CAS_CGW_DBMS_MARIADB:
       break;
