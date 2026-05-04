@@ -3390,6 +3390,9 @@ typedef struct pt_dblink_info
 
   void *remote_col_list;	/* remote table's column list */
 
+  int remote_ncard;		/* remote row count estimate; <= 0 => optimizer NCARD fallback */
+  int remote_tcard;		/* remote page count estimate; <= 0 => optimizer TCARD fallback */
+
 } PT_DBLINK_INFO;
 
 typedef struct pt_create_server_info

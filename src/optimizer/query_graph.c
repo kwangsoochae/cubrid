@@ -1327,8 +1327,28 @@ qo_add_node (PT_NODE * entity, QO_ENV * env)
 		}
 	      break;
 	    case PT_DBLINK_TABLE:
-	      QO_NODE_NCARD (node) = 1000;	/* just guess for dblink */
-	      QO_NODE_TCARD (node) = 100;	/* just guess for dblink */
+	      {
+		PT_DBLINK_INFO *di = &entity->info.spec.derived_table->info.dblink_table;
+
+		if (di->remote_ncard > 0)
+		  {
+		    QO_NODE_NCARD (node) = (unsigned long) di->remote_ncard;
+		    if (di->remote_tcard > 0)
+		      {
+			QO_NODE_TCARD (node) = (unsigned long) di->remote_tcard;
+		      }
+		    else
+		      {
+			QO_NODE_TCARD (node) = 100;
+		      }
+		  }
+		else
+		  {
+		    QO_NODE_NCARD (node) = 1000;
+		    QO_NODE_TCARD (node) = 100;
+		  }
+	      }
+	      break;
 
 	    default:
 	      break;

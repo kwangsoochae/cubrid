@@ -25,6 +25,7 @@
 #include "config.h"
 
 #include <assert.h>
+#include <string.h>
 #include <unordered_map>
 
 #include "authenticate.h"
@@ -57,7 +58,8 @@
 #define DBDEF_HEADER_
 #endif
 
-#include <cas_cci.h>
+#include "cas_cci.h"
+#include "broker_cas_protocol.h"
 
 extern "C"
 {
@@ -5416,6 +5418,93 @@ error_exit:
 #define MAX_LEN_CONNECTION_URL	512
 #define SQL_MAX_TEXT_LEN DB_MAX_IDENTIFIER_LENGTH * 2 + 16
 
+static const char *
+dblink_stats_resolve_class_name (const char *remote_table_name, T_CCI_COL_INFO * col_info, int col_cnt)
+{
+  const char *single = NULL;
+  int i;
+
+  if (remote_table_name != NULL && remote_table_name[0] != '\0')
+    {
+      return remote_table_name;
+    }
+  if (col_info == NULL || col_cnt <= 0)
+    {
+      return NULL;
+    }
+  for (i = 0; i < col_cnt; i++)
+    {
+      char *cn = col_info[i].class_name;
+
+      if (cn == NULL || cn[0] == '\0')
+	{
+	  continue;
+	}
+      if (single == NULL)
+	{
+	  single = cn;
+	}
+      else if (strcmp (single, cn) != 0)
+	{
+	  return NULL;
+	}
+    }
+  return single;
+}
+
+/* Best-effort remote table row/page estimates for DBLink optimizer input. */
+static void
+dblink_try_fetch_remote_stats (PT_NODE * dblink, int conn, T_CCI_COL_INFO * col_info, int col_cnt)
+{
+  PT_DBLINK_INFO *dblink_table = &dblink->info.dblink_table;
+  T_CCI_ERROR stats_err;
+  int cci_rc;
+  int num_objs = 0;
+  int num_pages = 0;
+  int dbms_type;
+
+  dblink_table->remote_ncard = 0;
+  dblink_table->remote_tcard = 0;
+
+  dbms_type = cci_get_dbms_type (conn);
+  if (dbms_type < 0)
+    {
+      return;
+    }
+
+  switch (dbms_type)
+    {
+    case CAS_DBMS_CUBRID:
+    case CAS_PROXY_DBMS_CUBRID:
+      {
+	const char *class_name =
+	  dblink_stats_resolve_class_name ((const char *) dblink_table->remote_table_name, col_info, col_cnt);
+	if (class_name == NULL)
+	  {
+	    break;
+	  }
+	memset (&stats_err, 0, sizeof (stats_err));
+	cci_rc =
+	  cci_get_class_num_objs (conn, (char *) class_name, 1 /* approximation */, &num_objs, &num_pages, &stats_err);
+	if (cci_rc == CCI_ER_NO_ERROR && num_objs > 0)
+	  {
+	    dblink_table->remote_ncard = num_objs;
+	    if (num_pages > 0)
+	      {
+		dblink_table->remote_tcard = num_pages;
+	      }
+	  }
+      }
+      break;
+    case CAS_CGW_DBMS_ORACLE:
+    case CAS_CGW_DBMS_MYSQL:
+    case CAS_CGW_DBMS_MARIADB:
+      break;
+    default:
+      break;
+    }
+}
+
 static int
 pt_dblink_table_get_column_defs (PARSER_CONTEXT * parser, PT_NODE * dblink, S_REMOTE_TBL_COLS * rmt_tbl_cols)
 {
@@ -5511,6 +5600,8 @@ pt_dblink_table_get_column_defs (PARSER_CONTEXT * parser, PT_NODE * dblink, S_RE
       rmt_attr->precision = col_info[i].precision;
       rmt_attr->charset = col_info[i].charset;
     }
+
+  dblink_try_fetch_remote_stats (dblink, conn, col_info, col_cnt);
 
   err = NO_ERROR;
 
