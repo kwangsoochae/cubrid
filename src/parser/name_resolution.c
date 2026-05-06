@@ -5494,8 +5494,7 @@ dblink_stats_quote_literal (char *dest, size_t dest_len, const char *src)
 /* Split "qualifier.table" from class_name into separate null-terminated buffers.
    Returns NO_ERROR on success, ER_FAILED if class_name is NULL, has no qualifier, or table part is empty. */
 static int
-dblink_stats_split_class_name (const char *class_name, char *qualifier, int qualifier_size, char *table,
-			       int table_size)
+dblink_stats_split_class_name (const char *class_name, char *qualifier, int qualifier_size, char *table, int table_size)
 {
   const char *table_src;
 
@@ -5595,7 +5594,8 @@ dblink_try_fetch_remote_stats_oracle (PT_DBLINK_INFO * dblink_table, int conn, c
   int ind_nr = -1;
   int ind_bl = -1;
 
-  if (dblink_stats_split_class_name (class_name, owner, SM_MAX_USER_LENGTH, table, DB_MAX_IDENTIFIER_LENGTH) != NO_ERROR)
+  if (dblink_stats_split_class_name (class_name, owner, SM_MAX_USER_LENGTH, table, DB_MAX_IDENTIFIER_LENGTH) !=
+      NO_ERROR)
     {
       return;
     }
@@ -5622,7 +5622,8 @@ dblink_try_fetch_remote_stats_oracle (PT_DBLINK_INFO * dblink_table, int conn, c
 
 /* MySQL/MariaDB information_schema.TABLES — TABLE_ROWS, DATA_LENGTH (best-effort). */
 static void
-dblink_try_fetch_remote_stats_mysql (PT_DBLINK_INFO * dblink_table, int conn, const char *class_name)
+dblink_try_fetch_remote_stats_mysql (PT_DBLINK_INFO * dblink_table, int conn, const char *class_name,
+				     T_CCI_COL_INFO * col_info, int col_cnt)
 {
   char schema[SM_MAX_USER_LENGTH];
   char table[DB_MAX_IDENTIFIER_LENGTH];
@@ -5634,9 +5635,16 @@ dblink_try_fetch_remote_stats_mysql (PT_DBLINK_INFO * dblink_table, int conn, co
   int ind_tr = -1;
   int ind_dl = -1;
 
-  if (dblink_stats_split_class_name (class_name, schema, SM_MAX_USER_LENGTH, table, DB_MAX_IDENTIFIER_LENGTH) != NO_ERROR)
+  if (dblink_stats_split_class_name (class_name, schema, SM_MAX_USER_LENGTH, table, DB_MAX_IDENTIFIER_LENGTH) !=
+      NO_ERROR)
     {
-      return;
+      /* schema-less input: try to infer schema.table from col_info (single-class result set). */
+      class_name = dblink_stats_resolve_class_name (NULL, col_info, col_cnt);
+      if (dblink_stats_split_class_name (class_name, schema, SM_MAX_USER_LENGTH, table, DB_MAX_IDENTIFIER_LENGTH) !=
+	  NO_ERROR)
+	{
+	  return;
+	}
     }
   if (dblink_stats_quote_literal (schema_lit, sizeof (schema_lit), schema) != NO_ERROR
       || dblink_stats_quote_literal (table_lit, sizeof (table_lit), table) != NO_ERROR)
@@ -5645,8 +5653,7 @@ dblink_try_fetch_remote_stats_mysql (PT_DBLINK_INFO * dblink_table, int conn, co
     }
   snprintf (sql_buf, sizeof (sql_buf),
 	    "/* DBLINK SELECT */ SELECT TABLE_ROWS, DATA_LENGTH FROM information_schema.TABLES "
-	    "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s",
-	    schema_lit, table_lit);
+	    "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s", schema_lit, table_lit);
 
   if (dblink_stats_execute_query (conn, sql_buf, &table_rows_d, &ind_tr, &data_length_d, &ind_dl) != NO_ERROR)
     {
@@ -5720,7 +5727,7 @@ dblink_try_fetch_remote_stats (PT_NODE * dblink, int conn, T_CCI_COL_INFO * col_
 	const char *class_name =
 	  dblink_stats_resolve_class_name ((const char *) dblink_table->remote_table_name, col_info, col_cnt);
 
-	dblink_try_fetch_remote_stats_mysql (dblink_table, conn, class_name);
+	dblink_try_fetch_remote_stats_mysql (dblink_table, conn, class_name, col_info, col_cnt);
       }
       break;
     default:
