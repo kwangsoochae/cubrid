@@ -49,6 +49,7 @@
 #include "schema_system_catalog_constants.h"
 #include "execute_statement.h"
 #include "show_meta.h"
+#include "storage_common.h"
 #include "network_interface_cl.h"
 #include "locator_cl.h"
 #include "db_json.hpp"
@@ -5453,9 +5454,9 @@ dblink_stats_resolve_class_name (const char *remote_table_name, T_CCI_COL_INFO *
   return single;
 }
 
-/* Build 'literal' with doubled single-quotes for Oracle. */
+/* Build 'literal' with doubled single-quotes for SQL literal injection. */
 static int
-dblink_oracle_quote_literal (char *dest, size_t dest_len, const char *src)
+dblink_stats_quote_literal (char *dest, size_t dest_len, const char *src)
 {
   size_t need = 3;
   const char *p;
@@ -5524,11 +5525,11 @@ dblink_try_fetch_remote_stats_oracle (PT_DBLINK_INFO * dblink_table, int conn, c
     }
   strncpy (table, table_src, DB_MAX_IDENTIFIER_LENGTH - 1);
   table[DB_MAX_IDENTIFIER_LENGTH - 1] = '\0';
-  if (dblink_oracle_quote_literal (owner_lit, sizeof (owner_lit), owner) != NO_ERROR)
+  if (dblink_stats_quote_literal (owner_lit, sizeof (owner_lit), owner) != NO_ERROR)
     {
       return;
     }
-  if (dblink_oracle_quote_literal (table_lit, sizeof (table_lit), table) != NO_ERROR)
+  if (dblink_stats_quote_literal (table_lit, sizeof (table_lit), table) != NO_ERROR)
     {
       return;
     }
@@ -5607,6 +5608,133 @@ dblink_try_fetch_remote_stats_oracle (PT_DBLINK_INFO * dblink_table, int conn, c
   cci_close_req_handle (stats_req);
 }
 
+/* MySQL/MariaDB information_schema.TABLES — TABLE_ROWS, DATA_LENGTH (best-effort). */
+static void
+dblink_try_fetch_remote_stats_mysql (PT_DBLINK_INFO * dblink_table, int conn, const char *class_name)
+{
+  char schema[SM_MAX_USER_LENGTH];
+  char table[DB_MAX_IDENTIFIER_LENGTH];
+  char schema_lit[DB_MAX_IDENTIFIER_LENGTH * 2 + 4];
+  char table_lit[DB_MAX_IDENTIFIER_LENGTH * 2 + 4];
+  char sql_buf[512 + DB_MAX_IDENTIFIER_LENGTH * 8];
+  int stats_req = -1;
+  T_CCI_ERROR stats_err;
+  int cci_rc;
+  double table_rows_d = 0.0;
+  double data_length_d = 0.0;
+  int ind_tr = -1;
+  int ind_dl = -1;
+  const char *table_src;
+
+  if (class_name == NULL)
+    {
+      return;
+    }
+
+  /* information_schema.TABLES requires TABLE_SCHEMA; skip stats if class_name has no qualifier. */
+  if (sm_qualifier_name (class_name, schema, SM_MAX_USER_LENGTH) == NULL)
+    {
+      return;
+    }
+
+  table_src = sm_remove_qualifier_name (class_name);
+  if (table_src == NULL || table_src[0] == '\0')
+    {
+      return;
+    }
+  strncpy (table, table_src, DB_MAX_IDENTIFIER_LENGTH - 1);
+  table[DB_MAX_IDENTIFIER_LENGTH - 1] = '\0';
+  if (dblink_stats_quote_literal (schema_lit, sizeof (schema_lit), schema) != NO_ERROR)
+    {
+      return;
+    }
+  if (dblink_stats_quote_literal (table_lit, sizeof (table_lit), table) != NO_ERROR)
+    {
+      return;
+    }
+  snprintf (sql_buf, sizeof (sql_buf),
+	    "/* DBLINK SELECT */ SELECT TABLE_ROWS, DATA_LENGTH FROM information_schema.TABLES WHERE TABLE_SCHEMA = %s "
+	    "AND TABLE_NAME = %s",
+	    schema_lit, table_lit);
+
+  memset (&stats_err, 0, sizeof (stats_err));
+  stats_req = cci_prepare (conn, sql_buf, 0, &stats_err);
+  if (stats_req < 0)
+    {
+      return;
+    }
+
+  memset (&stats_err, 0, sizeof (stats_err));
+  cci_rc = cci_execute (stats_req, 0, 0, &stats_err);
+  if (cci_rc < 0)
+    {
+      cci_close_req_handle (stats_req);
+      return;
+    }
+
+  memset (&stats_err, 0, sizeof (stats_err));
+  cci_rc = cci_cursor (stats_req, 1, CCI_CURSOR_FIRST, &stats_err);
+  if (cci_rc < 0)
+    {
+      cci_close_req_handle (stats_req);
+      return;
+    }
+
+  memset (&stats_err, 0, sizeof (stats_err));
+  cci_rc = cci_fetch (stats_req, &stats_err);
+  if (cci_rc < 0)
+    {
+      cci_close_req_handle (stats_req);
+      return;
+    }
+
+  cci_rc = cci_get_data (stats_req, 1, CCI_A_TYPE_DOUBLE, &table_rows_d, &ind_tr);
+  if (cci_rc < 0)
+    {
+      cci_close_req_handle (stats_req);
+      return;
+    }
+  cci_rc = cci_get_data (stats_req, 2, CCI_A_TYPE_DOUBLE, &data_length_d, &ind_dl);
+  if (cci_rc < 0)
+    {
+      cci_close_req_handle (stats_req);
+      return;
+    }
+
+  if (ind_tr >= 0 && std::isfinite (table_rows_d) && table_rows_d > 0.0)
+    {
+      if (table_rows_d >= (double) INT_MAX)
+	{
+	  dblink_table->remote_ncard = INT_MAX;
+	}
+      else
+	{
+	  dblink_table->remote_ncard = (int) (table_rows_d + 0.5);
+	}
+    }
+  if (ind_dl >= 0 && std::isfinite (data_length_d) && data_length_d > 0.0)
+    {
+      double pages_d = data_length_d / (double) IO_DEFAULT_PAGE_SIZE;
+      int pages_i;
+
+      if (pages_d <= 0.0)
+	{
+	  dblink_table->remote_tcard = 1;
+	}
+      else if (pages_d >= (double) INT_MAX)
+	{
+	  dblink_table->remote_tcard = INT_MAX;
+	}
+      else
+	{
+	  pages_i = (int) (pages_d + 0.5);
+	  dblink_table->remote_tcard = (pages_i < 1) ? 1 : pages_i;
+	}
+    }
+
+  cci_close_req_handle (stats_req);
+}
+
 /* Best-effort remote table row/page estimates for DBLink optimizer input. */
 static void
 dblink_try_fetch_remote_stats (PT_NODE * dblink, int conn, T_CCI_COL_INFO * col_info, int col_cnt)
@@ -5661,6 +5789,12 @@ dblink_try_fetch_remote_stats (PT_NODE * dblink, int conn, T_CCI_COL_INFO * col_
       break;
     case CAS_CGW_DBMS_MYSQL:
     case CAS_CGW_DBMS_MARIADB:
+      {
+	const char *class_name =
+	  dblink_stats_resolve_class_name ((const char *) dblink_table->remote_table_name, col_info, col_cnt);
+
+	dblink_try_fetch_remote_stats_mysql (dblink_table, conn, class_name);
+      }
       break;
     default:
       break;
