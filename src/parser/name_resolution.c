@@ -25,7 +25,7 @@
 #include "config.h"
 
 #include <assert.h>
-#include <cmath>
+#include <math.h>
 #include <string.h>
 #include <unordered_map>
 
@@ -5575,7 +5575,7 @@ dblink_stats_execute_query (int conn, const char *sql, double *col1_d, int *col1
 static void
 dblink_stats_set_ncard (PT_DBLINK_INFO * dblink_table, double val, int ind)
 {
-  if (ind >= 0 && std::isfinite (val) && val > 0.0)
+  if (ind >= 0 && FINITE (val) && val > 0.0)
     {
       dblink_table->remote_ncard = (val >= (double) INT_MAX) ? INT_MAX : (int) (val + 0.5);
     }
@@ -5614,7 +5614,7 @@ dblink_try_fetch_remote_stats_oracle (PT_DBLINK_INFO * dblink_table, int conn, c
     }
 
   dblink_stats_set_ncard (dblink_table, num_rows_d, ind_nr);
-  if (ind_bl >= 0 && std::isfinite (blocks_d) && blocks_d > 0.0)
+  if (ind_bl >= 0 && FINITE (blocks_d) && blocks_d > 0.0)
     {
       dblink_table->remote_tcard = (blocks_d >= (double) INT_MAX) ? INT_MAX : (int) (blocks_d + 0.5);
     }
@@ -5661,7 +5661,7 @@ dblink_try_fetch_remote_stats_mysql (PT_DBLINK_INFO * dblink_table, int conn, co
     }
 
   dblink_stats_set_ncard (dblink_table, table_rows_d, ind_tr);
-  if (ind_dl >= 0 && std::isfinite (data_length_d) && data_length_d > 0.0)
+  if (ind_dl >= 0 && FINITE (data_length_d) && data_length_d > 0.0)
     {
       double pages_d = data_length_d / (double) IO_DEFAULT_PAGE_SIZE;
       int pages_i = (pages_d >= (double) INT_MAX) ? INT_MAX : (int) (pages_d + 0.5);
