@@ -5586,6 +5586,8 @@ dblink_try_fetch_remote_stats_oracle (PT_DBLINK_INFO * dblink_table, int conn, c
 {
   char owner[SM_MAX_USER_LENGTH];
   char table[DB_MAX_IDENTIFIER_LENGTH];
+  char owner_upper[SM_MAX_USER_LENGTH];
+  char table_upper[DB_MAX_IDENTIFIER_LENGTH];
   char owner_lit[DB_MAX_IDENTIFIER_LENGTH * 2 + 4];
   char table_lit[DB_MAX_IDENTIFIER_LENGTH * 2 + 4];
   char sql_buf[512 + DB_MAX_IDENTIFIER_LENGTH * 8];
@@ -5599,8 +5601,12 @@ dblink_try_fetch_remote_stats_oracle (PT_DBLINK_INFO * dblink_table, int conn, c
     {
       return;
     }
-  if (dblink_stats_quote_literal (owner_lit, sizeof (owner_lit), owner) != NO_ERROR
-      || dblink_stats_quote_literal (table_lit, sizeof (table_lit), table) != NO_ERROR)
+  /* Oracle data dictionary stores unquoted identifiers in uppercase (Oracle SQL Language Reference,
+   * "Schema Object Naming Rules"). Normalize before querying ALL_TABLES. */
+  intl_identifier_upper (owner, owner_upper);
+  intl_identifier_upper (table, table_upper);
+  if (dblink_stats_quote_literal (owner_lit, sizeof (owner_lit), owner_upper) != NO_ERROR
+      || dblink_stats_quote_literal (table_lit, sizeof (table_lit), table_upper) != NO_ERROR)
     {
       return;
     }
