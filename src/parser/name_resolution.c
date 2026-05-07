@@ -403,7 +403,7 @@ public:
 static int pt_remake_dblink_select_list (PARSER_CONTEXT * parser, PT_SPEC_INFO * class_spec,
 					 S_REMOTE_TBL_COLS * rmt_cols);
 static int pt_dblink_table_get_column_defs (PARSER_CONTEXT * parser, PT_NODE * dblink,
-					    S_REMOTE_TBL_COLS * rmt_tbl_cols);
+					    S_REMOTE_TBL_COLS * rmt_tbl_cols, bool is_join);
 
 static PT_NODE *pt_parameterize_for_static_sql (PARSER_CONTEXT * parser, PT_NODE * node);
 
@@ -1264,7 +1264,8 @@ pt_bind_scope (PARSER_CONTEXT * parser, PT_BIND_NAMES_ARG * bind_arg)
 		  return;
 		}
 
-	      err = pt_dblink_table_get_column_defs (parser, table, rmt_tbl_cols);
+	      bool is_join = (prev_spec != NULL || spec->next != NULL);
+	      err = pt_dblink_table_get_column_defs (parser, table, rmt_tbl_cols, is_join);
 
 	      if (table->info.dblink_table.remote_table_name && *table->info.dblink_table.remote_table_name)
 		{
@@ -5742,7 +5743,8 @@ dblink_try_fetch_remote_stats (PT_NODE * dblink, int conn, T_CCI_COL_INFO * col_
 }
 
 static int
-pt_dblink_table_get_column_defs (PARSER_CONTEXT * parser, PT_NODE * dblink, S_REMOTE_TBL_COLS * rmt_tbl_cols)
+pt_dblink_table_get_column_defs (PARSER_CONTEXT * parser, PT_NODE * dblink, S_REMOTE_TBL_COLS * rmt_tbl_cols,
+				 bool is_join)
 {
   int req = -1, conn = -1, col_cnt, err = ER_DBLINK, i;
   T_CCI_ERROR cci_error;
@@ -5837,7 +5839,10 @@ pt_dblink_table_get_column_defs (PARSER_CONTEXT * parser, PT_NODE * dblink, S_RE
       rmt_attr->charset = col_info[i].charset;
     }
 
-  dblink_try_fetch_remote_stats (dblink, conn, col_info, col_cnt);
+  if (is_join)
+    {
+      dblink_try_fetch_remote_stats (dblink, conn, col_info, col_cnt);
+    }
 
   err = NO_ERROR;
 
