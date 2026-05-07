@@ -94,6 +94,7 @@ struct pt_bind_names_arg
   SCOPES *scopes;
   PT_EXTRA_SPECS_FRAME *spec_frames;
   SEMANTIC_CHK_INFO *sc_info;
+  bool dblink_in_join_context;
 };
 
 typedef struct natural_join_attr_info NATURAL_JOIN_ATTR_INFO;
@@ -1264,7 +1265,7 @@ pt_bind_scope (PARSER_CONTEXT * parser, PT_BIND_NAMES_ARG * bind_arg)
 		  return;
 		}
 
-	      bool is_join = (prev_spec != NULL || spec->next != NULL);
+	      bool is_join = bind_arg->dblink_in_join_context || prev_spec != NULL || spec->next != NULL;
 	      err = pt_dblink_table_get_column_defs (parser, table, rmt_tbl_cols, is_join);
 
 	      if (table->info.dblink_table.remote_table_name && *table->info.dblink_table.remote_table_name)
@@ -1314,7 +1315,11 @@ pt_bind_scope (PARSER_CONTEXT * parser, PT_BIND_NAMES_ARG * bind_arg)
 	    }
 	  else
 	    {
+	      bool save_dblink_in_join_context = bind_arg->dblink_in_join_context;
+	      bind_arg->dblink_in_join_context =
+		bind_arg->dblink_in_join_context || prev_spec != NULL || spec->next != NULL;
 	      table = parser_walk_tree (parser, table, pt_bind_names, bind_arg, pt_bind_names_post, bind_arg);
+	      bind_arg->dblink_in_join_context = save_dblink_in_join_context;
 	    }
 	  spec->info.spec.derived_table = table;
 
@@ -1993,6 +1998,7 @@ pt_bind_names (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int *continue
   PT_NODE *result = NULL;
   short i, k, lhs_location, rhs_location, level;
   PT_JOIN_TYPE join_type;
+  bool save_dblink_in_join_context;
   void *save_etc = NULL;
   PT_NODE *method_name_node = NULL;
   const char *method_name;
@@ -2022,7 +2028,10 @@ pt_bind_names (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int *continue
       /* break links to current scopes to bind_names in the WITH_CLAUSE */
       bind_arg->scopes = NULL;
       bind_arg->spec_frames = NULL;
+      save_dblink_in_join_context = bind_arg->dblink_in_join_context;
+      bind_arg->dblink_in_join_context = false;
       pt_bind_names_in_with_clause (parser, node, bind_arg);
+      bind_arg->dblink_in_join_context = save_dblink_in_join_context;
 
       /* restore links to current scopes */
       bind_arg->scopes = &scopestack;
@@ -2314,7 +2323,10 @@ pt_bind_names (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int *continue
 
       (void) pt_resolve_hint (parser, node);
 
+      save_dblink_in_join_context = bind_arg->dblink_in_join_context;
+      bind_arg->dblink_in_join_context = false;
       parser_walk_leaves (parser, node, pt_bind_names, bind_arg, pt_bind_names_post, bind_arg);
+      bind_arg->dblink_in_join_context = save_dblink_in_join_context;
 
       /* capture minimum correlation */
       if (!node->info.query.correlation_level)
@@ -8835,6 +8847,7 @@ pt_quick_resolve_names (PARSER_CONTEXT * parser, PT_NODE ** spec_p, PT_NODE ** n
   bind_arg.scopes = NULL;
   bind_arg.spec_frames = NULL;
   bind_arg.sc_info = sc_info;
+  bind_arg.dblink_in_join_context = false;
 
   scopestack.next = bind_arg.scopes;
   scopestack.specs = spec;
@@ -9687,6 +9700,7 @@ pt_resolve_names (PARSER_CONTEXT * parser, PT_NODE * statement, SEMANTIC_CHK_INF
   bind_arg.scopes = NULL;
   bind_arg.spec_frames = NULL;
   bind_arg.sc_info = sc_info;
+  bind_arg.dblink_in_join_context = false;
 
   assert (sc_info != NULL);
 
