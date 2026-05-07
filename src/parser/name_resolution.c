@@ -5761,11 +5761,6 @@ pt_dblink_table_get_column_defs (PARSER_CONTEXT * parser, PT_NODE * dblink, S_RE
 
   S_REMOTE_COL_ATTR *rmt_attr;
 
-  /* BENCH START — remove before commit */
-  struct timespec _t_fn_start = {0}, _t_fn_end = {0}, _t_stats_start = {0}, _t_stats_end = {0};
-  clock_gettime (CLOCK_MONOTONIC, &_t_fn_start);
-  /* BENCH END */
-
   server_name = (dblink_table->conn) ? (char *) dblink_table->conn->info.name.original : url;
 
   if (table_name)
@@ -5842,9 +5837,7 @@ pt_dblink_table_get_column_defs (PARSER_CONTEXT * parser, PT_NODE * dblink, S_RE
       rmt_attr->charset = col_info[i].charset;
     }
 
-  /* BENCH */ clock_gettime (CLOCK_MONOTONIC, &_t_stats_start);
   dblink_try_fetch_remote_stats (dblink, conn, col_info, col_cnt);
-  /* BENCH */ clock_gettime (CLOCK_MONOTONIC, &_t_stats_end);
 
   err = NO_ERROR;
 
@@ -5879,18 +5872,6 @@ set_parser_error:
     {
       cci_disconnect (conn, &cci_error);
     }
-
-  /* BENCH START — remove before commit */
-  clock_gettime (CLOCK_MONOTONIC, &_t_fn_end);
-  {
-    long _fn_us = (_t_fn_end.tv_sec - _t_fn_start.tv_sec) * 1000000L
-		+ (_t_fn_end.tv_nsec - _t_fn_start.tv_nsec) / 1000L;
-    long _stats_us = (_t_stats_end.tv_sec - _t_stats_start.tv_sec) * 1000000L
-		   + (_t_stats_end.tv_nsec - _t_stats_start.tv_nsec) / 1000L;
-    fprintf (stderr, "[BENCH] fn_total=%ldus  stats=%ldus  base=%ldus\n",
-	     _fn_us, _stats_us, _fn_us - _stats_us);
-  }
-  /* BENCH END */
 
   return err;
 }
