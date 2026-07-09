@@ -1571,6 +1571,122 @@ dblink_delete_open (THREAD_ENTRY * thread_p, const char *url, const char *user, 
 }
 
 /*
+ * dblink_delete_notin_open () - PR3 spike: connect to remote server and prepare a whole-set
+ *   "DELETE FROM <table> WHERE <key_col> NOT IN (?, ..., ?)" statement (num_vals placeholders).
+ *   return: NO_ERROR on success, error code on failure.
+ *
+ * Unlike dblink_delete_open's single ? (bound per-row, looped num_vals times -- an
+ * OR-accumulating per-row model), this builds ONE statement with num_vals placeholders so the
+ * whole local result set is bound and evaluated by the remote in a single execute. Looping the
+ * per-row model over NOT IN would delete rows it should keep (AND-across-the-set vs.
+ * OR-accumulating per-row, see 104_dblink_delete_local_subquery_unsupported_forms_walkthrough.md
+ * Section 1) -- a whole-set placeholder list is the only correct shape.
+ *
+ * A plain "NOT IN (?, ..., ?)" placeholder list is standard ANSI SQL, identical across
+ * CUBRID/MySQL/Oracle, so this single-column form needs no vendor branching or
+ * VALUES-derived-table (unlike the correlated/tuple/join forms in
+ * 105_dblink_delete_local_subquery_relation_shipping_future_work.md, which do). Once prepared,
+ * the existing dblink_insert_execute_row() below already binds an arbitrary num_vals and
+ * executes in one call -- no new execute-side code is needed to run this.
+ *
+ * num_vals must be > 0: an empty local result set makes NOT IN vacuously true for every remote
+ * row (delete everything), a distinct caller-level decision this function does not make (see
+ * 04-3_dblink_delete_local_subquery_Tasks_PR3.md T4-2 / T0-6 -- undecided).
+ *
+ * Not called by anything yet -- XASL generation still only routes is_remote_delete_local_subq
+ * (PR1's per-row shape) to a sink; is_remote_delete_ship_notin (parser_support.c) is
+ * classification-only until that wiring exists.
+ */
+int
+dblink_delete_notin_open (THREAD_ENTRY * thread_p, const char *url, const char *user, const char *pwd,
+			  const char *table_name, const char *key_col, int num_vals, DBLINK_INSERT_STATE * state)
+{
+  int ret, remaining, i;
+  T_CCI_ERROR err_buf;
+  char *sql = NULL, *p;
+  size_t sql_len;
+
+  state->conn_handle = -1;
+  state->stmt_handle = -1;
+
+  if (table_name == NULL || table_name[0] == '\0' || key_col == NULL || key_col[0] == '\0' || num_vals <= 0)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK, 1,
+	      "remote DELETE NOT IN: table/key is NULL or empty, or num_vals <= 0");
+      return ER_DBLINK;
+    }
+  if (url == NULL || user == NULL || pwd == NULL)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK, 1, "remote DELETE NOT IN: url/user/pwd is NULL");
+      return ER_DBLINK;
+    }
+
+  /* Acquire pooled remote connection: CCI_AUTOCOMMIT_FALSE + DML 2PC participant (same as the
+   * per-row DELETE/INSERT sinks) -- required so this statement commits/rolls back with the local
+   * transaction instead of the remote autocommitting it (00-1_dblink_delete_local_subquery_scope.md
+   * Section 4.1's "design essential (2PC)"). */
+  ret = dblink_acquire_pooled_conn (thread_p, url, user, pwd, CCI_AUTOCOMMIT_FALSE, true, "remote DELETE NOT IN",
+				    &state->conn_handle);
+  if (ret != NO_ERROR)
+    {
+      return ret;
+    }
+
+  /* build DELETE SQL: DELETE FROM <table> WHERE <key_col> NOT IN (?, ?, ..., ?)  (num_vals placeholders) */
+  sql_len = strlen (table_name) + strlen (key_col) + (size_t) num_vals *3 + 64;
+  sql = (char *) db_private_alloc (thread_p, sql_len);
+  if (sql == NULL)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, sql_len);
+      return ER_OUT_OF_VIRTUAL_MEMORY;
+    }
+
+  remaining = (int) sql_len;
+  ret = snprintf (sql, remaining, "/* DBLINK DELETE NOT IN (PR3 spike) */ DELETE FROM %s WHERE %s NOT IN (",
+		  table_name, key_col);
+  if (ret < 0 || ret >= remaining)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK, 1, "remote DELETE NOT IN: SQL assembly truncated");
+      db_private_free (thread_p, sql);
+      return ER_DBLINK;
+    }
+  p = sql + ret;
+  remaining -= ret;
+
+  for (i = 0; i < num_vals; i++)
+    {
+      ret = snprintf (p, remaining, "?%s", (i < num_vals - 1) ? ", " : "");
+      if (ret < 0 || ret >= remaining)
+	{
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK, 1, "remote DELETE NOT IN: SQL assembly truncated");
+	  db_private_free (thread_p, sql);
+	  return ER_DBLINK;
+	}
+      p += ret;
+      remaining -= ret;
+    }
+
+  ret = snprintf (p, remaining, ")");
+  if (ret < 0 || ret >= remaining)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK, 1, "remote DELETE NOT IN: SQL assembly truncated");
+      db_private_free (thread_p, sql);
+      return ER_DBLINK;
+    }
+
+  state->stmt_handle = cci_prepare (state->conn_handle, sql, 0, &err_buf);
+  db_private_free (thread_p, sql);
+
+  if (state->stmt_handle < 0)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK, 1, err_buf.err_msg);
+      return ER_DBLINK;
+    }
+
+  return NO_ERROR;
+}
+
+/*
  * dblink_insert_execute_row () - Bind values and execute one remote INSERT or DELETE row.
  *   return: NO_ERROR on success, error code on failure.
  *   thread_p(in)      : thread entry
