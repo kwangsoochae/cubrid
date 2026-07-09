@@ -43,6 +43,7 @@
 #include "db_date.h"
 #include "tz_support.h"
 #include <cas_cci.h>
+#include <broker_cas_protocol.h>	/* CAS_*_DBMS_* values returned by cci_get_dbms_type (PR3 spike) */
 
 #include <db_json.hpp>
 
@@ -604,6 +605,46 @@ dblink_end_tran (DBLINK_CONN_ENTRY * dblink, bool is_abort)
   return (tran_error == NO_ERROR) ? rc : tran_error;
 }
 
+/* PR3 spike (temp branch CBRD-26921_dblink_delete_local_subquery_PR3_shipping_spike): normalized
+ * remote DBMS kind, folding the native / shard-proxy / CGW variants of each DBMS together the same
+ * way CBRD-26601 did before its consumer (binary-force on pushed correlated keys) was removed
+ * (843ef6473 / 416531c6a -- see 01-3_dblink_delete_local_subquery_Source_Analysis_PR3.md Section
+ * 1-2). Detected once per freshly opened connection, not on pooled reuse, so it costs nothing per
+ * row/re-execution. Not consumed anywhere yet -- Step 3 (SQL rewriting) would branch remote SQL
+ * generation on this. */
+typedef enum
+{
+  DBLINK_DBMS_UNKNOWN = 0,
+  DBLINK_DBMS_CUBRID,
+  DBLINK_DBMS_MYSQL,
+  DBLINK_DBMS_ORACLE
+} DBLINK_DBMS_KIND;
+
+static DBLINK_DBMS_KIND
+dblink_detect_dbms_kind (int conn_handle)
+{
+  switch (cci_get_dbms_type (conn_handle))
+    {
+    case CAS_DBMS_CUBRID:
+    case CAS_PROXY_DBMS_CUBRID:
+      return DBLINK_DBMS_CUBRID;
+
+    case CAS_DBMS_MYSQL:
+    case CAS_PROXY_DBMS_MYSQL:
+    case CAS_CGW_DBMS_MYSQL:
+    case CAS_CGW_DBMS_MARIADB:
+      return DBLINK_DBMS_MYSQL;
+
+    case CAS_DBMS_ORACLE:
+    case CAS_PROXY_DBMS_ORACLE:
+    case CAS_CGW_DBMS_ORACLE:
+      return DBLINK_DBMS_ORACLE;
+
+    default:
+      return DBLINK_DBMS_UNKNOWN;
+    }
+}
+
 /*
  * dblink_acquire_pooled_conn () - shared helper: build the gateway connection URL, reuse a pooled
  *   remote connection within the local transaction (non-autocommit) or open a fresh one, and set
@@ -669,6 +710,10 @@ dblink_acquire_pooled_conn (THREAD_ENTRY * thread_p, const char *url, const char
 	  (void) cci_disconnect (conn_handle, &err_buf);
 	  return ER_DBLINK;
 	}
+
+      /* PR3 spike: detect once per freshly opened connection; not consumed by anything yet. */
+      er_log_debug (ARG_FILE_LINE, "dblink PR3 spike: %s detected remote DBMS kind %d", errctx,
+		    (int) dblink_detect_dbms_kind (conn_handle));
 
       if (autocommit_mode == CCI_AUTOCOMMIT_FALSE)
 	{
