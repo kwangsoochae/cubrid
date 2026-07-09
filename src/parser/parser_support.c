@@ -11893,8 +11893,8 @@ pt_dblink_delete_where_is_inscope (PT_NODE * node)
   return true;
 }
 
-/* PR3 spike (temp branch CBRD-26921_dblink_delete_local_subquery_PR3_shipping_spike): true iff the
- * DELETE WHERE clause is a single predicate col NOT IN (subquery) or col <> ALL (subquery) -- the
+/* PR3 spike (temp branch spike_dblink_delete_local_subquery_PR3_shipping): true iff the DELETE
+ * WHERE clause is a single predicate col NOT IN (subquery) or col <> ALL (subquery) -- the
  * simplest of the local-relation shipping forms (00-1_dblink_delete_local_subquery_scope.md Section
  * 3.1 calls this out as PR3's first brick, since per-row value-push cannot express it: NOT IN is an
  * AND of inequalities, while per-row is an OR-accumulating loop, see
@@ -11902,9 +11902,10 @@ pt_dblink_delete_where_is_inscope (PT_NODE * node)
  *
  * Mirrors pt_dblink_delete_where_is_inscope's shape-only contract: local vs. remote subquery
  * membership is refined afterward in pt_convert_dblink_dml_query (see
- * SERVER_NAME_LIST.is_remote_delete_ship_notin in parse_tree.h), not decided here. The flag this sets
- * is classification-only -- it is deliberately not added to the "local mixed remote DML" bypass, so
- * behavior is unchanged (still rejected) until a shipping sink exists. */
+ * SERVER_NAME_LIST.is_remote_delete_ship_notin in parse_tree.h), not decided here. The refined flag
+ * routes to the whole-set NOT IN sink (qexec_execute_remote_delete_notin, query_executor.c) instead
+ * of the per-row sink -- see is_remote_delete_ship_notin's comment in xasl.h for why looping the
+ * per-row sink over NOT IN would be wrong. */
 static bool
 pt_dblink_delete_where_is_ship_notin (PT_NODE * node)
 {
@@ -12238,26 +12239,18 @@ pt_convert_dblink_dml_query (PARSER_CONTEXT * parser, PT_NODE * node,
 	}
     }
 
-  /* PR3 spike: refined the same way as is_remote_delete_local_subq above, but deliberately NOT added
-   * to the "local mixed remote DML" bypass below -- classification-only until a shipping sink exists
-   * (see the flag's comment in parse_tree.h). The debug log lets this be observed without changing
-   * behavior. */
+  /* PR3 spike: refined the same way as is_remote_delete_local_subq above -- kept only when the
+   * WHERE subquery is purely local, otherwise cleared so the existing guards below apply. */
   if (snl->is_remote_delete_ship_notin)
     {
       if (!(snl->local_cnt > 0 && snl->server_node_cnt == 1 && !snl->has_dblink_query))
 	{
 	  snl->is_remote_delete_ship_notin = false;
 	}
-
-      if (snl->is_remote_delete_ship_notin)
-	{
-	  er_log_debug (ARG_FILE_LINE,
-			"dblink PR3 spike: DELETE WHERE is a pure-local NOT IN / <> ALL shape "
-			"(not yet routed to a sink)");
-	}
     }
 
-  if (snl->local_cnt > 0 && remote_upd > 0 && !snl->is_remote_insert_select && !snl->is_remote_delete_local_subq)
+  if (snl->local_cnt > 0 && remote_upd > 0 && !snl->is_remote_insert_select && !snl->is_remote_delete_local_subq
+      && !snl->is_remote_delete_ship_notin)
     {
       PT_ERROR (parser, upd_spec ? upd_spec : into_spec, "dblink: local mixed remote DML is not allowed");
       return;
@@ -12285,6 +12278,55 @@ pt_convert_dblink_dml_query (PARSER_CONTEXT * parser, PT_NODE * node,
    * DML text serialization (qstr stays NULL) and preserve the WHERE subquery (delete_.search_cond) for XASL
    * generation; the runtime evaluates the subquery locally and pushes per-row DELETEs via CCI bind. */
   if (snl->is_remote_delete_local_subq)
+    {
+      node->flag.cannot_prepare = 0;
+
+      PT_NODE *ct = parser_new_node (parser, PT_DBLINK_TABLE_DML);
+      if (!ct)
+	{
+	  PT_ERRORmf (parser, ct, MSGCAT_SET_PARSER_RUNTIME, MSGCAT_RUNTIME_OUT_OF_MEMORY, sizeof (PT_NODE));
+	  return;
+	}
+
+      PT_NODE *server = upd_spec->info.spec.remote_server_name;
+      if (server == NULL)
+	{
+	  PT_ERRORm (parser, node, MSGCAT_SET_PARSER_SEMANTIC, MSGCAT_SEMANTIC_UPDATE_DERIVED_TABLE);
+	  return;
+	}
+      if (server->node_type == PT_DBLINK_TABLE_DML)
+	{
+	  return;		/* already converted */
+	}
+
+      ct->info.dblink_table.is_name = true;
+      ct->info.dblink_table.conn = server;
+      if (server->next)
+	{
+	  assert (server->next->node_type == PT_NAME);
+	  ct->info.dblink_table.owner_name = server->next;
+	  server->next = NULL;
+	}
+
+      for (i = 0; i < snl->server_node_cnt; i++)
+	{
+	  if (snl->server[i]->next)
+	    {
+	      parser_free_node (parser, snl->server[i]->next);
+	    }
+	  parser_free_node (parser, snl->server[i]);
+	}
+
+      upd_spec->info.spec.remote_server_name = ct;
+      pt_resolve_server_names (parser, upd_spec);
+      return;
+    }
+
+  /* PR3 spike: remote DELETE + pure-local NOT IN / <> ALL subquery -- same qstr==NULL carve-out as
+   * is_remote_delete_local_subq above (skip DML text serialization, preserve the WHERE subquery for
+   * XASL generation), but distinguished downstream by is_remote_delete_ship_notin (xasl.h) so the
+   * whole-set NOT IN sink runs instead of the per-row sink -- see that field's comment for why. */
+  if (snl->is_remote_delete_ship_notin)
     {
       node->flag.cannot_prepare = 0;
 

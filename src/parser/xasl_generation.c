@@ -19236,6 +19236,7 @@ pt_to_delete_xasl_remote_subquery (PARSER_CONTEXT * parser, PT_NODE * statement)
   const char *op_sql = NULL;
   const char *key_col = NULL;
   const OID *oid = NULL;
+  bool is_notin = false;	/* PR3 spike: whole-set NOT IN sink instead of the per-row sink below */
 
   assert (parser != NULL && statement != NULL);
 
@@ -19244,7 +19245,9 @@ pt_to_delete_xasl_remote_subquery (PARSER_CONTEXT * parser, PT_NODE * statement)
 
   assert (cond != NULL && cond->node_type == PT_EXPR);
 
-  /* operator -> remote WHERE SQL text (fixed safe set; IN / = ANY push per-row equality) */
+  /* operator -> remote WHERE SQL text (fixed safe set; IN / = ANY push per-row equality).
+   * NOT IN / <> ALL (PR3 spike) take no op_sql: the whole-set sink's SQL is fixed
+   * ("NOT IN (?, ..., ?)", dblink_delete_notin_open) rather than a per-row comparison. */
   switch (cond->info.expr.op)
     {
     case PT_IS_IN:
@@ -19263,6 +19266,10 @@ pt_to_delete_xasl_remote_subquery (PARSER_CONTEXT * parser, PT_NODE * statement)
       break;
     case PT_GE:
       op_sql = ">=";
+      break;
+    case PT_IS_NOT_IN:
+    case PT_NE_ALL:
+      is_notin = true;
       break;
     default:
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK, 1, "remote DELETE subquery: unexpected operator");
@@ -19338,11 +19345,11 @@ pt_to_delete_xasl_remote_subquery (PARSER_CONTEXT * parser, PT_NODE * statement)
   del->classes = NULL;
   del->num_classes = 0;
 
-  /* remote sink: connection info resolved by pt_resolve_server_names */
-  del->is_remote_delete = true;
-  /* PR3 spike: this builder only ever produces the per-row sink above; the whole-set NOT IN sink
-   * selector (see the field's comment in xasl.h) has no XASL generator wiring yet. */
-  del->is_remote_delete_ship_notin = false;
+  /* remote sink: connection info resolved by pt_resolve_server_names. PR3 spike: is_notin selects
+   * the whole-set NOT IN sink instead of the per-row sink -- see is_remote_delete_ship_notin's
+   * comment in xasl.h for why these are mutually exclusive, never-both-true modes. */
+  del->is_remote_delete = !is_notin;
+  del->is_remote_delete_ship_notin = is_notin;
   del->remote_url = (char *) pdblink->url->info.value.data_value.str->bytes;
   del->remote_user = (char *) pdblink->user->info.value.data_value.str->bytes;
   del->remote_pwd = (char *) pdblink->pwd->info.value.data_value.str->bytes;
@@ -19358,8 +19365,10 @@ pt_to_delete_xasl_remote_subquery (PARSER_CONTEXT * parser, PT_NODE * statement)
   del->remote_table_name = pt_append_string (parser, del->remote_table_name, entity_name->info.name.original);
 
   del->remote_key_col = pt_append_string (parser, NULL, key_col);
-  del->remote_op = pt_append_string (parser, NULL, op_sql);
-  if (del->remote_table_name == NULL || del->remote_key_col == NULL || del->remote_op == NULL || pt_has_error (parser))
+  /* PR3 spike: remote_op is unused in NOT IN mode (its operator is fixed, not pushed per-row) */
+  del->remote_op = is_notin ? NULL : pt_append_string (parser, NULL, op_sql);
+  if (del->remote_table_name == NULL || del->remote_key_col == NULL || (!is_notin && del->remote_op == NULL)
+      || pt_has_error (parser))
     {
       return NULL;
     }

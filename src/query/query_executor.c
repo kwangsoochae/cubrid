@@ -564,6 +564,7 @@ static int qexec_execute_update (THREAD_ENTRY * thread_p, XASL_NODE * xasl, bool
 static int qexec_execute_delete (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
 static int qexec_execute_remote_insert_select (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
 static int qexec_execute_remote_delete_subquery (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
+static int qexec_execute_remote_delete_notin (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
 static int qexec_execute_insert (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state, bool skip_aptr);
 static int qexec_execute_merge (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
 static int qexec_execute_build_indexes (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
@@ -11285,6 +11286,15 @@ qexec_execute_delete (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xa
     {
       return qexec_execute_remote_delete_subquery (thread_p, xasl, xasl_state);
     }
+  /* PR3 spike (CBRD-26921): whole-set NOT IN sink -- a distinct execution shape from the per-row
+   * sink above (one execute for the whole local result set, not one execute per row), so it is a
+   * separate function rather than a branch inside qexec_execute_remote_delete_subquery. See that
+   * field's comment in xasl.h and 104_dblink_delete_local_subquery_unsupported_forms_walkthrough.md
+   * Section 1 for why looping the per-row sink over NOT IN would be wrong. */
+  if (delete_->is_remote_delete_ship_notin)
+    {
+      return qexec_execute_remote_delete_notin (thread_p, xasl, xasl_state);
+    }
 
   thread_p->no_logging = (bool) delete_->no_logging;
 
@@ -12758,6 +12768,192 @@ qexec_execute_remote_delete_subquery (THREAD_ENTRY * thread_p, XASL_NODE * xasl,
 exit_on_error:
   dblink_insert_rollback (&dblink_state);
   dblink_insert_close (&dblink_state);
+  if (specp != NULL)
+    {
+      qexec_end_scan (thread_p, specp);
+      qexec_close_scan (thread_p, specp);
+    }
+  return ER_FAILED;
+}
+
+/*
+ * qexec_execute_remote_delete_notin () - PR3 spike: evaluate a local WHERE subquery and push a
+ *   single whole-set "DELETE FROM <table> WHERE <key> NOT IN (?, ..., ?)" (or an unconditional
+ *   "DELETE FROM <table>" if the local subquery returns no rows) via CCI.
+ *
+ * Unlike qexec_execute_remote_delete_subquery's per-row loop (one execute per local row, correct
+ * for IN/=ANY/scalar's OR-accumulating semantics), NOT IN's semantics are an AND across the whole
+ * local result set, so it needs every value bound in a SINGLE execute -- looping the per-row sink
+ * over it would delete rows it should keep (see
+ * 104_dblink_delete_local_subquery_unsupported_forms_walkthrough.md Section 1). This collects
+ * every local value up front (growing a private-alloc'd array), then opens exactly one of the two
+ * NOT IN sink shapes (dblink_delete_notin_open / dblink_delete_all_open, see their own comments)
+ * depending on whether that set is empty, and executes once.
+ *
+ * A NULL in the local result set is rejected outright rather than resolved: NOT IN's standard
+ * 3-valued-logic result for a set containing NULL (UNKNOWN for every remote row, i.e. delete
+ * nothing) is a real decision this spike has not made yet (04-3_dblink_delete_local_subquery_
+ * Tasks_PR3.md T0-6, still open for the other four shapes too) -- silently dropping the NULL from
+ * the bound set instead would silently produce the wrong (over-deleting) result.
+ *
+ *   return: NO_ERROR or ER_FAILED
+ *   xasl(in)       : DELETE_PROC XASL with is_remote_delete_ship_notin set; aptr_list = local subquery
+ *   xasl_state(in) : XASL state
+ */
+static int
+qexec_execute_remote_delete_notin (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state)
+{
+  DELETE_PROC_NODE *del = &xasl->proc.delete_;
+  XASL_NODE *aptr = xasl->aptr_list;
+  ACCESS_SPEC_TYPE *specp = NULL;
+  SCAN_CODE xb_scan, ls_scan;
+  SCAN_ID *s_id = NULL;
+  QPROC_DB_VALUE_LIST vallist;
+  DBLINK_INSERT_STATE dblink_state = { -1, -1 };
+  DB_VALUE **vals = NULL;
+  int num_vals = 0, cap = 0, row_affected = 0;
+
+  assert (del->is_remote_delete_ship_notin);
+  assert (aptr != NULL);	/* the sink XASL always carries the local subquery as aptr */
+
+  /* run the local subquery (aptr) to materialize the value list-file */
+  if (aptr != NULL)
+    {
+      if (QEXEC_IS_SUBQUERY_CACHE (aptr))
+	{
+	  if (qexec_execute_subquery_for_result_cache (thread_p, aptr, xasl_state) != NO_ERROR)
+	    {
+	      qexec_failure_line (__LINE__, xasl_state);
+	      goto exit_on_error;
+	    }
+	}
+      else if (qexec_execute_mainblock (thread_p, aptr, xasl_state, NULL) != NO_ERROR)
+	{
+	  qexec_failure_line (__LINE__, xasl_state);
+	  goto exit_on_error;
+	}
+    }
+
+  if (qexec_setup_list_id (thread_p, xasl) != NO_ERROR)
+    {
+      qexec_failure_line (__LINE__, xasl_state);
+      goto exit_on_error;
+    }
+
+  specp = xasl->spec_list;
+  assert (specp != NULL);
+
+  /* open local scan on the subquery result and collect every value up front -- see the function's
+   * comment for why NOT IN needs the whole set bound in one execute, unlike the per-row sink's
+   * scan-and-execute-per-row loop. */
+  if (qexec_open_scan (thread_p, specp, xasl->val_list, &xasl_state->vd, false, specp->fixed_scan,
+		       specp->grouped_scan, true, &specp->s_id, xasl_state->query_id, S_SELECT, false,
+		       NULL, xasl) != NO_ERROR)
+    {
+      qexec_failure_line (__LINE__, xasl_state);
+      goto exit_on_error;
+    }
+
+  while ((xb_scan = qexec_next_scan_block_iterations (thread_p, xasl)) == S_SUCCESS)
+    {
+      s_id = &xasl->curr_spec->s_id;
+
+      while ((ls_scan = scan_next_scan (thread_p, s_id)) == S_SUCCESS)
+	{
+	  /* take the leading (visible) column; XASL generation forces a single-column subquery
+	   * (pt_length_of_select_list EXCLUDE_HIDDEN_COLUMNS == 1), same as the per-row sink. */
+	  vallist = s_id->val_list->valp;
+	  if (vallist == NULL || vallist->val == NULL)
+	    {
+	      assert (0);
+	      qexec_failure_line (__LINE__, xasl_state);
+	      goto exit_on_error;
+	    }
+
+	  if (DB_IS_NULL (vallist->val))
+	    {
+	      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK, 1,
+		      "remote DELETE NOT IN: a NULL in the local result set is not yet supported");
+	      goto exit_on_error;
+	    }
+
+	  if (num_vals >= cap)
+	    {
+	      int new_cap = (cap == 0) ? 16 : cap * 2;
+	      DB_VALUE **new_vals = (DB_VALUE **) db_private_realloc (thread_p, vals, new_cap * sizeof (DB_VALUE *));
+
+	      if (new_vals == NULL)
+		{
+		  qexec_failure_line (__LINE__, xasl_state);
+		  goto exit_on_error;
+		}
+	      vals = new_vals;
+	      cap = new_cap;
+	    }
+	  vals[num_vals++] = vallist->val;
+	}
+
+      if (ls_scan != S_END)
+	{
+	  qexec_failure_line (__LINE__, xasl_state);
+	  goto exit_on_error;
+	}
+    }
+
+  if (xb_scan != S_END)
+    {
+      qexec_failure_line (__LINE__, xasl_state);
+      goto exit_on_error;
+    }
+
+  qexec_close_scan (thread_p, specp);
+  specp = NULL;
+
+  /* empty local result set: NOT IN is vacuously true for every remote row -- delete everything
+   * (dblink_delete_all_open, not this sink's placeholder statement). Otherwise, the whole-set
+   * NOT IN statement, bound and executed once below either way. */
+  if (num_vals == 0)
+    {
+      if (dblink_delete_all_open (thread_p, del->remote_url, del->remote_user, del->remote_pwd,
+				  del->remote_table_name, &dblink_state) != NO_ERROR)
+	{
+	  qexec_failure_line (__LINE__, xasl_state);
+	  goto exit_on_error;
+	}
+    }
+  else
+    {
+      if (dblink_delete_notin_open (thread_p, del->remote_url, del->remote_user, del->remote_pwd,
+				    del->remote_table_name, del->remote_key_col, num_vals, &dblink_state) != NO_ERROR)
+	{
+	  qexec_failure_line (__LINE__, xasl_state);
+	  goto exit_on_error;
+	}
+    }
+
+  if (dblink_insert_execute_row (thread_p, &dblink_state, vals, num_vals, &row_affected) != NO_ERROR)
+    {
+      qexec_failure_line (__LINE__, xasl_state);
+      goto exit_on_error;
+    }
+
+  xasl->list_id->tuple_cnt = row_affected;
+
+  dblink_insert_close (&dblink_state);
+  if (vals != NULL)
+    {
+      db_private_free (thread_p, vals);
+    }
+
+  return NO_ERROR;
+
+exit_on_error:
+  dblink_insert_rollback (&dblink_state);
+  dblink_insert_close (&dblink_state);
+  if (vals != NULL)
+    {
+      db_private_free (thread_p, vals);
+    }
   if (specp != NULL)
     {
       qexec_end_scan (thread_p, specp);
