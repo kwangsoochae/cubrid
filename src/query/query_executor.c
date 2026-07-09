@@ -12796,6 +12796,13 @@ exit_on_error:
  * Tasks_PR3.md T0-6, still open for the other four shapes too) -- silently dropping the NULL from
  * the bound set instead would silently produce the wrong (over-deleting) result.
  *
+ * Collected values are copied (pr_clone_value), not just pointed at: the per-row sink can bind
+ * vallist->val directly because it executes within the same scan_next_scan() iteration that
+ * produced it, but this function defers binding until after the whole scan completes, and the
+ * scan's val_list slot is reused across rows -- storing the raw pointer would leave every
+ * collected "value" aliasing whatever row was scanned last (found by testing against TC-114: all
+ * bound values silently became the same one, deleting almost everything instead of one row).
+ *
  *   return: NO_ERROR or ER_FAILED
  *   xasl(in)       : DELETE_PROC XASL with is_remote_delete_ship_notin set; aptr_list = local subquery
  *   xasl_state(in) : XASL state
@@ -12810,8 +12817,9 @@ qexec_execute_remote_delete_notin (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XA
   SCAN_ID *s_id = NULL;
   QPROC_DB_VALUE_LIST vallist;
   DBLINK_INSERT_STATE dblink_state = { -1, -1 };
-  DB_VALUE **vals = NULL;
-  int num_vals = 0, cap = 0, row_affected = 0;
+  DB_VALUE *val_storage = NULL;	/* owned copies (pr_clone_value), grows across the scan */
+  DB_VALUE **vals = NULL;	/* built after the scan completes: vals[i] = &val_storage[i] */
+  int num_vals = 0, cap = 0, row_affected = 0, i;
 
   assert (del->is_remote_delete_ship_notin);
   assert (aptr != NULL);	/* the sink XASL always carries the local subquery as aptr */
@@ -12880,17 +12888,23 @@ qexec_execute_remote_delete_notin (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XA
 	  if (num_vals >= cap)
 	    {
 	      int new_cap = (cap == 0) ? 16 : cap * 2;
-	      DB_VALUE **new_vals = (DB_VALUE **) db_private_realloc (thread_p, vals, new_cap * sizeof (DB_VALUE *));
+	      DB_VALUE *new_storage = (DB_VALUE *) db_private_realloc (thread_p, val_storage,
+								       new_cap * sizeof (DB_VALUE));
 
-	      if (new_vals == NULL)
+	      if (new_storage == NULL)
 		{
 		  qexec_failure_line (__LINE__, xasl_state);
 		  goto exit_on_error;
 		}
-	      vals = new_vals;
+	      val_storage = new_storage;
 	      cap = new_cap;
 	    }
-	  vals[num_vals++] = vallist->val;
+	  if (pr_clone_value (vallist->val, &val_storage[num_vals]) != NO_ERROR)
+	    {
+	      qexec_failure_line (__LINE__, xasl_state);
+	      goto exit_on_error;
+	    }
+	  num_vals++;
 	}
 
       if (ls_scan != S_END)
@@ -12908,6 +12922,23 @@ qexec_execute_remote_delete_notin (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XA
 
   qexec_close_scan (thread_p, specp);
   specp = NULL;
+
+  /* build the DB_VALUE* pointer array dblink_insert_execute_row expects, now that val_storage has
+   * stopped growing (its address is stable -- see the function's comment on why this can't be
+   * built incrementally during the scan above). */
+  if (num_vals > 0)
+    {
+      vals = (DB_VALUE **) db_private_alloc (thread_p, num_vals * sizeof (DB_VALUE *));
+      if (vals == NULL)
+	{
+	  qexec_failure_line (__LINE__, xasl_state);
+	  goto exit_on_error;
+	}
+      for (i = 0; i < num_vals; i++)
+	{
+	  vals[i] = &val_storage[i];
+	}
+    }
 
   /* empty local result set: NOT IN is vacuously true for every remote row -- delete everything
    * (dblink_delete_all_open, not this sink's placeholder statement). Otherwise, the whole-set
@@ -12940,6 +12971,14 @@ qexec_execute_remote_delete_notin (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XA
   xasl->list_id->tuple_cnt = row_affected;
 
   dblink_insert_close (&dblink_state);
+  for (i = 0; i < num_vals; i++)
+    {
+      pr_clear_value (&val_storage[i]);
+    }
+  if (val_storage != NULL)
+    {
+      db_private_free (thread_p, val_storage);
+    }
   if (vals != NULL)
     {
       db_private_free (thread_p, vals);
@@ -12950,6 +12989,14 @@ qexec_execute_remote_delete_notin (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XA
 exit_on_error:
   dblink_insert_rollback (&dblink_state);
   dblink_insert_close (&dblink_state);
+  for (i = 0; i < num_vals; i++)
+    {
+      pr_clear_value (&val_storage[i]);
+    }
+  if (val_storage != NULL)
+    {
+      db_private_free (thread_p, val_storage);
+    }
   if (vals != NULL)
     {
       db_private_free (thread_p, vals);

@@ -1651,8 +1651,11 @@ dblink_delete_notin_open (THREAD_ENTRY * thread_p, const char *url, const char *
       return ret;
     }
 
-  /* build DELETE SQL: DELETE FROM <table> WHERE <key_col> NOT IN (?, ?, ..., ?)  (num_vals placeholders) */
-  sql_len = strlen (table_name) + strlen (key_col) + (size_t) num_vals *3 + 64;
+  /* build DELETE SQL: DELETE FROM <table> WHERE <key_col> NOT IN (?, ?, ..., ?)  (num_vals placeholders).
+   * The fixed literal wrapper text (leading comment, DELETE FROM, WHERE, NOT IN, closing paren, NUL)
+   * measures 69 bytes -- 96 below leaves headroom rather than cutting it exactly, since an
+   * underestimate here fails every call (found by testing against TC-114). */
+  sql_len = strlen (table_name) + strlen (key_col) + (size_t) num_vals *3 + 96;
   sql = (char *) db_private_alloc (thread_p, sql_len);
   if (sql == NULL)
     {
