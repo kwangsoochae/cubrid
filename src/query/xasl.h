@@ -450,6 +450,18 @@ struct delete_proc_node
   char *remote_table_name;	/* remote target table name */
   char *remote_key_col;		/* remote target column on the WHERE left-hand side (e.g. rc1) */
   char *remote_op;		/* comparison operator pushed to the remote WHERE: "=", "<", ">", "<=", ">=" */
+  bool is_remote_delete_ship_notin;	/* PR3 spike (CBRD-26921, temp branch
+					 * spike_dblink_delete_local_subquery_PR3_shipping): true selects the
+					 * whole-set NOT IN sink (dblink_delete_notin_open, one execute for the
+					 * entire local result set) instead of the per-row sink above
+					 * (is_remote_delete, one execute per local row) -- looping the per-row
+					 * sink over NOT IN would delete rows it should keep (AND-across-the-set
+					 * vs. OR-accumulating per-row, see
+					 * 104_dblink_delete_local_subquery_unsupported_forms_walkthrough.md
+					 * Section 1). Reuses remote_url/user/pwd/table_name/key_col above;
+					 * remote_op is unused for this mode (NOT IN's operator is fixed). No
+					 * XASL generator sets this true yet -- pt_to_delete_xasl_remote_subquery
+					 * only ever produces the per-row shape. */
 };
 
 typedef struct connectby_proc_node CONNECTBY_PROC_NODE;

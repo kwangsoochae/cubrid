@@ -3892,6 +3892,14 @@ stx_build_delete_proc (THREAD_ENTRY * thread_p, char *ptr, DELETE_PROC_NODE * de
   delete_info->remote_key_col = stx_restore_string (thread_p, ptr);
   delete_info->remote_op = stx_restore_string (thread_p, ptr);
 
+  /* PR3 spike: whole-set NOT IN sink selector, see the field's comment in xasl.h */
+  {
+    int is_ship_notin;
+
+    ptr = or_unpack_int (ptr, &is_ship_notin);
+    delete_info->is_remote_delete_ship_notin = (bool) is_ship_notin;
+  }
+
   return ptr;
 
 error:

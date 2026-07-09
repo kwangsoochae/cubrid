@@ -4224,6 +4224,9 @@ xts_process_delete_proc (char *ptr, const DELETE_PROC_NODE * delete_info)
     }
   ptr = or_pack_int (ptr, offset);
 
+  /* PR3 spike: whole-set NOT IN sink selector, see the field's comment in xasl.h */
+  ptr = or_pack_int (ptr, (int) delete_info->is_remote_delete_ship_notin);
+
   return ptr;
 }
 
@@ -6573,7 +6576,8 @@ xts_sizeof_delete_proc (const DELETE_PROC_NODE * delete_info)
 	   + PTR_SIZE		/* remote_pwd */
 	   + PTR_SIZE		/* remote_table_name */
 	   + PTR_SIZE		/* remote_key_col */
-	   + PTR_SIZE);		/* remote_op */
+	   + PTR_SIZE		/* remote_op */
+	   + OR_INT_SIZE);	/* is_remote_delete_ship_notin (PR3 spike) */
 
   return size;
 }

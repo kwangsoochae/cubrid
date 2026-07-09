@@ -19340,6 +19340,9 @@ pt_to_delete_xasl_remote_subquery (PARSER_CONTEXT * parser, PT_NODE * statement)
 
   /* remote sink: connection info resolved by pt_resolve_server_names */
   del->is_remote_delete = true;
+  /* PR3 spike: this builder only ever produces the per-row sink above; the whole-set NOT IN sink
+   * selector (see the field's comment in xasl.h) has no XASL generator wiring yet. */
+  del->is_remote_delete_ship_notin = false;
   del->remote_url = (char *) pdblink->url->info.value.data_value.str->bytes;
   del->remote_user = (char *) pdblink->user->info.value.data_value.str->bytes;
   del->remote_pwd = (char *) pdblink->pwd->info.value.data_value.str->bytes;
