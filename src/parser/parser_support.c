@@ -11777,6 +11777,75 @@ pt_convert_dblink_insert_query (PARSER_CONTEXT * parser, PT_NODE * node, SERVER_
   return;
 }
 
+/* PR3 spike (temp branch CBRD-26921_dblink_delete_local_subquery_PR3_shipping_spike): shape classes
+ * that the phase-1/2 per-row value-push sink structurally cannot open (see
+ * 105_dblink_delete_local_subquery_relation_shipping_future_work.md Section 1), other than NOT IN /
+ * <> ALL -- that shape has its own precise gate (pt_dblink_delete_where_is_ship_notin below) and is
+ * caught before this classifier ever runs. Not yet routed to any sink -- classification is only
+ * logged for now, at the call site in pt_convert_dblink_delete_query. A true local-remote join is
+ * not detected here: it shows up as multiple DELETE spec entries rather than a WHERE shape. */
+typedef enum
+{
+  PT_DBLINK_DELETE_SHIP_NONE = 0,	/* not one of the shapes this classifier targets */
+  PT_DBLINK_DELETE_SHIP_MULTI_AND,	/* two or more local-subquery predicates combined with AND */
+  PT_DBLINK_DELETE_SHIP_OR,	/* WHERE root is OR */
+  PT_DBLINK_DELETE_SHIP_CORRELATED	/* EXISTS / NOT EXISTS. A correlated IN/scalar predicate still
+					 * passes pt_dblink_delete_where_is_inscope's shape gate below and
+					 * is only caught later by pt_dblink_delete_corr_ref. */
+} PT_DBLINK_DELETE_SHIP_FORM;
+
+static PT_DBLINK_DELETE_SHIP_FORM
+pt_dblink_delete_ship_classify (PT_NODE * cond)
+{
+  PT_NODE *p;
+  int local_subq_pred_cnt;
+
+  if (cond == NULL)
+    {
+      return PT_DBLINK_DELETE_SHIP_NONE;
+    }
+
+  if (cond->next != NULL)
+    {
+      /* a CNF predicate list (implicit AND across top-level conjuncts) */
+      local_subq_pred_cnt = 0;
+      for (p = cond; p != NULL; p = p->next)
+	{
+	  if (p->node_type == PT_EXPR && p->info.expr.op == PT_IS_IN && PT_IS_QUERY (p->info.expr.arg2))
+	    {
+	      local_subq_pred_cnt++;
+	    }
+	}
+      return (local_subq_pred_cnt >= 2) ? PT_DBLINK_DELETE_SHIP_MULTI_AND : PT_DBLINK_DELETE_SHIP_NONE;
+    }
+
+  if (cond->node_type != PT_EXPR)
+    {
+      return PT_DBLINK_DELETE_SHIP_NONE;
+    }
+
+  switch (cond->info.expr.op)
+    {
+    case PT_OR:
+      return PT_DBLINK_DELETE_SHIP_OR;
+
+    case PT_AND:
+      return PT_DBLINK_DELETE_SHIP_MULTI_AND;
+
+    case PT_EXISTS:
+      return PT_DBLINK_DELETE_SHIP_CORRELATED;
+
+    case PT_NOT:
+      /* "NOT EXISTS (subquery)" parses as PT_NOT wrapping a PT_EXISTS node. */
+      return (cond->info.expr.arg1 != NULL && cond->info.expr.arg1->node_type == PT_EXPR
+	      && cond->info.expr.arg1->info.expr.op == PT_EXISTS) ? PT_DBLINK_DELETE_SHIP_CORRELATED :
+	PT_DBLINK_DELETE_SHIP_NONE;
+
+    default:
+      return PT_DBLINK_DELETE_SHIP_NONE;
+    }
+}
+
 /* true iff the DELETE WHERE clause is a single positive predicate over a subquery that the phase-1
  * value-push sink supports by shape: col IN (subquery), col = ANY (subquery), or a scalar comparison
  * col {= | < | > | <= | >=} (subquery). Forms excluded here fall through to the existing "local mixed remote
@@ -11810,6 +11879,47 @@ pt_dblink_delete_where_is_inscope (PT_NODE * node)
     case PT_GT:
     case PT_LE:
     case PT_GE:
+      break;
+    default:
+      return false;
+    }
+
+  arg2 = cond->info.expr.arg2;
+  if (arg2 == NULL || !PT_IS_QUERY (arg2))
+    {
+      return false;		/* RHS must be a subquery, not a value list or column */
+    }
+
+  return true;
+}
+
+/* PR3 spike (temp branch CBRD-26921_dblink_delete_local_subquery_PR3_shipping_spike): true iff the
+ * DELETE WHERE clause is a single predicate col NOT IN (subquery) or col <> ALL (subquery) -- the
+ * simplest of the local-relation shipping forms (00-1_dblink_delete_local_subquery_scope.md Section
+ * 3.1 calls this out as PR3's first brick, since per-row value-push cannot express it: NOT IN is an
+ * AND of inequalities, while per-row is an OR-accumulating loop, see
+ * 104_..._unsupported_forms_walkthrough.md Section 1).
+ *
+ * Mirrors pt_dblink_delete_where_is_inscope's shape-only contract: local vs. remote subquery
+ * membership is refined afterward in pt_convert_dblink_dml_query (see
+ * SERVER_NAME_LIST.is_remote_delete_ship_notin in parse_tree.h), not decided here. The flag this sets
+ * is classification-only -- it is deliberately not added to the "local mixed remote DML" bypass, so
+ * behavior is unchanged (still rejected) until a shipping sink exists. */
+static bool
+pt_dblink_delete_where_is_ship_notin (PT_NODE * node)
+{
+  PT_NODE *cond = node->info.delete_.search_cond;
+  PT_NODE *arg2;
+
+  if (cond == NULL || cond->next != NULL || cond->node_type != PT_EXPR)
+    {
+      return false;
+    }
+
+  switch (cond->info.expr.op)
+    {
+    case PT_IS_NOT_IN:		/* col NOT IN (subquery) */
+    case PT_NE_ALL:		/* col <> ALL (subquery) */
       break;
     default:
       return false;
@@ -11910,6 +12020,27 @@ pt_convert_dblink_delete_query (PARSER_CONTEXT * parser, PT_NODE * node, SERVER_
   if (remote_del == 1 && local_del == 0 && pt_dblink_delete_where_is_inscope (node))
     {
       snl->is_remote_delete_local_subq = true;
+    }
+  else if (remote_del == 1 && local_del == 0 && pt_dblink_delete_where_is_ship_notin (node))
+    {
+      /* PR3 spike: set optimistically here, refined the same way as is_remote_delete_local_subq in
+       * pt_convert_dblink_dml_query. Deliberately not added to the "local mixed remote DML" bypass --
+       * see the flag's comment in parse_tree.h. */
+      snl->is_remote_delete_ship_notin = true;
+    }
+  else if (remote_del == 1 && local_del == 0)
+    {
+      /* PR3 spike: remaining shapes (OR / AND-multiple / correlated EXISTS) -- not routed anywhere
+       * yet, classify only, so the shipping-route design (03-3_..._Design_Doc_PR3.md) has real shape
+       * data to work from. */
+      PT_DBLINK_DELETE_SHIP_FORM ship_form = pt_dblink_delete_ship_classify (node->info.delete_.search_cond);
+
+      if (ship_form != PT_DBLINK_DELETE_SHIP_NONE)
+	{
+	  er_log_debug (ARG_FILE_LINE,
+			"dblink PR3 spike: DELETE WHERE classified as shipping form %d (not yet routed to a sink)",
+			(int) ship_form);
+	}
     }
 
   pt_convert_dblink_dml_query (parser, node, local_del, remote_del, snl);
@@ -12104,6 +12235,25 @@ pt_convert_dblink_dml_query (PARSER_CONTEXT * parser, PT_NODE * node,
       if (!(snl->local_cnt > 0 && snl->server_node_cnt == 1 && !snl->has_dblink_query))
 	{
 	  snl->is_remote_delete_local_subq = false;
+	}
+    }
+
+  /* PR3 spike: refined the same way as is_remote_delete_local_subq above, but deliberately NOT added
+   * to the "local mixed remote DML" bypass below -- classification-only until a shipping sink exists
+   * (see the flag's comment in parse_tree.h). The debug log lets this be observed without changing
+   * behavior. */
+  if (snl->is_remote_delete_ship_notin)
+    {
+      if (!(snl->local_cnt > 0 && snl->server_node_cnt == 1 && !snl->has_dblink_query))
+	{
+	  snl->is_remote_delete_ship_notin = false;
+	}
+
+      if (snl->is_remote_delete_ship_notin)
+	{
+	  er_log_debug (ARG_FILE_LINE,
+			"dblink PR3 spike: DELETE WHERE is a pure-local NOT IN / <> ALL shape "
+			"(not yet routed to a sink)");
 	}
     }
 

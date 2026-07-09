@@ -4032,6 +4032,13 @@ typedef struct
 					 * when the subquery is purely local (local_cnt > 0 && server_node_cnt == 1
 					 * && !has_dblink_query). Cleared otherwise so same-server all-remote
 					 * (full-pushdown) and multi-remote / dblink() cases fall to existing guards. */
+  bool is_remote_delete_ship_notin;	/* PR3 spike (CBRD-26921, temp branch): remote-target DELETE whose
+					 * WHERE is col NOT IN (subquery) / col <> ALL (subquery) over a pure-local
+					 * subquery. Set and refined the same way as is_remote_delete_local_subq, but
+					 * NOT wired into the "local mixed remote DML" bypass or any sink -- per-row
+					 * value-push cannot express NOT IN (104_..._unsupported_forms_walkthrough.md
+					 * Section 1), so this flag is classification-only until a shipping sink
+					 * exists (Step 2+, 04-3_..._Tasks_PR3.md). */
 } SERVER_NAME_LIST;
 
 void pt_init_node (PT_NODE * node, PT_NODE_TYPE node_type);
