@@ -128,6 +128,10 @@ extern int dblink_delete_open (THREAD_ENTRY * thread_p, const char *url, const c
 extern int dblink_delete_notin_open (THREAD_ENTRY * thread_p, const char *url, const char *user, const char *pwd,
 				     const char *table_name, const char *key_col, int num_vals,
 				     DBLINK_INSERT_STATE * state);
+/* PR3 spike: unconditional "DELETE FROM <table>" for the NOT IN empty-local-result-set case, not
+ * called by anything yet -- see the function's own comment. */
+extern int dblink_delete_all_open (THREAD_ENTRY * thread_p, const char *url, const char *user, const char *pwd,
+				   const char *table_name, DBLINK_INSERT_STATE * state);
 extern int dblink_insert_execute_row (THREAD_ENTRY * thread_p, DBLINK_INSERT_STATE * state, DB_VALUE ** vals,
 				      int num_vals, int *affected_rows);
 extern void dblink_insert_rollback (DBLINK_INSERT_STATE * state);

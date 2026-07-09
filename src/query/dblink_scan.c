@@ -63,6 +63,16 @@
 #define DBLINK_INSERT_SQL_PER_PLACEHOLDER   4
 #define DBLINK_INSERT_SQL_VALUES_OVERHEAD   16
 
+/* PR3 spike (CBRD-26921): a whole-set "NOT IN (?, ..., ?)" cannot be chunked across multiple
+ * executes the way an OR-shaped IN-list can -- chunking it would AND across rounds instead of
+ * the whole set, deleting rows it should keep (00-1_dblink_delete_local_subquery_scope.md
+ * Section 4.1, 04-3_..._Tasks_PR3.md T4-3's stated interim policy). Until a real chunking design
+ * exists for AND-shaped forms, reject a local result set past this bound outright rather than
+ * build an oversized or vendor-limit-violating statement. 1000 matches Oracle's classic IN-list
+ * ceiling (ORA-01795) -- the tightest of the three target vendors -- as a conservative common
+ * denominator; not tuned per vendor. */
+#define DBLINK_DELETE_NOTIN_MAX_VALS        1000
+
 // *INDENT-OFF*
 #define  DATETIME_DECODE(date, dt, m, d, y, hour, min, sec, msec) \
   do \
@@ -1615,6 +1625,15 @@ dblink_delete_notin_open (THREAD_ENTRY * thread_p, const char *url, const char *
 	      "remote DELETE NOT IN: table/key is NULL or empty, or num_vals <= 0");
       return ER_DBLINK;
     }
+  if (num_vals > DBLINK_DELETE_NOTIN_MAX_VALS)
+    {
+      /* interim policy (04-3_dblink_delete_local_subquery_Tasks_PR3.md T4-3): a whole-set NOT IN
+       * cannot be chunked, so reject outright past this bound rather than build an oversized or
+       * vendor-limit-violating statement -- see the constant's comment above. */
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK, 1, "remote DELETE NOT IN: local result set too large "
+	      "to ship as a single whole-set statement (chunking not supported for this shape)");
+      return ER_DBLINK;
+    }
   if (url == NULL || user == NULL || pwd == NULL)
     {
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK, 1, "remote DELETE NOT IN: url/user/pwd is NULL");
@@ -1670,6 +1689,87 @@ dblink_delete_notin_open (THREAD_ENTRY * thread_p, const char *url, const char *
   if (ret < 0 || ret >= remaining)
     {
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK, 1, "remote DELETE NOT IN: SQL assembly truncated");
+      db_private_free (thread_p, sql);
+      return ER_DBLINK;
+    }
+
+  state->stmt_handle = cci_prepare (state->conn_handle, sql, 0, &err_buf);
+  db_private_free (thread_p, sql);
+
+  if (state->stmt_handle < 0)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK, 1, err_buf.err_msg);
+      return ER_DBLINK;
+    }
+
+  return NO_ERROR;
+}
+
+/*
+ * dblink_delete_all_open () - PR3 spike: connect to remote server and prepare an unconditional
+ *   "DELETE FROM <table>" statement (no WHERE, no placeholders).
+ *   return: NO_ERROR on success, error code on failure.
+ *
+ * Caller-level use (not decided by this function): when the local subquery behind a NOT IN (or
+ * <> ALL) predicate returns an empty result set, NOT IN is vacuously true for every remote row --
+ * delete everything. dblink_delete_notin_open() rejects num_vals <= 0 outright, since building a
+ * zero-placeholder "NOT IN ()" is invalid SQL and papering over the empty case inside that
+ * function would hide a decision the caller must make explicitly (see
+ * 04-3_dblink_delete_local_subquery_Tasks_PR3.md T4-2 / T0-6, still open for the other four
+ * shapes' empty-set semantics).
+ *
+ * A plain DELETE (not TRUNCATE) is used deliberately, matching the reasoning already documented
+ * for PR2's ALL-bucket empty-set case (02-2_dblink_delete_local_subquery_PRD_PR2.md Section 3.B
+ * footnote): TRUNCATE is DDL and auto-commits on Oracle/MySQL, breaking the CCI_AUTOCOMMIT_FALSE +
+ * 2PC participant contract this sink relies on, and skips triggers/permission checks a DELETE
+ * would run.
+ *
+ * Not called by anything yet -- same wiring gap as dblink_delete_notin_open (see that function's
+ * comment).
+ */
+int
+dblink_delete_all_open (THREAD_ENTRY * thread_p, const char *url, const char *user, const char *pwd,
+			const char *table_name, DBLINK_INSERT_STATE * state)
+{
+  int ret, remaining;
+  T_CCI_ERROR err_buf;
+  char *sql = NULL;
+  size_t sql_len;
+
+  state->conn_handle = -1;
+  state->stmt_handle = -1;
+
+  if (table_name == NULL || table_name[0] == '\0')
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK, 1, "remote DELETE ALL: table is NULL or empty");
+      return ER_DBLINK;
+    }
+  if (url == NULL || user == NULL || pwd == NULL)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK, 1, "remote DELETE ALL: url/user/pwd is NULL");
+      return ER_DBLINK;
+    }
+
+  ret = dblink_acquire_pooled_conn (thread_p, url, user, pwd, CCI_AUTOCOMMIT_FALSE, true, "remote DELETE ALL",
+				    &state->conn_handle);
+  if (ret != NO_ERROR)
+    {
+      return ret;
+    }
+
+  sql_len = strlen (table_name) + 64;
+  sql = (char *) db_private_alloc (thread_p, sql_len);
+  if (sql == NULL)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, sql_len);
+      return ER_OUT_OF_VIRTUAL_MEMORY;
+    }
+
+  remaining = (int) sql_len;
+  ret = snprintf (sql, remaining, "/* DBLINK DELETE ALL (PR3 spike) */ DELETE FROM %s", table_name);
+  if (ret < 0 || ret >= remaining)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK, 1, "remote DELETE ALL: SQL assembly truncated");
       db_private_free (thread_p, sql);
       return ER_DBLINK;
     }
