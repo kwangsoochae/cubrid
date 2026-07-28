@@ -12888,20 +12888,14 @@ qexec_execute_remote_delete_reduce (THREAD_ENTRY * thread_p, XASL_NODE * xasl, X
 		       (row_count == 0) ? NULL : key_col, (row_count == 0) ? NULL : op, &dblink_state) != NO_ERROR)
     {
       qexec_failure_line (__LINE__, xasl_state);
-      dblink_dml_close (&dblink_state);
-      dblink_dml_rollback (thread_p, &dblink_state);
-      pr_clear_value (&boundary);
-      return ER_FAILED;
+      goto dml_error;
     }
 
   bindv[0] = &boundary;
   if (dblink_dml_execute_row (thread_p, &dblink_state, bindv, (row_count == 0) ? 0 : 1, &row_affected) != NO_ERROR)
     {
       qexec_failure_line (__LINE__, xasl_state);
-      dblink_dml_close (&dblink_state);
-      dblink_dml_rollback (thread_p, &dblink_state);
-      pr_clear_value (&boundary);
-      return ER_FAILED;
+      goto dml_error;
     }
 
   xasl->list_id->tuple_cnt += row_affected;
@@ -12910,6 +12904,13 @@ qexec_execute_remote_delete_reduce (THREAD_ENTRY * thread_p, XASL_NODE * xasl, X
   pr_clear_value (&boundary);
 
   return NO_ERROR;
+
+dml_error:
+  dblink_dml_close (&dblink_state);
+  dblink_dml_rollback (thread_p, &dblink_state);
+  pr_clear_value (&boundary);
+
+  return ER_FAILED;
 
 exit_on_error:
   qexec_end_scan (thread_p, specp);
