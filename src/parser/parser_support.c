@@ -12018,6 +12018,19 @@ pt_convert_dblink_update_query (PARSER_CONTEXT * parser, PT_NODE * node, SERVER_
       return;
     }
 
+  /* remote UPDATE with a local subquery: UPDATE remote_t@conn SET c1 = (SELECT ... FROM local_t)
+   *                                       WHERE rc1 IN (SELECT ... FROM local_t2)
+   *
+   * Set optimistically when the single UPDATE target is remote (remote_upd == 1, no local target); unlike
+   * DELETE, the local subquery may sit in the SET assignments, in the WHERE clause, or in both, so no clause
+   * is required to be present here. pt_convert_dblink_dml_query (below) refines this, keeping it only when the
+   * subquery is purely local and otherwise clearing it so the existing guards apply -- a plain remote UPDATE
+   * with no local subquery at all is cleared there too (local_cnt == 0) and keeps the ordinary pushdown path. */
+  if (remote_upd == 1 && local_upd == 0)
+    {
+      snl->sink_kind = DBLINK_REMOTE_SINK_UPDATE_LOCAL_SUBQ;
+    }
+
   pt_convert_dblink_dml_query (parser, node, local_upd, remote_upd, snl);
 
   return;
@@ -12237,11 +12250,12 @@ pt_convert_dblink_dml_query (PARSER_CONTEXT * parser, PT_NODE * node,
 	}
     }
 
-  /* remote DELETE + local subquery: keep the carve-out only when the WHERE subquery is purely local
+  /* remote DELETE/UPDATE + local subquery: keep the carve-out only when the subquery is purely local
    * (references local tables, no second/other remote server, no dblink() function). Otherwise clear it so
    * the existing guards below apply: same-server all-remote subquery falls through to full pushdown, while
-   * multi-remote (distinct_cnt >= 2) and dblink() forms are rejected. */
-  if (snl->sink_kind == DBLINK_REMOTE_SINK_DELETE_LOCAL_SUBQ)
+   * multi-remote (distinct_cnt >= 2) and dblink() forms are rejected. The two sink kinds share the same
+   * purity condition -- the UPDATE side only differs in where the subquery may sit (SET and/or WHERE). */
+  if (snl->sink_kind == DBLINK_REMOTE_SINK_DELETE_LOCAL_SUBQ || snl->sink_kind == DBLINK_REMOTE_SINK_UPDATE_LOCAL_SUBQ)
     {
       if (!(snl->local_cnt > 0 && snl->distinct_cnt == 1 && !snl->has_dblink_query))
 	{
@@ -12280,6 +12294,17 @@ pt_convert_dblink_dml_query (PARSER_CONTEXT * parser, PT_NODE * node,
     {
       node->flag.cannot_prepare = 0;
       pt_setup_dblink_sink_spec (parser, node, upd_spec, snl);
+      return;
+    }
+
+  /* remote UPDATE + pure-local subquery: the carve-out above accepts this form, but the XASL sink and the
+   * per-row push runtime are not implemented yet. Reject explicitly here so the statement does NOT fall through
+   * to the qstr serialization below, which would push the local subquery to the remote server (wrong).
+   * Replaced by the value-push sink setup once the XASL builder and the runtime land. */
+  if (snl->sink_kind == DBLINK_REMOTE_SINK_UPDATE_LOCAL_SUBQ)
+    {
+      PT_ERROR (parser, upd_spec,
+		"dblink: remote UPDATE with local subquery is not supported yet (under construction)");
       return;
     }
 
