@@ -11999,6 +11999,54 @@ pt_convert_dblink_delete_query (PARSER_CONTEXT * parser, PT_NODE * node, SERVER_
   return;
 }
 
+/* true iff the UPDATE WHERE clause is a single positive predicate over a subquery that the value-push sink
+ * supports by shape: col IN (subquery), col = ANY (subquery), or a scalar comparison
+ * col {= | < | > | <= | >=} (subquery). Forms excluded here fall through to the existing "local mixed remote
+ * DML is not allowed" rejection: OR / multiple predicates (op PT_OR/PT_AND or a CNF list, caught by op or
+ * cond->next), comparison ANY/ALL (PT_*_SOME except PT_EQ_SOME, PT_*_ALL), negation (PT_IS_NOT_IN, PT_NE),
+ * EXISTS, a value-list IN (arg2 is not a query), and a join-shaped WHERE over a local spec (arg2 is a name).
+ *
+ * Correlation and row/multi-column subqueries are NOT decided here: a correlated or row subquery that passes
+ * this shape gate is routed to the sink and has to be rejected downstream, where the reference to the outer
+ * target (or the multi-column shape) is resolvable.
+ *
+ * This intentionally duplicates pt_dblink_delete_where_is_inscope instead of sharing one helper: the DELETE
+ * gate accepts more forms as its own sink grows, and the UPDATE sink is not ready for those. Two operator
+ * sets means widening one cannot silently widen the other. */
+static bool
+pt_dblink_update_where_is_inscope (PT_NODE * node)
+{
+  PT_NODE *cond = node->info.update.search_cond;
+  PT_NODE *arg2;
+
+  if (cond == NULL || cond->next != NULL || cond->node_type != PT_EXPR)
+    {
+      return false;
+    }
+
+  switch (cond->info.expr.op)
+    {
+    case PT_IS_IN:		/* col IN (subquery) */
+    case PT_EQ_SOME:		/* col = ANY (subquery) */
+    case PT_EQ:		/* scalar: col {= | < | > | <= | >=} (subquery) */
+    case PT_LT:
+    case PT_GT:
+    case PT_LE:
+    case PT_GE:
+      break;
+    default:
+      return false;
+    }
+
+  arg2 = cond->info.expr.arg2;
+  if (arg2 == NULL || !PT_IS_QUERY (arg2))
+    {
+      return false;		/* RHS must be a subquery, not a value list or column */
+    }
+
+  return true;
+}
+
 static void
 pt_convert_dblink_update_query (PARSER_CONTEXT * parser, PT_NODE * node, SERVER_NAME_LIST * snl)
 {
@@ -12018,15 +12066,18 @@ pt_convert_dblink_update_query (PARSER_CONTEXT * parser, PT_NODE * node, SERVER_
       return;
     }
 
-  /* remote UPDATE with a local subquery: UPDATE remote_t@conn SET c1 = (SELECT ... FROM local_t)
-   *                                       WHERE rc1 IN (SELECT ... FROM local_t2)
+  /* remote UPDATE with a local subquery in WHERE: UPDATE remote_t@conn SET c1 = 'x'
+   *                                                WHERE rc1 IN (SELECT ... FROM local_t)
    *
-   * Set optimistically when the single UPDATE target is remote (remote_upd == 1, no local target); unlike
-   * DELETE, the local subquery may sit in the SET assignments, in the WHERE clause, or in both, so no clause
-   * is required to be present here. pt_convert_dblink_dml_query (below) refines this, keeping it only when the
-   * subquery is purely local and otherwise clearing it so the existing guards apply -- a plain remote UPDATE
-   * with no local subquery at all is cleared there too (local_cnt == 0) and keeps the ordinary pushdown path. */
-  if (remote_upd == 1 && local_upd == 0)
+   * Set optimistically when the single UPDATE target is remote (remote_upd == 1, no local target) and the WHERE
+   * clause has a supported shape; pt_convert_dblink_dml_query (below) refines this, keeping it only when the
+   * WHERE subquery is purely local and otherwise clearing it so the existing guards apply. WHERE shape
+   * restricted by pt_dblink_update_where_is_inscope -- see its doc comment for supported/excluded forms.
+   *
+   * A local subquery in the SET assignments is a second, independent detection axis (the local value is
+   * evaluated once and spliced into the remote SET text). It is not detected yet, so a statement whose only
+   * local subquery sits in SET keeps the existing rejection until that axis lands. */
+  if (remote_upd == 1 && local_upd == 0 && pt_dblink_update_where_is_inscope (node))
     {
       snl->sink_kind = DBLINK_REMOTE_SINK_UPDATE_LOCAL_SUBQ;
     }
