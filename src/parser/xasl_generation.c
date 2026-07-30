@@ -22464,6 +22464,25 @@ pt_to_update_xasl (PARSER_CONTEXT * parser, PT_NODE * statement, PT_NODE ** non_
 	  return NULL;
 	}
 
+      /* remote UPDATE + local subquery sink: pt_convert_dblink_dml_query set up a PT_DBLINK_TABLE_DML with
+       * qstr == NULL (no serialized pushdown text) and preserved the WHERE / SET subqueries, which the
+       * semantic pass has bound stand-alone. The sink XASL builder and the per-row push runtime are not
+       * implemented yet, so reject explicitly rather than fall into pt_to_xasl_for_dblink below, which would
+       * ship a statement whose local subqueries cannot run on the remote server. Replaced by the sink
+       * builder once it lands. qstr != NULL keeps a plain remote UPDATE on the existing pushdown path. */
+      {
+	PT_NODE *remote_spec = from->info.spec.remote_server_name;
+
+	if (remote_spec != NULL && remote_spec->node_type == PT_DBLINK_TABLE_DML
+	    && remote_spec->info.dblink_table.qstr == NULL)
+	  {
+	    PT_ERROR (parser, statement,
+		      "dblink: remote UPDATE with local subquery is not supported yet (under construction)");
+	    pt_report_to_ersys_with_statement (parser, PT_SEMANTIC, statement);
+	    return NULL;
+	  }
+      }
+
       return pt_to_xasl_for_dblink (parser, from);
     }
 

@@ -12255,7 +12255,7 @@ pt_check_sub_query_spec (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int
 
 /*
  * pt_setup_dblink_sink_spec () - Rewrite <spec>'s remote_server_name into a PT_DBLINK_TABLE_DML sink
- *   node, shared by the remote INSERT SELECT and remote DELETE + local-subquery sink setup: allocate
+ *   node, shared by the remote INSERT SELECT, DELETE and UPDATE local-subquery sink setup: allocate
  *   the PT_DBLINK_TABLE_DML wrapper, split off the owner name (server->next) if present, free the raw
  *   SERVER_NAME_LIST server nodes, and re-resolve the spec's connection info.
  *   parser(in)   : parser context
@@ -12460,14 +12460,13 @@ pt_convert_dblink_dml_query (PARSER_CONTEXT * parser, PT_NODE * node,
       return;
     }
 
-  /* remote UPDATE + pure-local subquery: the carve-out above accepts this form, but the XASL sink and the
-   * per-row push runtime are not implemented yet. Reject explicitly here so the statement does NOT fall through
-   * to the qstr serialization below, which would push the local subquery to the remote server (wrong).
-   * Replaced by the value-push sink setup once the XASL builder and the runtime land. */
+  /* remote UPDATE + pure-local subquery: like the DELETE sink, skip the DML text serialization (qstr stays
+   * NULL) and preserve the WHERE / SET subqueries for the semantic pass and XASL generation; the runtime
+   * evaluates them locally and pushes the remote UPDATE via CCI bind. */
   if (snl->sink_kind == DBLINK_REMOTE_SINK_UPDATE_LOCAL_SUBQ)
     {
-      PT_ERROR (parser, upd_spec,
-		"dblink: remote UPDATE with local subquery is not supported yet (under construction)");
+      node->flag.cannot_prepare = 0;
+      pt_setup_dblink_sink_spec (parser, node, upd_spec, snl);
       return;
     }
 
