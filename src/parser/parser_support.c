@@ -11999,51 +11999,152 @@ pt_convert_dblink_delete_query (PARSER_CONTEXT * parser, PT_NODE * node, SERVER_
   return;
 }
 
-/* true iff the UPDATE WHERE clause is a single positive predicate over a subquery that the value-push sink
- * supports by shape: col IN (subquery), col = ANY (subquery), or a scalar comparison
- * col {= | < | > | <= | >=} (subquery). Forms excluded here fall through to the existing "local mixed remote
- * DML is not allowed" rejection: OR / multiple predicates (op PT_OR/PT_AND or a CNF list, caught by op or
- * cond->next), comparison ANY/ALL (PT_*_SOME except PT_EQ_SOME, PT_*_ALL), negation (PT_IS_NOT_IN, PT_NE),
- * EXISTS, a value-list IN (arg2 is not a query), and a join-shaped WHERE over a local spec (arg2 is a name).
- *
- * Correlation and row/multi-column subqueries are NOT decided here: a correlated or row subquery that passes
- * this shape gate is routed to the sink and has to be rejected downstream, where the reference to the outer
- * target (or the multi-column shape) is resolvable.
- *
- * This intentionally duplicates pt_dblink_delete_where_is_inscope instead of sharing one helper: the DELETE
- * gate accepts more forms as its own sink grows, and the UPDATE sink is not ready for those. Two operator
- * sets means widening one cannot silently widen the other. */
+/* walk callback: set *arg to true if the subtree holds a query node anywhere */
+static PT_NODE *
+pt_dblink_find_query (PARSER_CONTEXT * parser, PT_NODE * tree, void *arg, int *continue_walk)
+{
+  bool *has_query = (bool *) arg;
+
+  if (PT_IS_QUERY (tree))
+    {
+      *has_query = true;
+      *continue_walk = PT_STOP_WALK;
+    }
+
+  return tree;
+}
+
+/* true iff the subtree holds a query node anywhere */
 static bool
-pt_dblink_update_where_is_inscope (PT_NODE * node)
+pt_dblink_has_query (PARSER_CONTEXT * parser, PT_NODE * tree)
+{
+  bool has_query = false;
+
+  parser_walk_tree (parser, tree, pt_dblink_find_query, &has_query, NULL, NULL);
+
+  return has_query;
+}
+
+/* true iff the UPDATE WHERE clause is one the remote sink can honor. *has_driving_pred reports whether it
+ * carries the subquery predicate that feeds the per-row value push. Three shapes are accepted:
+ *
+ *   1. no WHERE at all                                          -> *has_driving_pred = false
+ *   2. a single remote-only predicate: col {= | <> | < | > | <= | >=} literal, which the remote SQL can
+ *      carry verbatim                                           -> *has_driving_pred = false
+ *   3. a single positive predicate over a subquery: col IN (subquery), col = ANY (subquery), or a scalar
+ *      comparison col {= | < | > | <= | >=} (subquery)          -> *has_driving_pred = true
+ *
+ * Shapes 1 and 2 exist for the SET track, where the only subquery sits in the assignments and the WHERE
+ * just selects the remote rows. A bare column can only resolve to the remote target -- the caller admits
+ * single-spec statements only -- so shape 2 doubles as the local-reference guard. It stays narrow on
+ * purpose, since nothing deparses a general WHERE into the remote SQL yet: a qualified column is rejected
+ * too (r.id = 1 is a PT_DOT_ node this early, before name resolution), though shape 3 takes one because it
+ * never inspects the left operand. Everything rejected here keeps the existing "local mixed remote DML is
+ * not allowed" error.
+ *
+ * Purity, correlation, and row/multi-column shape are NOT decided here. A subquery passing this gate is
+ * routed to the sink, and either the caller's refine step (purity) or a downstream check (correlation,
+ * row) has to reject it, where spec resolution makes that possible.
+ *
+ * Shape 3's operator set is a deliberate copy of pt_dblink_delete_where_is_inscope's rather than a shared
+ * helper: the DELETE gate keeps widening as its own sink grows, and the UPDATE sink is not ready for those
+ * forms. Shapes 1 and 2 and the out-param have no DELETE counterpart. */
+static bool
+pt_dblink_update_where_is_inscope (PT_NODE * node, bool * has_driving_pred)
 {
   PT_NODE *cond = node->info.update.search_cond;
-  PT_NODE *arg2;
+  PT_NODE *arg1, *arg2;
 
-  if (cond == NULL || cond->next != NULL || cond->node_type != PT_EXPR)
+  *has_driving_pred = false;
+
+  if (cond == NULL)
+    {
+      return true;		/* shape 1 */
+    }
+
+  if (cond->next != NULL || cond->node_type != PT_EXPR)
     {
       return false;
     }
+
+  arg1 = cond->info.expr.arg1;
+  arg2 = cond->info.expr.arg2;
 
   switch (cond->info.expr.op)
     {
     case PT_IS_IN:		/* col IN (subquery) */
     case PT_EQ_SOME:		/* col = ANY (subquery) */
-    case PT_EQ:		/* scalar: col {= | < | > | <= | >=} (subquery) */
+      break;
+
+    case PT_EQ:		/* scalar: col {= | < | > | <= | >=} (subquery), or shape 2 */
     case PT_LT:
     case PT_GT:
     case PT_LE:
     case PT_GE:
+    case PT_NE:		/* <> is remote-only (shape 2) territory: it has no value-push form */
+      if (arg1 != NULL && arg1->node_type == PT_NAME && arg2 != NULL && arg2->node_type == PT_VALUE)
+	{
+	  return true;		/* shape 2 */
+	}
+      if (cond->info.expr.op == PT_NE)
+	{
+	  return false;		/* col <> (subquery) is not a supported driving predicate */
+	}
       break;
+
     default:
       return false;
     }
 
-  arg2 = cond->info.expr.arg2;
   if (arg2 == NULL || !PT_IS_QUERY (arg2))
     {
       return false;		/* RHS must be a subquery, not a value list or column */
     }
 
+  *has_driving_pred = true;	/* shape 3 */
+  return true;
+}
+
+/* true iff every UPDATE SET assignment is one the remote sink can honor, with *num_set_subq set to how
+ * many of them are a scalar subquery. Two RHS forms are accepted:
+ *
+ *   - a bare subquery (col = (SELECT ...)): evaluated once and its value spliced into the remote SET
+ *     text as a literal -- this is the SET track, counted in *num_set_subq
+ *   - anything with no subquery in it (literal, remote column, expression over them): carried into the
+ *     remote SET text verbatim
+ *
+ * Like the WHERE axis, this judges shape only -- purity is the caller's refine step.
+ *
+ * Rejected: a multi-column row assignment ((c1, c2) = (SELECT ...)), which the per-column splice cannot
+ * express, and a subquery buried inside an expression (col = (SELECT ...) || 'x'), where splicing the
+ * scalar alone would drop the surrounding operator. Both fall through to the existing rejection. */
+static bool
+pt_dblink_update_set_is_inscope (PARSER_CONTEXT * parser, PT_NODE * node, int *num_set_subq)
+{
+  PT_ASSIGNMENTS_HELPER ea;
+  int cnt = 0;
+
+  *num_set_subq = 0;
+
+  pt_init_assignments_helper (parser, &ea, node->info.update.assignment);
+  while (pt_get_next_assignment (&ea))
+    {
+      if (ea.is_n_column || ea.rhs == NULL)
+	{
+	  return false;
+	}
+
+      if (PT_IS_QUERY (ea.rhs))
+	{
+	  cnt++;
+	}
+      else if (pt_dblink_has_query (parser, ea.rhs))
+	{
+	  return false;		/* subquery buried inside an expression */
+	}
+    }
+
+  *num_set_subq = cnt;
   return true;
 }
 
@@ -12066,20 +12167,31 @@ pt_convert_dblink_update_query (PARSER_CONTEXT * parser, PT_NODE * node, SERVER_
       return;
     }
 
-  /* remote UPDATE with a local subquery in WHERE: UPDATE remote_t@conn SET c1 = 'x'
-   *                                                WHERE rc1 IN (SELECT ... FROM local_t)
+  /* remote UPDATE with a local subquery: UPDATE remote_t@conn SET c1 = (SELECT ... FROM local_t)
+   *                                       WHERE rc1 IN (SELECT ... FROM local_t2)
    *
-   * Set optimistically when the single UPDATE target is remote (remote_upd == 1, no local target) and the WHERE
-   * clause has a supported shape; pt_convert_dblink_dml_query (below) refines this, keeping it only when the
-   * WHERE subquery is purely local and otherwise clearing it so the existing guards apply. WHERE shape
-   * restricted by pt_dblink_update_where_is_inscope -- see its doc comment for supported/excluded forms.
+   * The local subquery may sit in the WHERE clause (value-push driving predicate), in the SET assignments
+   * (scalar evaluated once and spliced into the remote SET text), or in both -- the two axes are judged
+   * independently and both have to be in scope, so one unsupported clause blocks the whole statement.
+   * At least one local subquery must exist, otherwise this is a plain remote UPDATE that keeps the ordinary
+   * pushdown path (the refine step below would clear it anyway, on local_cnt == 0).
    *
-   * A local subquery in the SET assignments is a second, independent detection axis (the local value is
-   * evaluated once and spliced into the remote SET text). It is not detected yet, so a statement whose only
-   * local subquery sits in SET keeps the existing rejection until that axis lands. */
-  if (remote_upd == 1 && local_upd == 0 && pt_dblink_update_where_is_inscope (node))
+   * Set optimistically here; pt_convert_dblink_dml_query (below) refines it, keeping the sink only when the
+   * subquery is purely local and otherwise clearing it so the existing guards apply.
+   *
+   * The single-spec requirement is what keeps a real join out: with an extra spec in the list, a bare column
+   * could resolve to a local table, and neither axis inspects spec resolution. Such a statement keeps the
+   * existing "local mixed remote DML is not allowed" rejection. */
+  if (remote_upd == 1 && local_upd == 0 && node->info.update.spec != NULL && node->info.update.spec->next == NULL)
     {
-      snl->sink_kind = DBLINK_REMOTE_SINK_UPDATE_LOCAL_SUBQ;
+      bool where_driving_pred = false;
+      int num_set_subq = 0;
+
+      if (pt_dblink_update_where_is_inscope (node, &where_driving_pred)
+	  && pt_dblink_update_set_is_inscope (parser, node, &num_set_subq) && (where_driving_pred || num_set_subq > 0))
+	{
+	  snl->sink_kind = DBLINK_REMOTE_SINK_UPDATE_LOCAL_SUBQ;
+	}
     }
 
   pt_convert_dblink_dml_query (parser, node, local_upd, remote_upd, snl);
