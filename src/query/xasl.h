@@ -468,6 +468,12 @@ struct delete_proc_node
   char *remote_op;		/* comparison operator pushed to the remote WHERE: "=", "<>", "<", ">", "<=", ">=" */
   DBLINK_REMOTE_SINK_MODE remote_sink_mode;	/* per-row push vs. locally-reduced single push */
   char *remote_extra_where;	/* deparsed remote-only AND arm(s), e.g. "name <> 'x'" (NULL if none) */
+  int remote_src_type;		/* DB_TYPE of the local subquery's source column (DB_TYPE_NULL when unknown).
+				 * The pushed value travels as a bare host variable, so the remote resolves its
+				 * domain from the target column and the value's declared type is lost -- which
+				 * makes the same statement delete different rows than the all-local form
+				 * Carrying the source type lets the sink restore it at execution
+				 * time; see dblink_dml_open(). */
 };
 
 typedef struct connectby_proc_node CONNECTBY_PROC_NODE;

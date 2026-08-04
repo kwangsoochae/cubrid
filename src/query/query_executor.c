@@ -563,7 +563,8 @@ static int qexec_execute_remote_dml_sink (THREAD_ENTRY * thread_p, XASL_NODE * x
 					  DBLINK_DML_KIND kind);
 static int qexec_execute_remote_delete_reduce (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state,
 					       REMOTE_DML_SINK * sink, const char *key_col, const char *op,
-					       const char *extra_where, DBLINK_REMOTE_SINK_MODE sink_mode);
+					       const char *extra_where, int src_type,
+					       DBLINK_REMOTE_SINK_MODE sink_mode);
 static int qexec_execute_remote_delete_subquery (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
 static int qexec_execute_insert (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state, bool skip_aptr);
 static int qexec_evaluate_row_default_exprs (THREAD_ENTRY * thread_p, INSERT_PROC_NODE * insert,
@@ -12569,6 +12570,7 @@ qexec_execute_remote_dml_sink (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_S
   char **attr_names = NULL;
   int num_attrs = 0;
   const char *key_col = NULL, *op = NULL, *extra_where = NULL;
+  int src_type = (int) DB_TYPE_NULL;
   DBLINK_DML_STATE dblink_state = { -1, -1 };
   DBLINK_REMOTE_SINK_MODE sink_mode = DBLINK_SINK_MODE_PER_ROW;
 
@@ -12601,6 +12603,7 @@ qexec_execute_remote_dml_sink (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_S
 	op = del->remote_op;
 	extra_where = del->remote_extra_where;
 	sink_mode = del->remote_sink_mode;
+	src_type = del->remote_src_type;
 	break;
       }
     default:
@@ -12619,12 +12622,13 @@ qexec_execute_remote_dml_sink (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_S
       && (sink_mode == DBLINK_SINK_MODE_REDUCE_MIN || sink_mode == DBLINK_SINK_MODE_REDUCE_MAX
 	  || sink_mode == DBLINK_SINK_MODE_EQ_ALL))
     {
-      return qexec_execute_remote_delete_reduce (thread_p, xasl, xasl_state, sink, key_col, op, extra_where, sink_mode);
+      return qexec_execute_remote_delete_reduce (thread_p, xasl, xasl_state, sink, key_col, op, extra_where, src_type,
+						 sink_mode);
     }
 
   /* open remote connection and prepare the INSERT/DELETE statement */
   if (dblink_dml_open (thread_p, kind, sink->url, sink->user, sink->pwd, sink->table_name, attr_names, num_attrs,
-		       val_no, key_col, op, extra_where, &dblink_state) != NO_ERROR)
+		       val_no, key_col, op, extra_where, src_type, &dblink_state) != NO_ERROR)
     {
       qexec_failure_line (__LINE__, xasl_state);
       goto exit_on_error;
@@ -12758,7 +12762,7 @@ exit_on_error:
 static int
 qexec_execute_remote_delete_reduce (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state,
 				    REMOTE_DML_SINK * sink, const char *key_col, const char *op,
-				    const char *extra_where, DBLINK_REMOTE_SINK_MODE sink_mode)
+				    const char *extra_where, int src_type, DBLINK_REMOTE_SINK_MODE sink_mode)
 {
   ACCESS_SPEC_TYPE *specp = xasl->spec_list;
   SCAN_CODE xb_scan, ls_scan;
@@ -12893,7 +12897,7 @@ qexec_execute_remote_delete_reduce (THREAD_ENTRY * thread_p, XASL_NODE * xasl, X
    * DB_NULL in this case, never read). extra_where itself never needs a placeholder (gate-enforced
    * literal-only shape), so it is passed through unconditionally either way. */
   if (dblink_dml_open (thread_p, DBLINK_DML_DELETE, sink->url, sink->user, sink->pwd, sink->table_name, NULL, 0, 0,
-		       (row_count == 0) ? NULL : key_col, (row_count == 0) ? NULL : op, extra_where,
+		       (row_count == 0) ? NULL : key_col, (row_count == 0) ? NULL : op, extra_where, src_type,
 		       &dblink_state) != NO_ERROR)
     {
       qexec_failure_line (__LINE__, xasl_state);

@@ -19990,6 +19990,22 @@ pt_to_delete_xasl_remote_subquery (PARSER_CONTEXT * parser, PT_NODE * statement)
   del->remote_op = pt_append_string (parser, NULL, op_sql);
   del->remote_sink_mode = sink_mode;
 
+  /* Source column type of the local subquery. The value is pushed as a bare host variable, so the remote
+   * resolves the marker's domain from the target column and the value's declared type disappears -- the
+   * same statement then deletes different rows than the all-local form. The sink restores
+   * the type at execution time when the target turns out to be narrower; it needs the source type here
+   * because by then only the value itself is available. */
+  {
+    /* the leading node, deliberately not "first non-hidden": the executor binds s_id->val_list->valp,
+     * which is also the leading one (qexec_collect_remote_delete_key). Both rest on the same premise --
+     * hidden columns added for ORDER BY / GROUP BY keys are appended, so the leading node is the visible
+     * one. Skipping hidden here alone would let the recorded type describe a different column than the
+     * value actually bound. */
+    PT_NODE *src_col = pt_get_select_list (parser, arg2);
+
+    del->remote_src_type = (src_col != NULL) ? (int) pt_type_enum_to_db (src_col->type_enum) : (int) DB_TYPE_NULL;
+  }
+
   {
     bool extra_where_error = false;
 
