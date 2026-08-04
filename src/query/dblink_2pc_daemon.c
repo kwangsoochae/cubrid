@@ -236,15 +236,24 @@ dblink_2pc_daemon_execute (cubthread::entry & thread_ref)
 	  send_state = e.state;
 	}
 
-      /* Send decision to this single participant */
-      ret = dblink_2pc_send_decision_one_participant (e.gtrid, &e.participant, (send_state == DBLINK_2PC_STATE_COMMIT));
-
-      if (ret != NO_ERROR)
+      if (e.state != DBLINK_2PC_STATE_DELIVERED)
 	{
-	  /* Error: re-enqueue this single participant for retry */
-	  (void) dblink_2pc_daemon_enqueue (e.gtrid, send_state, &e.participant);
-	  return;
+	  /* Send decision to this single participant */
+	  /* Retried on the daemon's own 1-second tick and nothing waits on it, so keep the CCI
+	   * default connect timeout here. */
+	  ret =
+	    dblink_2pc_send_decision_one_participant (e.gtrid, &e.participant,
+						      (send_state == DBLINK_2PC_STATE_COMMIT), 0);
+
+	  if (ret != NO_ERROR)
+	    {
+	      /* Error: re-enqueue this single participant for retry */
+	      (void) dblink_2pc_daemon_enqueue (e.gtrid, send_state, &e.participant);
+	      return;
+	    }
 	}
+      /* DBLINK_2PC_STATE_DELIVERED: the commit path already delivered the decision
+       * synchronously; only the _db_global_tran row remains to be deleted below. */
 
       thread_p = &thread_ref;
       /* P5: Crash after (6) send decision, before (7) DELETE - recovery: daemon resends decision then DELETE */

@@ -560,17 +560,30 @@ log_2pc_commit_first_phase (THREAD_ENTRY * thread_p, LOG_TDES * tdes, LOG_2PC_EX
 	    }
 	}
 
-      /* P4: Crash after (4),(3) before (5) enqueue - recovery: daemon sends decision then DELETE */
+      /* P4: Crash after (4),(3) before (5) send/enqueue - recovery: daemon sends decision then DELETE */
       FI_TEST (thread_p, FI_TEST_DBLINK_2PC_CRASH_BETWEEN_4_6, 0);
-      /* Enqueue one entry per participant for daemon (only failed participants are retried) */
       for (i = 0; i < tdes->coord->num_particps; i++)
 	{
 #ifdef SERVER_MODE
-	  (void) dblink_2pc_daemon_enqueue (tdes->gtrid, new_state, &participants[i]);
+	  /* Deliver the decision synchronously so the remote changes are already visible when this
+	   * statement's response reaches the client (read-your-writes).  The _db_global_tran row
+	   * cleanup stays with the 2PC daemon (DELIVERED entry): the row must not be deleted here,
+	   * because a post-commit sysop on this tdes acquires a new MVCCID after log_commit_local()
+	   * already completed the MVCC info, breaking the invariant checked in logtb_clear_tdes().
+	   * The connect is bounded: the client waits on it here, so a participant that stops responding
+	   * must not stall the commit response for the CCI default of 30 seconds.  On send failure - a
+	   * real error or the bound being exceeded - the decision is enqueued in its real state and the
+	   * daemon retries it exactly as it does today, so the worst case is the pre-existing behaviour. */
+	  error = dblink_2pc_send_decision_one_participant (tdes->gtrid, &participants[i], *decision,
+							   DBLINK_2PC_SYNC_DECISION_LOGIN_TIMEOUT_MSEC);
+	  (void) dblink_2pc_daemon_enqueue (tdes->gtrid,
+					    (error == NO_ERROR) ? DBLINK_2PC_STATE_DELIVERED : new_state,
+					    &participants[i]);
 #else
-	  /* SA mode: no daemon/queue; run send decision and _db_global_tran delete in a system transaction */
+	  /* SA mode: no daemon/queue; run send decision and _db_global_tran delete in a system transaction.
+	   * No bound here: there is no daemon to fall back to, so giving up early would lose the decision. */
 	  log_sysop_start (thread_p);
-	  error = dblink_2pc_send_decision_one_participant (tdes->gtrid, &participants[i], *decision);
+	  error = dblink_2pc_send_decision_one_participant (tdes->gtrid, &participants[i], *decision, 0);
 	  if (error == NO_ERROR)
 	    {
 	      int del_err = dblink_global_tran_delete_row (thread_p, tdes->gtrid, participants[i].conn_handle);

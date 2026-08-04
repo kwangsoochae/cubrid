@@ -155,14 +155,14 @@ dblink_2pc_end_tran (THREAD_ENTRY * thread_p, int gtrid, int num_particps, bool 
        * log_2pc_recovery() completes, so any participant that fails here will be
        * picked up and retried by the daemon.  Blocking the recovery thread on a
        * single gateway failure is not acceptable. */
-      (void) dblink_2pc_send_decision_one_participant (gtrid, &dblink[i], is_commit);
+      (void) dblink_2pc_send_decision_one_participant (gtrid, &dblink[i], is_commit, 0);
 #else
       /* SA_MODE: no daemon, and dblink_2pc_daemon_recovery_with_thread() is
        * SERVER_MODE-only, so there is no automatic retry after this call.
        * TODO: add an SA_MODE _db_global_tran scan in log_recovery() (mirroring
        * dblink_2pc_daemon_recovery_with_thread) so this path can also be
        * fire-and-forget instead of blocking indefinitely on a downed participant. */
-      while (dblink_2pc_send_decision_one_participant (gtrid, &dblink[i], is_commit) != NO_ERROR)
+      while (dblink_2pc_send_decision_one_participant (gtrid, &dblink[i], is_commit, 0) != NO_ERROR)
 	{
 	  thread_sleep (1000);	/* wait 1 second before retrying */
 	}
@@ -193,16 +193,21 @@ dblink_2pc_dump_participants (FILE * fp, int block_length, void *block_particps_
 /*
  * dblink_2pc_send_decision_one_participant - For coordinator recovery: send commit/abort to one participant.
  *   Reconnects using conn_url, user_name, password and sends XA end_tran with (gtrid, bqual).
+ *   login_timeout_msec bounds the gateway connect; 0 keeps the CCI default (CCI_LOGIN_TIMEOUT_DEFAULT).
+ *   Only the synchronous commit path passes a bound, because it is the only caller whose latency the
+ *   client waits on and the only one with a fallback (the 2PC daemon) when the attempt gives up.
  *   Returns NO_ERROR on success, ER_* on failure.
  */
 int
-dblink_2pc_send_decision_one_participant (int gtrid, DBLINK_CONN_INFO * participant, bool is_commit)
+dblink_2pc_send_decision_one_participant (int gtrid, DBLINK_CONN_INFO * participant, bool is_commit,
+					  int login_timeout_msec)
 {
   int err, bqual, conn_handle, len;
   XID xid;
   T_CCI_ERROR err_buf;
   char type = is_commit ? CCI_TRAN_COMMIT : CCI_TRAN_ROLLBACK;
-  char conn_url_gateway[MAX_LEN_CONNECTION_URL + 16];
+  char conn_url_gateway[MAX_LEN_CONNECTION_URL + 64];
+  char timeout_prop[32] = "";
 
   char *conn_url = participant->conn_url;
   char *user_name = participant->user_name;
@@ -228,13 +233,19 @@ dblink_2pc_send_decision_one_participant (int gtrid, DBLINK_CONN_INFO * particip
   memcpy (xid.data + xid.gtrid_length, &bqual, xid.bqual_length);
 
   /* connect to the participant through the gateway to send the decision */
+  if (login_timeout_msec > 0)
+    {
+      (void) snprintf (timeout_prop, sizeof (timeout_prop), "&login_timeout=%d", login_timeout_msec);
+    }
   if (strstr (conn_url, ":?"))
     {
-      len = snprintf (conn_url_gateway, sizeof (conn_url_gateway), "%s%s", conn_url, "&__gateway=true");
+      len =
+	snprintf (conn_url_gateway, sizeof (conn_url_gateway), "%s%s%s", conn_url, "&__gateway=true", timeout_prop);
     }
   else
     {
-      len = snprintf (conn_url_gateway, sizeof (conn_url_gateway), "%s%s", conn_url, "?__gateway=true");
+      len =
+	snprintf (conn_url_gateway, sizeof (conn_url_gateway), "%s%s%s", conn_url, "?__gateway=true", timeout_prop);
     }
   if (len < 0 || len >= (int) sizeof (conn_url_gateway))
     {

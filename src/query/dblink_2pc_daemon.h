@@ -45,6 +45,9 @@
 #define DBLINK_2PC_STATE_ABORT    'A'
 #define DBLINK_2PC_STATE_COMMIT   'C'
 #define DBLINK_2PC_STATE_EMPTY    ' '
+/* Queue-only state (never stored in _db_global_tran): the decision was already delivered
+ * synchronously on the commit path; the daemon only deletes the catalog row. */
+#define DBLINK_2PC_STATE_DELIVERED 'D'
 
 typedef struct global_tran_queue_entry GLOBAL_TRAN_QUEUE_ENTRY;
 struct global_tran_queue_entry

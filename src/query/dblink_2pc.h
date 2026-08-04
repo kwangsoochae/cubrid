@@ -32,11 +32,20 @@
 
 #include "thread_compat.hpp"
 
+/* Gateway connect timeout (msec) used only when the commit path delivers the decision synchronously.
+ * The client waits on that connect, so it must not inherit the CCI default (30 seconds): when the bound
+ * is exceeded the attempt fails and the decision falls back to the 2PC daemon, which is exactly the
+ * pre-existing asynchronous behaviour.  All other callers (daemon retry, recovery) pass 0 and keep the
+ * CCI default, because nothing waits on them and they have no fallback of their own. */
+#define DBLINK_2PC_SYNC_DECISION_LOGIN_TIMEOUT_MSEC 1000
+
 extern int dblink_2pc_get_participants (THREAD_ENTRY * thread_p, int *particp_id_length, void **block_particps_ids);
 extern bool dblink_2pc_send_prepare (THREAD_ENTRY * thread_p, int gtrid, int num_partcps, void *block_particps_ids);
 extern void dblink_2pc_end_tran (THREAD_ENTRY * thread_p, int gtrid, int num_particps, bool is_commit,
 				 void *block_particps_ids);
 extern void dblink_2pc_dump_participants (FILE * fp, int block_length, void *block_particps_ids);
-/* For coordinator recovery: send commit/abort decision to one participant by reconnecting. */
-extern int dblink_2pc_send_decision_one_participant (int gtrid, DBLINK_CONN_INFO * participant, bool is_commit);
+/* For coordinator recovery: send commit/abort decision to one participant by reconnecting.
+ * login_timeout_msec bounds the gateway connect; 0 keeps the CCI default. */
+extern int dblink_2pc_send_decision_one_participant (int gtrid, DBLINK_CONN_INFO * participant, bool is_commit,
+						     int login_timeout_msec);
 #endif
