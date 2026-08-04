@@ -169,9 +169,10 @@ fn_xa_end_tran (SOCKET sock_fd, int argc, void **argv, T_NET_BUF * net_buf, T_RE
       err_code = db_get_global_transaction_info (gtrids[i], (void *) &tmp_xid, sizeof (XID));
       if (err_code < 0)
 	{
-	  ERROR_INFO_SET (err_code, DBMS_ERROR_INDICATOR);
-	  NET_BUF_ERR_SET (net_buf);
-	  return FN_KEEP_CONN;
+	  /* The branch may have completed after db_2pc_prepared_transactions() listed it
+	   * (its decision can arrive on another connection).  A completed branch can no
+	   * longer match the target xid, so skip it instead of failing the whole request. */
+	  continue;
 	}
       if (compare_xid (&xid, &tmp_xid) == 0)
 	{

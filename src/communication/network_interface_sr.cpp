@@ -3728,6 +3728,10 @@ stran_server_get_global_tran_info (THREAD_ENTRY *thread_p, unsigned int rid, cha
     {
       (void) return_error_to_client (thread_p, rid);
       size = 0;
+      /* css_send_reply_and_data_to_client requires buffer and buffer_size to be consistent:
+       * a non-NULL buffer with size 0 trips its assertion.  Nothing is sent on failure. */
+      free (buffer);
+      buffer = NULL;
     }
 
   ptr = or_pack_int (reply, size);
