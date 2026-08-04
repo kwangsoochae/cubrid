@@ -1492,7 +1492,8 @@ dblink_dml_delete_src_may_need_cast (int src_type)
  *
  * The value goes out as a bare host variable, so the remote resolves the marker's domain from the target
  * column. A domain narrower than the source silently reshapes the value -- CHAR pads trailing blanks,
- * DATE drops the time part -- and the comparison stops matching what the all-local form matches.
+ * DATE drops the time part, TIMESTAMP drops the fractional second -- and the comparison stops matching
+ * what the all-local form matches.
  *
  * Fail-closed: only combinations measured to diverge return a cast; everything else, including an
  * unresolved marker (CCI_U_TYPE_NULL), keeps the bare placeholder.
@@ -1515,8 +1516,17 @@ dblink_dml_delete_cast_type (int marker_type, int src_type)
       return "DATETIME";
     }
 
-  /* Everything else keeps the bare placeholder. Not measured yet, so not touched: national character
-   * types, TIMESTAMP sources, and numeric/precision narrowing. */
+  if (marker_type == (int) CCI_U_TYPE_TIMESTAMP && src_type == (int) DB_TYPE_DATETIME)
+    {
+      /* TIMESTAMP target, DATETIME source: TIMESTAMP keeps whole seconds, so a value carrying a fractional
+       * second is truncated into it and starts matching the whole-second row. A value already on a second
+       * boundary matches either way, which is why this only shows up with a sub-second source value. */
+      return "DATETIME";
+    }
+
+  /* Everything else keeps the bare placeholder. Measured and found not to diverge: national character
+   * types (NCHAR target from VARCHAR or NCHAR VARYING source), numeric precision narrowing, and
+   * same-type length narrowing. Not measured: the remaining date/time zone-qualified types. */
   return NULL;
 }
 
