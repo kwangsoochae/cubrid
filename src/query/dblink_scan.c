@@ -43,6 +43,7 @@
 #include "db_date.h"
 #include "tz_support.h"
 #include <cas_cci.h>
+#include <broker_cas_protocol.h>	/* CAS_*_DBMS_* values returned by cci_get_dbms_type */
 
 #include <db_json.hpp>
 
@@ -1469,26 +1470,44 @@ sql_build_error:
 }
 
 /*
- * dblink_dml_delete_src_may_need_cast () - Can a source column of this type ever need its declared type
- *   restored at the remote bind site?
+ * dblink_dml_delete_src_may_need_cast () - Is this source type one whose cast decision needs the marker?
  *   return: true when it is worth asking the remote for the marker's domain
  *   src_type(in): DB_TYPE of the local subquery's source column
  *
- * A cost screen, not a correctness requirement: asking costs a round-trip (CAS_FC_PARAMETER_INFO) per
- * prepared DELETE, and only the types dblink_dml_delete_cast_type() can act on can ever lead to a cast.
+ * A cost screen, not a correctness requirement. Only the date/time sources qualify: there an
+ * unnecessary cast costs the remote index, so the round-trip (CAS_FC_PARAMETER_INFO) buys the ability
+ * to skip it. A VARCHAR source is not here -- its cast is decided before the first prepare, where it
+ * costs nothing to be unconditional (see dblink_dml_open).
  */
 static bool
 dblink_dml_delete_src_may_need_cast (int src_type)
 {
   switch (src_type)
     {
-    case DB_TYPE_VARCHAR:
     case DB_TYPE_DATETIME:
     case DB_TYPE_TIMESTAMP:
       return true;
     default:
       return false;
     }
+}
+
+/*
+ * dblink_dml_delete_remote_is_cubrid () - Is the remote a native CUBRID server?
+ *   return: true only for a direct or proxied CUBRID connection
+ *   conn_handle(in): open CCI connection
+ *
+ * Free to ask: cci_get_dbms_type() returns broker_info[BROKER_INFO_DBMS_TYPE], which the connection
+ * handshake already filled in, so this is a memory read rather than a round-trip. Everything else --
+ * the CGW gateways and anything unrecognised -- is treated as not-CUBRID, because the cast this
+ * guards is CUBRID syntax that Oracle and MySQL reject.
+ */
+static bool
+dblink_dml_delete_remote_is_cubrid (int conn_handle)
+{
+  int dbms_type = cci_get_dbms_type (conn_handle);
+
+  return dbms_type == CAS_DBMS_CUBRID || dbms_type == CAS_PROXY_DBMS_CUBRID;
 }
 
 /*
@@ -1529,29 +1548,25 @@ dblink_dml_delete_marker_is_temporal (int marker_type)
  * column and reshapes the value into it, and the comparison stops matching what the all-local form
  * matches. Each branch below says what its own domain loses.
  *
- * The two rules are deliberately not the same shape. Character and numeric targets cast only for the
- * one pair measured to diverge; sixteen other pairs there agreed with the all-local form, so there is
- * nothing to generalize. Date/time casts on any domain mismatch. Equal domains keep the bare
- * placeholder, and so does an unresolved marker (CCI_U_TYPE_NULL) or one outside both rules.
+ * Only date/time reaches here. A VARCHAR source is decided before the first prepare instead, because
+ * there the marker adds nothing: casting a VARCHAR source is right for every target measured, and it
+ * keeps the remote index (a CHAR column against CAST(? AS VARCHAR) still reads one key). Date/time has
+ * to ask, because there an unnecessary cast is not free -- on a 2000-row remote DATE column "d = ?"
+ * reads one key while "d = CAST(? AS DATETIME)" scans all 2000, once per pushed row. Asking the marker
+ * buys the ability to leave the bare placeholder alone when the domains already agree. (When they do
+ * not, that scan is the price of the comparison the statement asks for; the all-local form scans the
+ * same 2000 for the same predicate.)
  *
- * A date/time cast costs an index: on a 2000-row remote DATE column, "d = ?" reads one key and
- * "d = CAST(? AS DATETIME)" scans all 2000, once per pushed row. That is the price of the comparison
- * the statement asks for -- the all-local form scans the same 2000 for the same predicate. The
- * character rule does not pay it; CAST(? AS VARCHAR) against a CHAR column still reads one key.
+ * Within date/time the rule is the family, not a pair table: cast whenever the marker domain differs
+ * from the source type. An unresolved marker (CCI_U_TYPE_NULL) or one outside the family keeps bare.
  */
 static const char *
 dblink_dml_delete_cast_type (int marker_type, int src_type)
 {
   /* marker_type is the CCI *ext* type as reported for the marker. The sink's DELETE has a single scalar
-   * marker, so it carries none of the collection bits and compares equal to the plain CCI_U_TYPE_* value. */
-  if (marker_type == (int) CCI_U_TYPE_CHAR && src_type == (int) DB_TYPE_VARCHAR)
-    {
-      /* CHAR target, VARCHAR source: a shorter value gets blank-padded into CHAR(n) and starts matching
-       * rows that the all-local form leaves alone. A CHAR source needs no cast -- both sides pad alike. */
-      return "VARCHAR";
-    }
-
-  /* Date/time as a family rather than pair by pair: every measured pair whose target domain differs from
+   * marker, so it carries none of the collection bits and compares equal to the plain CCI_U_TYPE_* value.
+   *
+   * Date/time as a family rather than pair by pair: every measured pair whose target domain differs from
    * the source type diverged. DATE drops the time part, TIME drops the date part, TIMESTAMP drops the
    * fractional second, and the zone-qualified domains reinterpret the value. One of them does more than
    * delete different rows -- with a TIME target the all-local form fails type checking ("'=' operator is
@@ -1769,7 +1784,21 @@ dblink_dml_open (THREAD_ENTRY * thread_p, DBLINK_DML_KIND kind, const char *url,
       ret = dblink_dml_build_insert_sql (thread_p, table_name, attr_names, num_attrs, num_bind, &sql);
       break;
     case DBLINK_DML_DELETE:
-      ret = dblink_dml_build_delete_sql (thread_p, table_name, key_col, op, extra_where, NULL, &sql);
+      /* A VARCHAR source is decided here rather than from the marker, so the cast rides the first
+       * prepare and the statement is never prepared twice. Measured: the round-trip that would tell us
+       * the target type costs ~30us, but the re-prepare it leads to costs ~473us -- most of a whole
+       * prepare/bind/execute (~640us). Casting a VARCHAR source agreed with the all-local form for every
+       * target measured (CHAR, VARCHAR, INT, NUMERIC, DATE, BIT) and keeps the remote index, so there is
+       * nothing the marker would change. The vendor check is a memory read, not a round-trip. */
+      if (key_col != NULL && src_type == (int) DB_TYPE_VARCHAR
+	  && dblink_dml_delete_remote_is_cubrid (state->conn_handle))
+	{
+	  ret = dblink_dml_build_delete_sql (thread_p, table_name, key_col, op, extra_where, "VARCHAR", &sql);
+	}
+      else
+	{
+	  ret = dblink_dml_build_delete_sql (thread_p, table_name, key_col, op, extra_where, NULL, &sql);
+	}
       break;
     default:
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK, 1, "remote DML sink: unknown kind");
@@ -1793,11 +1822,14 @@ dblink_dml_open (THREAD_ENTRY * thread_p, DBLINK_DML_KIND kind, const char *url,
       return ER_DBLINK;
     }
 
-  /* Ask the remote for the marker's domain -- it resolves that from the target column, and a DML prepare
-   * carries no column information (CAS ships that only for SELECT), so this is the sink's only way to see
-   * the target type. Answering at all also identifies the vendor: CGW has this as fn_not_supported, and
-   * that failure just leaves the historical statement in place. */
-  if (kind == DBLINK_DML_DELETE && key_col != NULL && dblink_dml_delete_src_may_need_cast (src_type))
+  /* Date/time only -- the VARCHAR case was already folded into the prepare above. Ask the remote for the
+   * marker's domain: it resolves that from the target column, and a DML prepare carries no column
+   * information (CAS ships that only for SELECT), so this is the sink's only way to see the target type.
+   * Worth a round-trip here, unlike the VARCHAR case, because an unnecessary date/time cast costs the
+   * remote index -- knowing the target lets us leave the bare placeholder alone when the domains already
+   * agree. Gated on the same vendor check as the VARCHAR case, so a gateway is neither asked nor cast. */
+  if (kind == DBLINK_DML_DELETE && key_col != NULL && dblink_dml_delete_src_may_need_cast (src_type)
+      && dblink_dml_delete_remote_is_cubrid (state->conn_handle))
     {
       T_CCI_PARAM_INFO *param_info = NULL;
       T_CCI_ERROR pi_err;
@@ -1827,9 +1859,8 @@ dblink_dml_open (THREAD_ENTRY * thread_p, DBLINK_DML_KIND kind, const char *url,
 	    }
 
 	  /* Raised, not swallowed: the quiet alternative -- drop the cast, run the bare statement -- goes back
-	   * to deleting the wrong rows with nothing to show for it.
-	   * Known gap: a gateway that ever implements parameter_info would land here and reject CUBRID cast
-	   * syntax, turning a working statement into an error. Guarding that needs a real vendor check. */
+	   * to deleting the wrong rows with nothing to show for it. Only a CUBRID remote reaches here
+	   * (dbms_type gate above), so this is not the place a gateway would meet CUBRID cast syntax. */
 	  req = cci_prepare (state->conn_handle, sql, 0, &err_buf);
 	  db_private_free (thread_p, sql);
 	  if (req < 0)
