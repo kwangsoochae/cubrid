@@ -1480,7 +1480,42 @@ sql_build_error:
 static bool
 dblink_dml_delete_src_may_need_cast (int src_type)
 {
-  return src_type == (int) DB_TYPE_VARCHAR || src_type == (int) DB_TYPE_DATETIME;
+  switch (src_type)
+    {
+    case DB_TYPE_VARCHAR:
+    case DB_TYPE_DATETIME:
+    case DB_TYPE_TIMESTAMP:
+      return true;
+    default:
+      return false;
+    }
+}
+
+/*
+ * dblink_dml_delete_marker_is_temporal () - Is the marker domain one of the date/time types?
+ *   return: true for the eight date/time domains a remote column can resolve a marker to
+ *   marker_type(in): CCI type the remote reported for the marker
+ *
+ * Every pair within this family that loses information was measured to diverge, so the family is
+ * treated as a whole rather than pair by pair (see dblink_dml_delete_cast_type).
+ */
+static bool
+dblink_dml_delete_marker_is_temporal (int marker_type)
+{
+  switch (marker_type)
+    {
+    case CCI_U_TYPE_DATE:
+    case CCI_U_TYPE_TIME:
+    case CCI_U_TYPE_TIMESTAMP:
+    case CCI_U_TYPE_DATETIME:
+    case CCI_U_TYPE_TIMESTAMPTZ:
+    case CCI_U_TYPE_TIMESTAMPLTZ:
+    case CCI_U_TYPE_DATETIMETZ:
+    case CCI_U_TYPE_DATETIMELTZ:
+      return true;
+    default:
+      return false;
+    }
 }
 
 /*
@@ -1491,12 +1526,18 @@ dblink_dml_delete_src_may_need_cast (int src_type)
  *   src_type(in)   : DB_TYPE of the local subquery's source column (DELETE_PROC_NODE.remote_src_type)
  *
  * The value goes out as a bare host variable, so the remote resolves the marker's domain from the target
- * column. A domain narrower than the source silently reshapes the value -- CHAR pads trailing blanks,
- * DATE drops the time part, TIMESTAMP drops the fractional second -- and the comparison stops matching
- * what the all-local form matches.
+ * column and reshapes the value into it, and the comparison stops matching what the all-local form
+ * matches. Each branch below says what its own domain loses.
  *
- * Fail-closed: only combinations measured to diverge return a cast; everything else, including an
- * unresolved marker (CCI_U_TYPE_NULL), keeps the bare placeholder.
+ * The two rules are deliberately not the same shape. Character and numeric targets cast only for the
+ * one pair measured to diverge; sixteen other pairs there agreed with the all-local form, so there is
+ * nothing to generalize. Date/time casts on any domain mismatch. Equal domains keep the bare
+ * placeholder, and so does an unresolved marker (CCI_U_TYPE_NULL) or one outside both rules.
+ *
+ * A date/time cast costs an index: on a 2000-row remote DATE column, "d = ?" reads one key and
+ * "d = CAST(? AS DATETIME)" scans all 2000, once per pushed row. That is the price of the comparison
+ * the statement asks for -- the all-local form scans the same 2000 for the same predicate. The
+ * character rule does not pay it; CAST(? AS VARCHAR) against a CHAR column still reads one key.
  */
 static const char *
 dblink_dml_delete_cast_type (int marker_type, int src_type)
@@ -1510,23 +1551,26 @@ dblink_dml_delete_cast_type (int marker_type, int src_type)
       return "VARCHAR";
     }
 
-  if (marker_type == (int) CCI_U_TYPE_DATE && src_type == (int) DB_TYPE_DATETIME)
+  /* Date/time as a family rather than pair by pair: every measured pair whose target domain differs from
+   * the source type diverged. DATE drops the time part, TIME drops the date part, TIMESTAMP drops the
+   * fractional second, and the zone-qualified domains reinterpret the value. One of them does more than
+   * delete different rows -- with a TIME target the all-local form fails type checking ("'=' operator is
+   * not defined on types time and datetime") while the marker form silently deletes a row; restoring the
+   * source type puts that back on the error. */
+  if (dblink_dml_delete_marker_is_temporal (marker_type))
     {
-      /* DATE target, DATETIME source: the value loses its time part and starts matching the date-only row. */
-      return "DATETIME";
+      if (src_type == (int) DB_TYPE_DATETIME && marker_type != (int) CCI_U_TYPE_DATETIME)
+	{
+	  return "DATETIME";
+	}
+      if (src_type == (int) DB_TYPE_TIMESTAMP && marker_type != (int) CCI_U_TYPE_TIMESTAMP)
+	{
+	  return "TIMESTAMP";
+	}
     }
 
-  if (marker_type == (int) CCI_U_TYPE_TIMESTAMP && src_type == (int) DB_TYPE_DATETIME)
-    {
-      /* TIMESTAMP target, DATETIME source: TIMESTAMP keeps whole seconds, so a value carrying a fractional
-       * second is truncated into it and starts matching the whole-second row. A value already on a second
-       * boundary matches either way, which is why this only shows up with a sub-second source value. */
-      return "DATETIME";
-    }
-
-  /* Everything else keeps the bare placeholder. Measured and found not to diverge: national character
-   * types (NCHAR target from VARCHAR or NCHAR VARYING source), numeric precision narrowing, and
-   * same-type length narrowing. Not measured: the remaining date/time zone-qualified types. */
+  /* A zone-qualified *source* is a separate problem no cast can reach: cci_bind_param rejects those
+   * types, so the statement errors before any comparison happens. */
   return NULL;
 }
 
