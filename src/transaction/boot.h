@@ -40,6 +40,7 @@
          || (client_type) == DB_CLIENT_TYPE_READ_ONLY_BROKER \
          || (client_type) == DB_CLIENT_TYPE_RW_BROKER_REPLICA_ONLY \
          || (client_type) == DB_CLIENT_TYPE_RO_BROKER_REPLICA_ONLY \
+         || (client_type) == DB_CLIENT_TYPE_XA_RECOVERY \
          || (client_type) == DB_CLIENT_TYPE_LOADDB_UTILITY)
 
 #define BOOT_READ_ONLY_CLIENT_TYPE(client_type) \
@@ -93,6 +94,7 @@
          || (client_type) == DB_CLIENT_TYPE_READ_ONLY_BROKER \
          || (client_type) == DB_CLIENT_TYPE_SLAVE_ONLY_BROKER \
          || BOOT_REPLICA_ONLY_BROKER_CLIENT_TYPE (client_type) \
+         || (client_type) == DB_CLIENT_TYPE_XA_RECOVERY \
          || (client_type) == DB_CLIENT_TYPE_LOADDB_UTILITY)
 
 #define BOOT_REPLICA_ONLY_BROKER_CLIENT_TYPE(client_type) \
@@ -110,7 +112,8 @@
         ((client_type) == DB_CLIENT_TYPE_BROKER \
          || (client_type) == DB_CLIENT_TYPE_READ_ONLY_BROKER \
          || (client_type) == DB_CLIENT_TYPE_SLAVE_ONLY_BROKER \
-         || BOOT_REPLICA_ONLY_BROKER_CLIENT_TYPE (client_type))
+         || BOOT_REPLICA_ONLY_BROKER_CLIENT_TYPE (client_type) \
+         || (client_type) == DB_CLIENT_TYPE_XA_RECOVERY)
 
 /*
  * BOOT_IS_ALLOWED_CLIENT_TYPE_IN_MT_MODE()

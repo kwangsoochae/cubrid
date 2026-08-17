@@ -60,6 +60,11 @@ enum db_client_type
   DB_CLIENT_TYPE_ADMIN_LOADDB_COMPAT_UNDER_11_4 = 20,
   DB_CLIENT_TYPE_LOADDB_UTILITY = 21,
 
+  /* delivers a 2PC decision to a dblink participant.  It arrives through a broker like any
+   * other client and keeps the normal-client semantics (see BOOT_NORMAL_CLIENT_TYPE); it is
+   * told apart only to claim a transaction slot reserve, which the connection rules decide. */
+  DB_CLIENT_TYPE_XA_RECOVERY = 22,
+
   DB_CLIENT_TYPE_MAX
 };
 

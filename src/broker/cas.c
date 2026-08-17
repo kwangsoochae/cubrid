@@ -377,7 +377,7 @@ cas_db_connect (SOCKET client_sock_fd, const char *db_name, const char *db_user,
 {
   int err_code;
   char *db_err_msg = NULL;
-  err_code = ux_database_connect ((char *) db_name, (char *) db_user, (char *) db_passwd, &db_err_msg);
+  err_code = ux_database_connect ((char *) db_name, (char *) db_user, (char *) db_passwd, url, &db_err_msg);
   if (err_code < 0)
     {
       char msg_buf[LINE_MAX];
@@ -552,7 +552,7 @@ conn_retry:
 
     if (cas_db_user[0] != '\0')
       {
-	err_code = ux_database_connect (cas_db_name, cas_db_user, cas_db_passwd, NULL);
+	err_code = ux_database_connect (cas_db_name, cas_db_user, cas_db_passwd, NULL, NULL);
 	if (err_code < 0)
 	  {
 	    clear_db_connection_info ();
@@ -904,7 +904,7 @@ process_request (SOCKET sock_fd, T_NET_BUF * net_buf, T_REQ_INFO * req_info, SOC
 
 	      set_db_connection_info ();
 
-	      err_code = ux_database_connect (cas_db_name, cas_db_user, cas_db_passwd, NULL);
+	      err_code = ux_database_connect (cas_db_name, cas_db_user, cas_db_passwd, NULL, NULL);
 	      if (err_code < 0)
 		{
 		  clear_db_connection_info ();

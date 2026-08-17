@@ -92,6 +92,10 @@
 #define FK_INFO_SORT_BY_FKTABLE_NAME	2
 #define DBLINK_HINT                     "DBLINK"
 
+/* Written by dblink_2pc_send_decision_one_participant() into the participant's connection URL.
+ * Keep in step with DBLINK_2PC_DECISION_URL_PROPS in src/query/dblink_2pc.c. */
+#define CAS_XA_RECOVERY_URL_PROPERTY    "__xa_recovery=true"
+
 #define CLASS_UNIQUE_NAME_EXPR(is_system_class_expr, owner_name_expr, class_name_expr) \
   "CASE " \
     "WHEN (" is_system_class_expr ") = 'NO' OR " owner_name_expr " = '" AU_INFORMATION_SCHEMA_USER_NAME "' " \
@@ -355,7 +359,9 @@ ux_check_connection (void)
 			     "ux_check_connection: ux_database_shutdown()" " ux_database_connect(%s, %s)", dbname,
 			     dbuser);
 	      ux_database_shutdown (true);
-	      ux_database_connect (dbname, dbuser, dbpasswd, NULL);
+	      /* The originating URL is not kept across a reset, so this reconnect falls back to the
+	       * broker-derived client type. */
+	      ux_database_connect (dbname, dbuser, dbpasswd, NULL, NULL);
 	    }
 	}
       return 0;
@@ -380,7 +386,7 @@ ux_set_session_id (const SESSION_ID session_id)
 }
 
 int
-ux_database_connect (char *db_name, char *db_user, char *db_passwd, char **db_err_msg)
+ux_database_connect (char *db_name, char *db_user, char *db_passwd, const char *url, char **db_err_msg)
 {
   int err_code, client_type;
   char *p = NULL;
@@ -441,6 +447,15 @@ ux_database_connect (char *db_name, char *db_user, char *db_passwd, char **db_er
 	    {
 	      client_type = DB_CLIENT_TYPE_RW_BROKER_REPLICA_ONLY;
 	      cas_log_debug (ARG_FILE_LINE, "ux_database_connect: read_write_replica_only_broker");
+	    }
+	  else if (url != NULL && strstr (url, CAS_XA_RECOVERY_URL_PROPERTY) != NULL)
+	    {
+	      /* A 2PC decision delivery, opened by dblink_2pc_send_decision_one_participant() with this
+	       * property in its URL.  Telling it apart only decides whether it may claim a reserved
+	       * transaction slot; in every other respect it stays a normal broker client.  The types
+	       * derived from the broker's access mode carry their own semantics, so they are left alone. */
+	      client_type = DB_CLIENT_TYPE_XA_RECOVERY;
+	      cas_log_debug (ARG_FILE_LINE, "ux_database_connect: xa_recovery");
 	    }
 	  else
 	    {
@@ -504,7 +519,7 @@ ux_database_connect (char *db_name, char *db_user, char *db_passwd, char **db_er
 	{
 	  ux_database_shutdown (true);
 
-	  return ux_database_connect (db_name, db_user, db_passwd, db_err_msg);
+	  return ux_database_connect (db_name, db_user, db_passwd, url, db_err_msg);
 	}
       (void) db_find_or_create_session (db_user, program_name);
 
