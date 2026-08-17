@@ -35,6 +35,16 @@
 // XXX: SHOULD BE THE LAST INCLUDE HEADER
 #include "memory_wrapper.hpp"
 
+/* Properties appended to the participant URL when a 2PC decision is delivered. __xa_recovery lets the
+ * participant tell this connection apart from ordinary traffic, so that it can be admitted while the
+ * transaction slots are exhausted: delivering the decision is the only way to release those slots, and
+ * an ordinary connection is refused at that point. */
+#define DBLINK_2PC_DECISION_URL_PROPS "__gateway=true&__xa_recovery=true"
+
+/* conn_url holds up to MAX_LEN_CONNECTION_URL characters, and one separator ('?' or '&') precedes the
+ * properties, whose sizeof already covers the terminator. */
+#define DBLINK_2PC_DECISION_URL_SIZE (MAX_LEN_CONNECTION_URL + 1 + sizeof (DBLINK_2PC_DECISION_URL_PROPS))
+
 int
 dblink_2pc_get_participants (THREAD_ENTRY * thread_p, int *partid_len, void **block_particps_ids)
 {
@@ -202,7 +212,7 @@ dblink_2pc_send_decision_one_participant (int gtrid, DBLINK_CONN_INFO * particip
   XID xid;
   T_CCI_ERROR err_buf;
   char type = is_commit ? CCI_TRAN_COMMIT : CCI_TRAN_ROLLBACK;
-  char conn_url_gateway[MAX_LEN_CONNECTION_URL + 16];
+  char conn_url_gateway[DBLINK_2PC_DECISION_URL_SIZE];
 
   char *conn_url = participant->conn_url;
   char *user_name = participant->user_name;
@@ -230,11 +240,11 @@ dblink_2pc_send_decision_one_participant (int gtrid, DBLINK_CONN_INFO * particip
   /* connect to the participant through the gateway to send the decision */
   if (strstr (conn_url, ":?"))
     {
-      len = snprintf (conn_url_gateway, sizeof (conn_url_gateway), "%s%s", conn_url, "&__gateway=true");
+      len = snprintf (conn_url_gateway, sizeof (conn_url_gateway), "%s&%s", conn_url, DBLINK_2PC_DECISION_URL_PROPS);
     }
   else
     {
-      len = snprintf (conn_url_gateway, sizeof (conn_url_gateway), "%s%s", conn_url, "?__gateway=true");
+      len = snprintf (conn_url_gateway, sizeof (conn_url_gateway), "%s?%s", conn_url, DBLINK_2PC_DECISION_URL_PROPS);
     }
   if (len < 0 || len >= (int) sizeof (conn_url_gateway))
     {
