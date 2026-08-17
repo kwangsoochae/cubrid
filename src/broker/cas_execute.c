@@ -329,6 +329,10 @@ static T_FETCH_FUNC fetch_func[] = {
 static char database_name[MAX_HA_DBINFO_LENGTH] = "";
 static char database_user[SRV_CON_DBUSER_SIZE] = "";
 static char database_passwd[SRV_CON_DBPASSWD_SIZE] = "";
+/* Whether the connection this CAS currently holds was registered as DB_CLIENT_TYPE_XA_RECOVERY.
+ * Such a connection may be sitting on a reserved transaction slot, so it must not be handed to an
+ * ordinary client by connection reuse. */
+static bool database_xa_recovery = false;
 static char cas_db_sys_param[128] = "";
 
 int
@@ -391,6 +395,7 @@ ux_database_connect (char *db_name, char *db_user, char *db_passwd, const char *
   int err_code, client_type;
   char *p = NULL;
   const char *host_connected = NULL;
+  bool is_xa_recovery;
 
   as_info->force_reconnect = false;
 
@@ -401,9 +406,19 @@ ux_database_connect (char *db_name, char *db_user, char *db_passwd, const char *
 
   host_connected = db_get_host_connected ();
 
+  is_xa_recovery = (url != NULL && strstr (url, CAS_XA_RECOVERY_URL_PROPERTY) != NULL);
+
+  /* A connection registered for a decision delivery may hold a reserved transaction slot.  A delivery
+   * that attached to its branch has already given that slot back, but one that found nothing to attach
+   * to - an already delivered branch, or an error - keeps it.  Reusing such a connection would let an
+   * ordinary client sit on the reserve, so reconnect instead and let it take a normal slot (or be
+   * refused, which is the correct answer once the normal slots are gone).  The opposite direction is
+   * deliberately left alone: a delivery reusing an ordinary connection needs no reserve, because that
+   * connection already holds a slot of its own. */
   if (cas_get_db_connect_status () != 1	/* DB_CONNECTION_STATUS_CONNECTED */
       || database_name[0] == '\0' || strcmp (database_name, db_name) != 0
-      || strcmp (as_info->database_host, host_connected) != 0)
+      || strcmp (as_info->database_host, host_connected) != 0
+      || (database_xa_recovery && !is_xa_recovery))
     {
       if (cas_get_db_connect_status () == -1)	/* DB_CONNECTION_STATUS_RESET */
 	{
@@ -448,7 +463,7 @@ ux_database_connect (char *db_name, char *db_user, char *db_passwd, const char *
 	      client_type = DB_CLIENT_TYPE_RW_BROKER_REPLICA_ONLY;
 	      cas_log_debug (ARG_FILE_LINE, "ux_database_connect: read_write_replica_only_broker");
 	    }
-	  else if (url != NULL && strstr (url, CAS_XA_RECOVERY_URL_PROPERTY) != NULL)
+	  else if (is_xa_recovery)
 	    {
 	      /* A 2PC decision delivery, opened by dblink_2pc_send_decision_one_participant() with this
 	       * property in its URL.  Telling it apart only decides whether it may claim a reserved
@@ -504,6 +519,7 @@ ux_database_connect (char *db_name, char *db_user, char *db_passwd, const char *
       strncpy (database_name, db_name, sizeof (database_name) - 1);
       strncpy (database_user, db_user, sizeof (database_user) - 1);
       strncpy (database_passwd, db_passwd, sizeof (database_passwd) - 1);
+      database_xa_recovery = (client_type == DB_CLIENT_TYPE_XA_RECOVERY);
 
       ux_get_default_setting ();
     }
@@ -628,6 +644,7 @@ ux_database_shutdown (bool request_server)
   memset (database_name, 0, sizeof (database_name));
   memset (database_user, 0, sizeof (database_user));
   memset (database_passwd, 0, sizeof (database_passwd));
+  database_xa_recovery = false;
   cas_default_isolation_level = 0;
   cas_default_lock_timeout = -1;
 }
