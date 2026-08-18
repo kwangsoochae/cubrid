@@ -1053,14 +1053,14 @@ process_request (SOCKET sock_fd, T_NET_BUF * net_buf, T_REQ_INFO * req_info, SOC
     }
 
   /* A connection opened to deliver a 2PC decision claims a reserved transaction index, so it must not
-   * be usable as an ordinary session: anyone able to put __xa_recovery in a URL would otherwise sit on
+   * be usable as an ordinary session: anyone able to put __xa_decision in a URL would otherwise sit on
    * the reserve.  A delivery is connect, xa_end_tran, disconnect, so only that is allowed, plus the
    * housekeeping the driver does around it - ending the transaction, closing the connection, and the
    * liveness check.  xa_prepare is left out on purpose: a delivery never prepares, and allowing it
    * would let such a connection leave a prepared branch of its own behind.  xa_recover is left out
    * too - a delivery never asks for the branch list, and that list is not something a forged
    * connection should be able to read. */
-  if (ux_is_xa_recovery_connection () && func_code != CAS_FC_XA_END_TRAN && func_code != CAS_FC_END_TRAN
+  if (ux_is_xa_decision_connection () && func_code != CAS_FC_XA_END_TRAN && func_code != CAS_FC_END_TRAN
       && func_code != CAS_FC_CON_CLOSE && func_code != CAS_FC_CHECK_CAS)
     {
       FREE_MEM (argv);

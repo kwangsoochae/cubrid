@@ -65,12 +65,12 @@ static bool css_Is_conn_rules_initialized = false;
 static int css_get_normal_client_max_conn (void);
 static int css_get_admin_client_max_conn (void);
 static int css_get_ha_client_max_conn (void);
-static int css_get_xa_recovery_client_max_conn (void);
+static int css_get_xa_decision_client_max_conn (void);
 
 static bool css_is_normal_client (BOOT_CLIENT_TYPE client_type);
 static bool css_is_admin_client (BOOT_CLIENT_TYPE client_type);
 static bool css_is_ha_client (BOOT_CLIENT_TYPE client_type);
-static bool css_is_xa_recovery_client (BOOT_CLIENT_TYPE client_type);
+static bool css_is_xa_decision_client (BOOT_CLIENT_TYPE client_type);
 
 static int css_get_required_conn_num_for_ha (void);
 
@@ -78,7 +78,7 @@ CSS_CONN_RULE_INFO css_Conn_rules[] = {
   {css_is_normal_client, css_get_normal_client_max_conn, CR_NORMAL_ONLY, 0, 0},
   {css_is_admin_client, css_get_admin_client_max_conn, CR_NORMAL_FIRST, 0, 0},
   {css_is_ha_client, css_get_ha_client_max_conn, CR_RESERVED_FIRST, 0, 0},
-  {css_is_xa_recovery_client, css_get_xa_recovery_client_max_conn, CR_RESERVED_FIRST, 0, 0}
+  {css_is_xa_decision_client, css_get_xa_decision_client_max_conn, CR_RESERVED_FIRST, 0, 0}
 };
 
 const int css_Conn_rules_size = DIM (css_Conn_rules);
@@ -114,7 +114,7 @@ css_get_ha_client_max_conn (void)
 }
 
 /*
- * css_get_xa_recovery_client_max_conn() -
+ * css_get_xa_decision_client_max_conn() -
  *   return: a num of reserved conn for a 2PC decision delivery
  *
  * Note: One reserved connection matches how deliveries are produced.  The 2PC daemon is the only
@@ -125,7 +125,7 @@ css_get_ha_client_max_conn (void)
  *       arriving meanwhile falls back to the normal pool, as CR_RESERVED_FIRST allows.
  */
 static int
-css_get_xa_recovery_client_max_conn (void)
+css_get_xa_decision_client_max_conn (void)
 {
   return 1;
 }
@@ -175,13 +175,13 @@ css_is_ha_client (BOOT_CLIENT_TYPE client_type)
 }
 
 /*
- * css_is_xa_recovery_client() -
+ * css_is_xa_decision_client() -
  *   return: whether a client delivers a 2PC decision or not
  */
 static bool
-css_is_xa_recovery_client (BOOT_CLIENT_TYPE client_type)
+css_is_xa_decision_client (BOOT_CLIENT_TYPE client_type)
 {
-  return client_type == DB_CLIENT_TYPE_XA_RECOVERY;
+  return client_type == DB_CLIENT_TYPE_XA_DECISION;
 }
 
 /*
@@ -266,7 +266,7 @@ css_get_normal_conn_num (void)
 
 /*
  * css_get_reserved_conn_num() - a total num of connections set aside for non-normal clients
- *   return: sum of the reserved quotas (admin, ha, xa recovery)
+ *   return: sum of the reserved quotas (admin, ha, xa decision)
  *
  * Note: These quotas are counted into MAX_NTRANS, but the transaction table hands indices out
  *       without looking at who is asking, so an ordinary client can take them all.  The caller uses

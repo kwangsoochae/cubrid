@@ -5985,8 +5985,8 @@ boot_client_type_to_string (BOOT_CLIENT_TYPE type)
       return "ADMIN_LOADDB_COMPAT_UNDER_11_4";
     case DB_CLIENT_TYPE_LOADDB_UTILITY:
       return "LOADDB_UTILITY";
-    case DB_CLIENT_TYPE_XA_RECOVERY:
-      return "XA_RECOVERY";
+    case DB_CLIENT_TYPE_XA_DECISION:
+      return "XA_DECISION";
     case DB_CLIENT_TYPE_UNKNOWN:
     default:
       return "UNKNOWN";

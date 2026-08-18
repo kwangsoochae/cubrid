@@ -94,7 +94,7 @@
 
 /* Written by dblink_2pc_send_decision_one_participant() into the participant's connection URL.
  * Keep in step with DBLINK_2PC_DECISION_URL_PROPS in src/query/dblink_2pc.c. */
-#define CAS_XA_RECOVERY_URL_PROPERTY    "__xa_recovery=true"
+#define CAS_XA_DECISION_URL_PROPERTY    "__xa_decision=true"
 
 #define CLASS_UNIQUE_NAME_EXPR(is_system_class_expr, owner_name_expr, class_name_expr) \
   "CASE " \
@@ -329,10 +329,10 @@ static T_FETCH_FUNC fetch_func[] = {
 static char database_name[MAX_HA_DBINFO_LENGTH] = "";
 static char database_user[SRV_CON_DBUSER_SIZE] = "";
 static char database_passwd[SRV_CON_DBPASSWD_SIZE] = "";
-/* Whether the connection this CAS currently holds was registered as DB_CLIENT_TYPE_XA_RECOVERY.
+/* Whether the connection this CAS currently holds was registered as DB_CLIENT_TYPE_XA_DECISION.
  * Such a connection may be sitting on a reserved transaction slot, so it must not be handed to an
  * ordinary client by connection reuse. */
-static bool database_xa_recovery = false;
+static bool database_xa_decision = false;
 static char cas_db_sys_param[128] = "";
 
 int
@@ -390,13 +390,13 @@ ux_set_session_id (const SESSION_ID session_id)
 }
 
 /*
- * ux_is_xa_recovery_connection() - whether this CAS holds a 2PC decision delivery connection
- *   return: true if the connection was registered as DB_CLIENT_TYPE_XA_RECOVERY
+ * ux_is_xa_decision_connection() - whether this CAS holds a 2PC decision delivery connection
+ *   return: true if the connection was registered as DB_CLIENT_TYPE_XA_DECISION
  */
 bool
-ux_is_xa_recovery_connection (void)
+ux_is_xa_decision_connection (void)
 {
-  return database_xa_recovery;
+  return database_xa_decision;
 }
 
 int
@@ -405,7 +405,7 @@ ux_database_connect (char *db_name, char *db_user, char *db_passwd, const char *
   int err_code, client_type;
   char *p = NULL;
   const char *host_connected = NULL;
-  bool is_xa_recovery;
+  bool is_xa_decision;
 
   as_info->force_reconnect = false;
 
@@ -416,7 +416,7 @@ ux_database_connect (char *db_name, char *db_user, char *db_passwd, const char *
 
   host_connected = db_get_host_connected ();
 
-  is_xa_recovery = (url != NULL && strstr (url, CAS_XA_RECOVERY_URL_PROPERTY) != NULL);
+  is_xa_decision = (url != NULL && strstr (url, CAS_XA_DECISION_URL_PROPERTY) != NULL);
 
   /* A connection registered for a decision delivery may hold a reserved transaction slot.  A delivery
    * that attached to its branch has already given that slot back, but one that found nothing to attach
@@ -428,7 +428,7 @@ ux_database_connect (char *db_name, char *db_user, char *db_passwd, const char *
   if (cas_get_db_connect_status () != 1	/* DB_CONNECTION_STATUS_CONNECTED */
       || database_name[0] == '\0' || strcmp (database_name, db_name) != 0
       || strcmp (as_info->database_host, host_connected) != 0
-      || (database_xa_recovery && !is_xa_recovery))
+      || (database_xa_decision && !is_xa_decision))
     {
       if (cas_get_db_connect_status () == -1)	/* DB_CONNECTION_STATUS_RESET */
 	{
@@ -473,14 +473,14 @@ ux_database_connect (char *db_name, char *db_user, char *db_passwd, const char *
 	      client_type = DB_CLIENT_TYPE_RW_BROKER_REPLICA_ONLY;
 	      cas_log_debug (ARG_FILE_LINE, "ux_database_connect: read_write_replica_only_broker");
 	    }
-	  else if (is_xa_recovery)
+	  else if (is_xa_decision)
 	    {
 	      /* A 2PC decision delivery, opened by dblink_2pc_send_decision_one_participant() with this
 	       * property in its URL.  Telling it apart only decides whether it may claim a reserved
 	       * transaction slot; in every other respect it stays a normal broker client.  The types
 	       * derived from the broker's access mode carry their own semantics, so they are left alone. */
-	      client_type = DB_CLIENT_TYPE_XA_RECOVERY;
-	      cas_log_debug (ARG_FILE_LINE, "ux_database_connect: xa_recovery");
+	      client_type = DB_CLIENT_TYPE_XA_DECISION;
+	      cas_log_debug (ARG_FILE_LINE, "ux_database_connect: xa_decision");
 	    }
 	  else
 	    {
@@ -529,7 +529,7 @@ ux_database_connect (char *db_name, char *db_user, char *db_passwd, const char *
       strncpy (database_name, db_name, sizeof (database_name) - 1);
       strncpy (database_user, db_user, sizeof (database_user) - 1);
       strncpy (database_passwd, db_passwd, sizeof (database_passwd) - 1);
-      database_xa_recovery = (client_type == DB_CLIENT_TYPE_XA_RECOVERY);
+      database_xa_decision = (client_type == DB_CLIENT_TYPE_XA_DECISION);
 
       ux_get_default_setting ();
     }
@@ -654,7 +654,7 @@ ux_database_shutdown (bool request_server)
   memset (database_name, 0, sizeof (database_name));
   memset (database_user, 0, sizeof (database_user));
   memset (database_passwd, 0, sizeof (database_passwd));
-  database_xa_recovery = false;
+  database_xa_decision = false;
   cas_default_isolation_level = 0;
   cas_default_lock_timeout = -1;
 }

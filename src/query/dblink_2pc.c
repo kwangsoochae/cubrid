@@ -35,11 +35,11 @@
 // XXX: SHOULD BE THE LAST INCLUDE HEADER
 #include "memory_wrapper.hpp"
 
-/* Properties appended to the participant URL when a 2PC decision is delivered. __xa_recovery lets the
+/* Properties appended to the participant URL when a 2PC decision is delivered. __xa_decision lets the
  * participant tell this connection apart from ordinary traffic, so that it can be admitted while the
  * transaction slots are exhausted: delivering the decision is the only way to release those slots, and
  * an ordinary connection is refused at that point. */
-#define DBLINK_2PC_DECISION_URL_PROPS "__gateway=true&__xa_recovery=true"
+#define DBLINK_2PC_DECISION_URL_PROPS "__gateway=true&__xa_decision=true"
 
 /* conn_url holds up to MAX_LEN_CONNECTION_URL characters, and one separator ('?' or '&') precedes the
  * properties, whose sizeof already covers the terminator. */
