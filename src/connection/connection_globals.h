@@ -96,5 +96,8 @@ extern SOCKET css_Pipe_to_master;
 extern const char css_Net_magic[CSS_NET_MAGIC_SIZE];
 extern void css_init_conn_rules (void);
 extern int css_get_max_conn (void);
+extern int css_get_normal_conn_num (void);
+extern int css_get_reserved_conn_num (void);
+extern bool css_is_reserved_client (BOOT_CLIENT_TYPE client_type);
 
 #endif /* _CONNECTION_GLOBALS_H_ */

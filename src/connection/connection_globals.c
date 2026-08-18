@@ -65,17 +65,20 @@ static bool css_Is_conn_rules_initialized = false;
 static int css_get_normal_client_max_conn (void);
 static int css_get_admin_client_max_conn (void);
 static int css_get_ha_client_max_conn (void);
+static int css_get_xa_recovery_client_max_conn (void);
 
 static bool css_is_normal_client (BOOT_CLIENT_TYPE client_type);
 static bool css_is_admin_client (BOOT_CLIENT_TYPE client_type);
 static bool css_is_ha_client (BOOT_CLIENT_TYPE client_type);
+static bool css_is_xa_recovery_client (BOOT_CLIENT_TYPE client_type);
 
 static int css_get_required_conn_num_for_ha (void);
 
 CSS_CONN_RULE_INFO css_Conn_rules[] = {
   {css_is_normal_client, css_get_normal_client_max_conn, CR_NORMAL_ONLY, 0, 0},
   {css_is_admin_client, css_get_admin_client_max_conn, CR_NORMAL_FIRST, 0, 0},
-  {css_is_ha_client, css_get_ha_client_max_conn, CR_RESERVED_FIRST, 0, 0}
+  {css_is_ha_client, css_get_ha_client_max_conn, CR_RESERVED_FIRST, 0, 0},
+  {css_is_xa_recovery_client, css_get_xa_recovery_client_max_conn, CR_RESERVED_FIRST, 0, 0}
 };
 
 const int css_Conn_rules_size = DIM (css_Conn_rules);
@@ -108,6 +111,23 @@ static int
 css_get_ha_client_max_conn (void)
 {
   return css_get_required_conn_num_for_ha ();
+}
+
+/*
+ * css_get_xa_recovery_client_max_conn() -
+ *   return: a num of reserved conn for a 2PC decision delivery
+ *
+ * Note: One reserved connection matches how deliveries are produced.  The 2PC daemon is the only
+ *       producer on the coordinator path - phase 1 only enqueues, and phase 2 runs solely when CUBRID
+ *       acts as an XA resource manager - and it takes one participant at a time, each delivery being
+ *       connect, end_tran, disconnect.  A delivery that leaves its connection behind, having found no
+ *       branch to attach to, holds the reserve until an ordinary client forces a reconnect; a delivery
+ *       arriving meanwhile falls back to the normal pool, as CR_RESERVED_FIRST allows.
+ */
+static int
+css_get_xa_recovery_client_max_conn (void)
+{
+  return 1;
 }
 
 /*
@@ -152,6 +172,16 @@ static bool
 css_is_ha_client (BOOT_CLIENT_TYPE client_type)
 {
   return BOOT_LOG_REPLICATOR_TYPE (client_type);
+}
+
+/*
+ * css_is_xa_recovery_client() -
+ *   return: whether a client delivers a 2PC decision or not
+ */
+static bool
+css_is_xa_recovery_client (BOOT_CLIENT_TYPE client_type)
+{
+  return client_type == DB_CLIENT_TYPE_XA_RECOVERY;
 }
 
 /*
@@ -217,6 +247,61 @@ css_init_conn_rules (void)
   css_Is_conn_rules_initialized = true;
 
   return;
+}
+
+/*
+ * css_get_normal_conn_num() - a num of connections ordinary clients may use
+ *   return: max_clients
+ */
+int
+css_get_normal_conn_num (void)
+{
+  if (!css_Is_conn_rules_initialized)
+    {
+      css_init_conn_rules ();
+    }
+
+  return css_Conn_rules[CSS_CR_NORMAL_ONLY_IDX].max_num_conn;
+}
+
+/*
+ * css_get_reserved_conn_num() - a total num of connections set aside for non-normal clients
+ *   return: sum of the reserved quotas (admin, ha, xa recovery)
+ *
+ * Note: These quotas are counted into MAX_NTRANS, but the transaction table hands indices out
+ *       without looking at who is asking, so an ordinary client can take them all.  The caller uses
+ *       this to keep that many indices out of ordinary reach.
+ */
+int
+css_get_reserved_conn_num (void)
+{
+  int i, total = 0;
+
+  if (!css_Is_conn_rules_initialized)
+    {
+      css_init_conn_rules ();
+    }
+
+  for (i = 0; i < css_Conn_rules_size; i++)
+    {
+      if (i != CSS_CR_NORMAL_ONLY_IDX)
+	{
+	  total += css_Conn_rules[i].max_num_conn;
+	}
+    }
+
+  return total;
+}
+
+/*
+ * css_is_reserved_client() - whether a client draws on a reserved quota
+ *   return: true if the client is not a normal one
+ *   client_type(in): a type of a client
+ */
+bool
+css_is_reserved_client (BOOT_CLIENT_TYPE client_type)
+{
+  return !css_is_normal_client (client_type);
 }
 
 /*

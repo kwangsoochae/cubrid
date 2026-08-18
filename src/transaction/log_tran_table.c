@@ -68,6 +68,7 @@
 #include "dbtype.h"
 #if defined (SERVER_MODE)
 #include "server_support.h"
+#include "connection_globals.h"
 #endif // SERVER_MODE
 #include "string_buffer.hpp"
 #if defined (SA_MODE)
@@ -904,6 +905,37 @@ logtb_set_tdes (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const BOOT_CLIENT_CRED
   tdes->m_log_postpone_cache.reset ();
 }
 
+#if defined(SERVER_MODE)
+/*
+ * logtb_count_ordinary_tran_indices - count indices held by clients that draw on the normal quota
+ *   return: number of such indices
+ *
+ * Note: Internal transactions carry DB_CLIENT_TYPE_UNKNOWN (the default credential) or
+ *       DB_CLIENT_TYPE_SYSTEM_INTERNAL and are not counted; neither are the reserved categories.
+ *       The caller must already hold TR_TABLE_CS.
+ */
+static int
+logtb_count_ordinary_tran_indices (void)
+{
+  LOG_TDES *tdes;
+  int i, count = 0;
+
+  for (i = 0; i < NUM_TOTAL_TRAN_INDICES; i++)
+    {
+      tdes = log_Gl.trantable.all_tdes[i];
+      if (tdes != NULL && tdes->trid != NULL_TRANID
+	  && tdes->client.client_type != DB_CLIENT_TYPE_UNKNOWN
+	  && tdes->client.client_type != DB_CLIENT_TYPE_SYSTEM_INTERNAL
+	  && !css_is_reserved_client (tdes->client.client_type))
+	{
+	  count++;
+	}
+    }
+
+  return count;
+}
+#endif /* SERVER_MODE */
+
 /*
  * logtb_allocate_tran_index - allocate a transaction index for a sequence of
  *                       transactions (thread of execution.. a client)
@@ -958,6 +990,25 @@ logtb_allocate_tran_index (THREAD_ENTRY * thread_p, TRANID trid, TRAN_STATE stat
 #endif /* SERVER_MODE */
 
   save_tran_index = tran_index = NULL_TRAN_INDEX;
+
+#if defined(SERVER_MODE)
+  /* MAX_NTRANS counts the reserved connection quotas in - the administrator's way in, the HA
+   * replicators, and the connection that delivers a 2PC decision - but handing indices out has never
+   * looked at who is asking, so ordinary clients could take those too and leave the categories the
+   * quotas exist for with nothing.  Hold ordinary clients to max_clients instead.  Counting what they
+   * actually hold, rather than leaving that many indices free, keeps the promise exact when a reserved
+   * category is already seated: HA replicators stay connected, and a delivery that found no branch to
+   * attach to keeps its index until the connection is recycled.  A client_credential of NULL is the
+   * server itself.  Only while running normally: during recovery the table is allowed to grow. */
+  if (log_Gl.rcv_phase == LOG_RESTARTED && NUM_TOTAL_TRAN_INDICES > 0 && client_credential != NULL
+      && !css_is_reserved_client (client_credential->client_type)
+      && NUM_ASSIGNED_TRAN_INDICES >= NUM_TOTAL_TRAN_INDICES - css_get_reserved_conn_num ()
+      && logtb_count_ordinary_tran_indices () >= css_get_normal_conn_num ())
+    {
+      er_set (ER_FATAL_ERROR_SEVERITY, ARG_FILE_LINE, ER_TM_TOO_MANY_CLIENTS, 1, css_get_normal_conn_num ());
+      return NULL_TRAN_INDEX;
+    }
+#endif /* SERVER_MODE */
 
   /* Is there any free index ? */
   if (NUM_ASSIGNED_TRAN_INDICES >= NUM_TOTAL_TRAN_INDICES)
