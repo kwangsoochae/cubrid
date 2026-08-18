@@ -32,6 +32,7 @@ extern int ux_check_connection (void);
 extern int ux_database_connect (char *db_name, char *db_user, char *db_passwd, const char *url, char **db_err_msg);
 extern int ux_database_reconnect (void);
 extern int ux_is_database_connected (void);
+extern bool ux_is_xa_recovery_connection (void);
 extern int ux_prepare (char *sql_stmt, int flag, char auto_commit_mode, T_NET_BUF * ne_buf, T_REQ_INFO * req_info,
 		       unsigned int query_seq_num);
 extern int ux_end_tran (int tran_type, bool reset_con_status, bool ddl_audit_log);

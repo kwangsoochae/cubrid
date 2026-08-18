@@ -389,6 +389,16 @@ ux_set_session_id (const SESSION_ID session_id)
   db_set_session_id (session_id);
 }
 
+/*
+ * ux_is_xa_recovery_connection() - whether this CAS holds a 2PC decision delivery connection
+ *   return: true if the connection was registered as DB_CLIENT_TYPE_XA_RECOVERY
+ */
+bool
+ux_is_xa_recovery_connection (void)
+{
+  return database_xa_recovery;
+}
+
 int
 ux_database_connect (char *db_name, char *db_user, char *db_passwd, const char *url, char **db_err_msg)
 {
