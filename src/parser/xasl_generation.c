@@ -19731,8 +19731,7 @@ pt_to_insert_xasl_remote_select (PARSER_CONTEXT * parser, PT_NODE * statement)
  * pt_to_delete_xasl_remote_subquery () - Builds DELETE_PROC XASL for a remote DELETE whose WHERE references a
  *   pure-local subquery. The local subquery is compiled as the aptr (produces a single-column list-file, as in
  *   pt_to_insert_xasl_remote_select), and the DELETE_PROC carries the remote connection, target table, WHERE
- *   key column, and comparison operator. The runtime reads each list-file value and pushes
- *   "DELETE FROM <table> WHERE <key> <op> ?" via CCI bind.
+ *   key column, comparison operator, and the sink mode the runtime routes on.
  *
  * return        : XASL node, or NULL on error.
  * parser (in)   : Parser context.
@@ -19906,6 +19905,7 @@ pt_to_delete_xasl_remote_subquery (PARSER_CONTEXT * parser, PT_NODE * statement)
   del->remote_key_col = pt_append_string (parser, NULL, key_col);
   del->remote_op = pt_append_string (parser, NULL, op_sql);
   del->remote_sink_mode = sink_mode;
+
   if (del->sink.table_name == NULL || del->remote_key_col == NULL || del->remote_op == NULL || pt_has_error (parser))
     {
       return NULL;
