@@ -454,6 +454,7 @@ struct delete_proc_node
   REMOTE_DML_SINK sink;
   char *remote_key_col;		/* remote target column on the WHERE left-hand side (e.g. rc1) */
   char *remote_op;		/* comparison operator pushed to the remote WHERE: "=", "<>", "<", ">", "<=", ">=" */
+  char *remote_extra_where;	/* deparsed remote-only AND arm(s), e.g. "name <> 'x'" (NULL if none) */
 };
 
 typedef struct connectby_proc_node CONNECTBY_PROC_NODE;
