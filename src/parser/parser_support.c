@@ -11896,8 +11896,9 @@ pt_convert_dblink_insert_query (PARSER_CONTEXT * parser, PT_NODE * node, SERVER_
  * values one at a time and letting the remote compare each; ALL shapes are not, because they need the
  * local result reduced to a single value first and the ordering that reduction must use is the remote
  * column's, which is not visible here. This only gates predicate *shape*; how each shape executes is
- * decided in XASL generation. */
-static bool
+ * decided in XASL generation. Shared (non-static) with semantic_check.c and xasl_generation.c via
+ * pt_dblink_delete_and_tree_find_pushable() below and parser.h. */
+bool
 pt_dblink_delete_is_pushable_pred (PT_NODE * cond)
 {
   PT_NODE *arg2;
@@ -11994,24 +11995,26 @@ pt_dblink_delete_target_range_name (PT_NODE * spec)
  *   Name resolution cannot do this for a remote spec -- pt_find_name_in_spec() reports every name as found
  *   there, the local server holding no schema for the remote table -- while pt_to_delete_xasl_remote_subquery
  *   keeps only the trailing attribute of a dotted name, so an unverifiable qualifier would delete against
- *   whatever that attribute happens to name.
+ *   whatever that attribute happens to name. Read the pushable predicate rather than search_cond: with a
+ *   remote-only AND arm the root is PT_AND, whose arg1 is a conjunct rather than a PT_DOT_, and the qualifier
+ *   would never be compared.
  */
 static bool
 pt_dblink_delete_qualifier_names_target (PT_NODE * node, const char **bad_qualifier)
 {
-  PT_NODE *cond = node->info.delete_.search_cond;
+  PT_NODE *cond = pt_dblink_delete_and_tree_find_pushable (node->info.delete_.search_cond);
   PT_NODE *arg1, *qual;
   const char *range_name;
 
   *bad_qualifier = NULL;
 
-  /* The gate (pt_dblink_delete_where_is_inscope) established a single pushable predicate before the sink was
-   * confirmed, and such a predicate is always a PT_EXPR, so this cannot be anything else here; a mismatch
-   * means the gate and this check have drifted -- DBLINK_REMOTE_SINK_* leaves room for an UPDATE extension
+  /* The gate (pt_dblink_delete_where_is_inscope) established exactly one pushable predicate before the sink was
+   * confirmed, and a pushable predicate is always a PT_EXPR, so this lookup cannot come back empty here; a NULL
+   * means the gate and this lookup have drifted -- DBLINK_REMOTE_SINK_* leaves room for an UPDATE extension
    * that would add a second site setting the flag. Fail closed rather than skipping the comparison: an
    * unverified qualifier deletes remote rows the statement never named. */
-  assert (cond != NULL && cond->node_type == PT_EXPR);
-  if (cond == NULL || cond->node_type != PT_EXPR)
+  assert (cond != NULL);
+  if (cond == NULL)
     {
       return false;
     }
@@ -12040,26 +12043,123 @@ pt_dblink_delete_qualifier_names_target (PT_NODE * node, const char **bad_qualif
   return false;
 }
 
-/* true iff the DELETE WHERE clause is in scope for the remote-sink-with-local-subquery carve-out: a single
- * pushable predicate (see pt_dblink_delete_is_pushable_pred) and nothing else.
+/* true iff conjunct is a "remote-only" AND arm: col {= | <> | < | > | <= | >=} literal, nothing else
+ * (no subquery/dblink()/function/cast on either side). Single-target scope means a bare column can
+ * only resolve to the remote target, so this shape doubles as the local-reference guard. Shared
+ * (non-static) with xasl_generation.c, which re-checks this shape before deparsing a non-pushable leaf
+ * -- if the gate and the deparse walk ever drift apart, the leaf is rejected instead of shipped as-is. */
+bool
+pt_dblink_delete_is_remote_only_conjunct (PT_NODE * conjunct)
+{
+  PT_NODE *arg1, *arg2;
+
+  if (conjunct == NULL || conjunct->node_type != PT_EXPR)
+    {
+      return false;
+    }
+
+  switch (conjunct->info.expr.op)
+    {
+    case PT_EQ:
+    case PT_NE:
+    case PT_LT:
+    case PT_GT:
+    case PT_LE:
+    case PT_GE:
+      break;
+    default:
+      return false;
+    }
+
+  arg1 = conjunct->info.expr.arg1;
+  arg2 = conjunct->info.expr.arg2;
+
+  return arg1 != NULL && arg1->node_type == PT_NAME && arg2 != NULL && arg2->node_type == PT_VALUE;
+}
+
+/* The one traversal of a DELETE WHERE tree, answering both questions the carve-out asks: is the shape in
+ * scope (return value), and which leaf is the pushable predicate (*pushable). Both callers below are thin
+ * wrappers, so the gate and every later phase classify leaves the same way by construction.
+ *
+ * The tree is pre-CNF (the carve-out runs before CNF), so multiple conjuncts are still one PT_AND tree
+ * rather than a cond->next list. In scope means: every leaf is either the single pushable predicate
+ * (pt_dblink_delete_is_pushable_pred) or a remote-only conjunct (pt_dblink_delete_is_remote_only_conjunct);
+ * a second pushable predicate, an OR, or any other shape fails. Recursion is manual, not
+ * parser_walk_tree(), so the pushable predicate's own subquery arm is never descended into.
+ *
+ * Both AND arms are walked even after one fails, so *pushable is found wherever it sits. Later phases rely
+ * on that: they locate the node the gate validated, and by then a rewrite may have left an arm in a shape
+ * this walk no longer accepts. */
+static bool
+pt_dblink_delete_and_tree_walk (PT_NODE * node, PT_NODE ** pushable)
+{
+  bool arg1_ok, arg2_ok;
+
+  if (node == NULL || node->node_type != PT_EXPR)
+    {
+      return false;
+    }
+
+  if (node->info.expr.op == PT_AND)
+    {
+      arg1_ok = pt_dblink_delete_and_tree_walk (node->info.expr.arg1, pushable);
+      arg2_ok = pt_dblink_delete_and_tree_walk (node->info.expr.arg2, pushable);
+      return arg1_ok && arg2_ok;
+    }
+
+  if (pt_dblink_delete_is_pushable_pred (node))
+    {
+      if (*pushable != NULL)
+	{
+	  return false;		/* a second pushable predicate: out of scope */
+	}
+      *pushable = node;
+      return true;
+    }
+
+  return pt_dblink_delete_is_remote_only_conjunct (node);
+}
+
+/* true iff the DELETE WHERE clause is in scope for the remote-sink-with-local-subquery carve-out:
+ * exactly one pushable predicate (see pt_dblink_delete_is_pushable_pred) plus zero or more remote-only AND
+ * arms (see pt_dblink_delete_is_remote_only_conjunct). A WHERE with no AND is just the pushable predicate
+ * by itself, so this subsumes the single-predicate case.
  *
  * Correlation and row/multi-column subqueries are NOT decided here. query.correlation_level is 0 for a DELETE
  * WHERE subquery (a DELETE target is not a query scope), so it cannot flag a target-correlated subquery at this
  * point. A correlated or row subquery that passes this shape gate is routed to the sink and rejected later, where
  * the reference to the outer target (or the multi-column shape) is resolvable: pt_dblink_delete_corr_ref()
  * (semantic_check.c) rejects correlated subqueries, and pt_to_delete_xasl_remote_subquery() (xasl_generation.c)
- * rejects row/multi-column subqueries. */
+ * rejects row/multi-column subqueries. Both locate the pushable predicate via
+ * pt_dblink_delete_and_tree_find_pushable() below, so they see the same node regardless of whether it's
+ * combined with remote-only AND arms. */
 static bool
 pt_dblink_delete_where_is_inscope (PT_NODE * node)
 {
   PT_NODE *cond = node->info.delete_.search_cond;
+  PT_NODE *pushable = NULL;
 
   if (cond == NULL || cond->next != NULL)
     {
       return false;		/* defensive: carve-out runs pre-CNF, so a cond->next list is unexpected here */
     }
 
-  return pt_dblink_delete_is_pushable_pred (cond);
+  return pt_dblink_delete_and_tree_walk (cond, &pushable) && pushable != NULL;
+}
+
+/* Returns the pushable predicate node within node's pre-CNF WHERE tree, or NULL if there is none. Shared
+ * (non-static) so semantic_check.c can bind/correlation-check its subquery and xasl_generation.c can read
+ * its op/columns -- both must land on the *same* node the gate validated, which is why they call this
+ * rather than re-deriving it. Shape validity is not re-checked here: the gate established it, and a
+ * rewrite since then may have left an AND arm in a shape the walk no longer accepts. */
+PT_NODE *
+pt_dblink_delete_and_tree_find_pushable (PT_NODE * node)
+{
+  PT_NODE *pushable = NULL;
+
+  (void) pt_dblink_delete_and_tree_walk (node, &pushable);
+
+  return pushable;
 }
 
 /* true when the DELETE WHERE tree still holds a spec carrying a remote server name that nothing rewrote
@@ -12076,21 +12176,21 @@ pt_dblink_delete_where_has_remote_spec (PARSER_CONTEXT * parser, PT_NODE * node)
 }
 
 /* Counts the remote servers named inside the WHERE subquery alone, as a delta on snl->server_cnt, feeding
- * the same sub_sel_server_cnt the INSERT SELECT branch uses. Scoped to the WHERE predicate's subquery arm;
+ * the same sub_sel_server_cnt the INSERT SELECT branch uses. Scoped to the pushable predicate's subquery arm;
  * the broader upd_spec walk in the caller re-walks the whole statement and adds to the same counters,
  * harmlessly (they are never relied on for an exact count). */
 static int
 pt_dblink_delete_subquery_server_delta (PARSER_CONTEXT * parser, PT_NODE * node, SERVER_NAME_LIST * snl,
 					int server_cnt_before)
 {
-  PT_NODE *cond = node->info.delete_.search_cond;
+  PT_NODE *pushable = pt_dblink_delete_and_tree_find_pushable (node->info.delete_.search_cond);
 
-  if (cond == NULL || cond->node_type != PT_EXPR)
+  if (pushable == NULL)
     {
       return 0;
     }
 
-  parser_walk_tree (parser, cond->info.expr.arg2, pt_get_server_name_list, snl, NULL, NULL);
+  parser_walk_tree (parser, pushable->info.expr.arg2, pt_get_server_name_list, snl, NULL, NULL);
 
   return snl->server_cnt - server_cnt_before;
 }
@@ -12104,7 +12204,7 @@ static PT_NODE *pt_check_sub_query_spec (PARSER_CONTEXT * parser, PT_NODE * node
  * executes whatever subquery pt_to_delete_xasl_remote_subquery is handed, generically.
  *
  * The same-server-only guard and the spec rewrite itself match what the INSERT SELECT branch in the caller
- * does; what is walked differs (INSERT loops over every value clause, this walks the WHERE predicate's
+ * does; what is walked differs (INSERT loops over every value clause, this walks the pushable predicate's
  * subquery arm alone), so the two are not interchangeable beyond that conversion step.
  *
  * Clears sink_kind when the subquery is not local-mixed on the one target server, leaving the statement to
@@ -12112,7 +12212,7 @@ static PT_NODE *pt_check_sub_query_spec (PARSER_CONTEXT * parser, PT_NODE * node
 static void
 pt_dblink_delete_convert_same_server_specs (PARSER_CONTEXT * parser, PT_NODE * node, SERVER_NAME_LIST * snl)
 {
-  PT_NODE *cond = node->info.delete_.search_cond;
+  PT_NODE *pushable;
   bool had_dblink_before;
 
   if (!(snl->local_cnt > 0 && snl->distinct_cnt == 1))
@@ -12121,11 +12221,12 @@ pt_dblink_delete_convert_same_server_specs (PARSER_CONTEXT * parser, PT_NODE * n
       return;
     }
 
+  pushable = pt_dblink_delete_and_tree_find_pushable (node->info.delete_.search_cond);
   had_dblink_before = snl->has_dblink_query;
 
-  if (cond != NULL && cond->node_type == PT_EXPR)
+  if (pushable != NULL)
     {
-      parser_walk_tree (parser, cond->info.expr.arg2, pt_check_sub_query_spec, snl, NULL, NULL);
+      parser_walk_tree (parser, pushable->info.expr.arg2, pt_check_sub_query_spec, snl, NULL, NULL);
     }
 
   /* The rewrite marks the spec PT_DERIVED_DBLINK_TABLE, which pt_get_server_name_list treats like a real

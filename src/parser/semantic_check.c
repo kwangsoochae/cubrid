@@ -12342,26 +12342,27 @@ pt_check_with_info (PARSER_CONTEXT * parser, PT_NODE * node, SEMANTIC_CHK_INFO *
 		}
 	      else if (node->node_type == PT_DELETE)
 		{
-		  /* mirrors the remote INSERT SELECT handling above (same reason -- see that comment); here
-		   * the WHERE subquery's specs would lack range_var / spec id and XASL generation would
-		   * crash. Only the single-predicate "<col> <op> (subquery)" shape is touched; other remote
-		   * DELETEs have no subquery (or a value list) and use the qstr pushdown. */
+		  /* mirrors the remote INSERT SELECT handling above (same reason -- see that comment): the WHERE
+		   * subquery's specs would lack range_var / spec id and XASL generation would crash without this.
+		   * qstr == NULL confirms pt_rewrite_for_dblink (db_vdb.c) chose the value-push sink over a full
+		   * qstr pushdown. The WHERE may now be the pushable predicate alone or that predicate combined
+		   * with remote-only AND arms (pt_dblink_delete_where_is_inscope, parser_support.c);
+		   * pt_dblink_delete_and_tree_find_pushable() locates the same pushable node that gate validated,
+		   * in either shape, so the AND arms (if any) are left untouched here and only the pushable
+		   * predicate's own subquery is bound below. */
 		  PT_NODE *remote = node->info.delete_.spec->info.spec.remote_server_name;
 		  PT_NODE *cond = node->info.delete_.search_cond;
+		  PT_NODE *pushable = NULL;
 		  PT_NODE *subq = NULL;
 
-		  /* Only the value-push sink. pt_rewrite_for_dblink (db_vdb.c, before this semantic check) already
-		   * converted the target to PT_DBLINK_TABLE_DML: the sink leaves qstr == NULL, while a full qstr
-		   * pushdown (e.g. same-server all-remote IN (SELECT ... FROM t@srv)) sets qstr and ships the whole
-		   * DELETE as text -- its subquery must NOT be translated locally. qstr == NULL is only produced when
-		   * the parser shape gate (pt_dblink_delete_where_is_inscope) accepted the form, so this also confines
-		   * resolution to the parser-approved single-predicate shapes. */
 		  if (remote != NULL && remote->node_type == PT_DBLINK_TABLE_DML
-		      && remote->info.dblink_table.qstr == NULL && cond != NULL && cond->next == NULL
-		      && cond->node_type == PT_EXPR && cond->info.expr.arg2 != NULL
-		      && PT_IS_QUERY (cond->info.expr.arg2))
+		      && remote->info.dblink_table.qstr == NULL && cond != NULL && cond->next == NULL)
 		    {
-		      subq = cond->info.expr.arg2;
+		      pushable = pt_dblink_delete_and_tree_find_pushable (cond);
+		    }
+		  if (pushable != NULL)
+		    {
+		      subq = pushable->info.expr.arg2;
 		    }
 		  if (subq != NULL)
 		    {
@@ -12396,7 +12397,7 @@ pt_check_with_info (PARSER_CONTEXT * parser, PT_NODE * node, SEMANTIC_CHK_INFO *
 						      "remote DELETE: failed to translate the WHERE subquery");
 		      if (subq != NULL)
 			{
-			  cond->info.expr.arg2 = subq;
+			  pushable->info.expr.arg2 = subq;
 			}
 		    }
 		}
