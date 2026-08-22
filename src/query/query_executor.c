@@ -362,6 +362,27 @@ struct del_lob_info
   DEL_LOB_INFO *next;		/* next DEL_LOB_INFO in a list */
 };
 
+/* Reduce mode folds the local subquery rows into ONE value and lets the remote compare its column
+ * against that value. Which row wins the fold depends on the ordering used to pick it, and the remote
+ * compares in the domain of ITS column -- which the sink cannot see (the DELETE target's remote column
+ * type is not fetched at compile time, and a bare marker's domain is not readable before the remote is
+ * open, which is after the fold). A string value is the only one that can be read in more than one
+ * domain, so the fold also runs under every other domain the values parse as; if two domains would push
+ * different values, the answer hinges on the remote column type and the statement is refused instead of
+ * silently deleting the wrong rows. Every non-string source leaves these entries dormant. */
+#define DBLINK_REDUCE_ALT_CNT 3
+
+typedef struct dblink_reduce_alt DBLINK_REDUCE_ALT;
+struct dblink_reduce_alt
+{
+  DB_TYPE type;			/* domain whose ordering this entry tries */
+  bool viable;			/* every value so far parsed cleanly as this domain */
+  bool has_boundary;		/* cmp/src hold a value */
+  DB_VALUE cmp;			/* running boundary, coerced into this domain */
+  DB_VALUE src;			/* the source value that produced cmp -- what this domain would push */
+  bool all_equal;		/* EQ_ALL verdict under this domain */
+};
+
 /* used for internal update/delete execution */
 typedef struct upddel_class_info_internal UPDDEL_CLASS_INFO_INTERNAL;
 struct upddel_class_info_internal
@@ -561,6 +582,15 @@ static int qexec_collect_remote_delete_key (SCAN_ID * s_id, XASL_STATE * xasl_st
 					    bool * skip_row);
 static int qexec_execute_remote_dml_sink (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state,
 					  DBLINK_DML_KIND kind);
+static int qexec_execute_remote_delete_reduce (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state,
+					       REMOTE_DML_SINK * sink, const char *key_col, const char *op,
+					       DBLINK_REMOTE_SINK_MODE sink_mode);
+static int qexec_remote_delete_alt_feed (DBLINK_REDUCE_ALT * alts, const DB_VALUE * value, bool first_value,
+					 DBLINK_REMOTE_SINK_MODE sink_mode, bool * live);
+static const DBLINK_REDUCE_ALT *qexec_remote_delete_alt_dissenter (const DBLINK_REDUCE_ALT * alts,
+								   const DB_VALUE * boundary, bool all_equal,
+								   DBLINK_REMOTE_SINK_MODE sink_mode);
+static void qexec_remote_delete_alt_clear (DBLINK_REDUCE_ALT * alts);
 static int qexec_execute_remote_delete_subquery (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
 static int qexec_execute_insert (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state, bool skip_aptr);
 static int qexec_evaluate_row_default_exprs (THREAD_ENTRY * thread_p, INSERT_PROC_NODE * insert,
@@ -12567,6 +12597,7 @@ qexec_execute_remote_dml_sink (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_S
   int num_attrs = 0;
   const char *key_col = NULL, *op = NULL;
   DBLINK_DML_STATE dblink_state = { -1, -1 };
+  DBLINK_REMOTE_SINK_MODE sink_mode = DBLINK_SINK_MODE_PER_ROW;
 
   assert (specp != NULL);
 
@@ -12595,6 +12626,7 @@ qexec_execute_remote_dml_sink (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_S
 	sink = &del->sink;
 	key_col = del->remote_key_col;
 	op = del->remote_op;
+	sink_mode = del->remote_sink_mode;
 	break;
       }
     default:
@@ -12604,6 +12636,17 @@ qexec_execute_remote_dml_sink (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_S
     }
 
   assert (sink->is_remote);
+
+  /* comparison ALL (< ALL / <= ALL / > ALL / >= ALL / = ALL) reduces to a single remote push instead
+   * of one per local subquery row -- handled by a dedicated path that scans the local subquery before
+   * opening the remote connection, since the bound value must be known before the DELETE can be
+   * prepared. */
+  if (kind == DBLINK_DML_DELETE
+      && (sink_mode == DBLINK_SINK_MODE_REDUCE_MIN || sink_mode == DBLINK_SINK_MODE_REDUCE_MAX
+	  || sink_mode == DBLINK_SINK_MODE_EQ_ALL))
+    {
+      return qexec_execute_remote_delete_reduce (thread_p, xasl, xasl_state, sink, key_col, op, sink_mode);
+    }
 
   /* open remote connection and prepare the INSERT/DELETE statement */
   if (dblink_dml_open (thread_p, kind, sink->url, sink->user, sink->pwd, sink->table_name, attr_names, num_attrs,
@@ -12707,6 +12750,406 @@ exit_on_error:
   dblink_dml_rollback (thread_p, &dblink_state);
   qexec_end_scan (thread_p, specp);
   qexec_close_scan (thread_p, specp);
+
+  return ER_FAILED;
+}
+
+/*
+ * qexec_remote_delete_alt_feed () - Fold one value into every alternate-domain boundary
+ *   return: NO_ERROR or ER_FAILED
+ *   alts(in/out)    : DBLINK_REDUCE_ALT_CNT entries; armed on the first call
+ *   value(in)       : the local subquery value this row contributes
+ *   first_value(in) : true on the first value that reached the reduction (arms alts)
+ *   sink_mode(in)   : REDUCE_MIN / REDUCE_MAX / EQ_ALL
+ *   live(out)       : true while at least one alternate domain is still viable
+ *
+ * A value that does not parse as a domain drops that domain for good: the remote cannot be comparing in
+ * a domain the values do not even read as. A domain that goes uncomparable (DB_UNK) is dropped for the
+ * same reason -- it can no longer say which value would be pushed, so it cannot dissent either.
+ */
+static int
+qexec_remote_delete_alt_feed (DBLINK_REDUCE_ALT * alts, const DB_VALUE * value, bool first_value,
+			      DBLINK_REMOTE_SINK_MODE sink_mode, bool * live)
+{
+  static const DB_TYPE alt_types[DBLINK_REDUCE_ALT_CNT] = { DB_TYPE_DOUBLE, DB_TYPE_DATETIME, DB_TYPE_TIME };
+  DB_VALUE coerced;
+  int i;
+
+  if (first_value)
+    {
+      bool source_is_string = TP_IS_CHAR_TYPE (DB_VALUE_DOMAIN_TYPE (value));
+
+      for (i = 0; i < DBLINK_REDUCE_ALT_CNT; i++)
+	{
+	  alts[i].type = alt_types[i];
+	  alts[i].viable = source_is_string;
+	  alts[i].has_boundary = false;
+	  alts[i].all_equal = true;
+	  db_make_null (&alts[i].cmp);
+	  db_make_null (&alts[i].src);
+	}
+    }
+
+  *live = false;
+  for (i = 0; i < DBLINK_REDUCE_ALT_CNT; i++)
+    {
+      DBLINK_REDUCE_ALT *alt = &alts[i];
+      DB_VALUE_COMPARE_RESULT cmp;
+
+      if (!alt->viable)
+	{
+	  continue;
+	}
+
+      db_make_null (&coerced);
+      if (tp_value_cast (value, &coerced, tp_domain_resolve_default (alt->type), true) != DOMAIN_COMPATIBLE)
+	{
+	  pr_clear_value (&coerced);
+	  alt->viable = false;
+	  continue;
+	}
+
+      if (!alt->has_boundary)
+	{
+	  if (pr_clone_value (&coerced, &alt->cmp) != NO_ERROR || pr_clone_value (value, &alt->src) != NO_ERROR)
+	    {
+	      pr_clear_value (&coerced);
+	      return ER_FAILED;
+	    }
+	  alt->has_boundary = true;
+	  pr_clear_value (&coerced);
+	  *live = true;
+	  continue;
+	}
+
+      cmp = tp_value_compare (&coerced, &alt->cmp, 1, 1);
+      if (cmp != DB_LT && cmp != DB_EQ && cmp != DB_GT)
+	{
+	  pr_clear_value (&coerced);
+	  alt->viable = false;
+	  continue;
+	}
+
+      if (cmp != DB_EQ)
+	{
+	  alt->all_equal = false;
+	}
+      if ((sink_mode == DBLINK_SINK_MODE_REDUCE_MIN && cmp == DB_LT)
+	  || (sink_mode == DBLINK_SINK_MODE_REDUCE_MAX && cmp == DB_GT))
+	{
+	  pr_clear_value (&alt->cmp);
+	  pr_clear_value (&alt->src);
+	  if (pr_clone_value (&coerced, &alt->cmp) != NO_ERROR || pr_clone_value (value, &alt->src) != NO_ERROR)
+	    {
+	      pr_clear_value (&coerced);
+	      return ER_FAILED;
+	    }
+	}
+      pr_clear_value (&coerced);
+      *live = true;
+    }
+
+  return NO_ERROR;
+}
+
+/*
+ * qexec_remote_delete_alt_dissenter () - The first alternate domain that would not push what the source
+ *   ordering picked
+ *   return: the dissenting entry, or NULL when every viable domain agrees
+ *   alts(in)      : entries fed by qexec_remote_delete_alt_feed()
+ *   boundary(in)  : the value the source ordering picked (what the sink is about to push)
+ *   all_equal(in) : the EQ_ALL verdict the source ordering reached
+ *   sink_mode(in) : REDUCE_MIN / REDUCE_MAX / EQ_ALL
+ *
+ * EQ_ALL only needs the verdict compared: "do the rows share one value at all". The MIN/MAX modes need
+ * the pushed value compared, so the source values are compared to each other -- in the source domain,
+ * where a difference means the two domains would genuinely bind different values.
+ */
+static const DBLINK_REDUCE_ALT *
+qexec_remote_delete_alt_dissenter (const DBLINK_REDUCE_ALT * alts, const DB_VALUE * boundary, bool all_equal,
+				   DBLINK_REMOTE_SINK_MODE sink_mode)
+{
+  int i;
+
+  for (i = 0; i < DBLINK_REDUCE_ALT_CNT; i++)
+    {
+      const DBLINK_REDUCE_ALT *alt = &alts[i];
+
+      if (!alt->viable || !alt->has_boundary)
+	{
+	  continue;
+	}
+
+      if (sink_mode == DBLINK_SINK_MODE_EQ_ALL)
+	{
+	  if (alt->all_equal != all_equal)
+	    {
+	      return alt;
+	    }
+	  continue;
+	}
+
+      if (tp_value_compare (&alt->src, boundary, 1, 1) != DB_EQ)
+	{
+	  return alt;
+	}
+    }
+
+  return NULL;
+}
+
+/*
+ * qexec_remote_delete_alt_clear () - Release the alternate-domain boundaries
+ *   alts(in/out) : entries to clear (safe on entries never armed -- they hold DB_NULL)
+ */
+static void
+qexec_remote_delete_alt_clear (DBLINK_REDUCE_ALT * alts)
+{
+  int i;
+
+  for (i = 0; i < DBLINK_REDUCE_ALT_CNT; i++)
+    {
+      pr_clear_value (&alts[i].cmp);
+      pr_clear_value (&alts[i].src);
+    }
+}
+
+/*
+ * qexec_execute_remote_delete_reduce () - Reduce-mode variant of the remote DELETE sink for comparison
+ *   ALL: scan the local subquery fully first to find the single value the remote DELETE needs, then
+ *   push at most one remote DELETE using it, instead of one push per local subquery row. REDUCE_MIN/
+ *   REDUCE_MAX reduce to the running MIN/MAX; EQ_ALL reduces to "the one value every row shares" (or
+ *   determines that no such value exists).
+ *   return: NO_ERROR or ER_FAILED
+ *   xasl(in)       : DELETE_PROC XASL with sink.is_remote set; specp scans the already-materialized
+ *                    local subquery list file (see qexec_execute_remote_dml_sink's Note)
+ *   xasl_state(in) : XASL state
+ *   sink(in)       : remote connection info (url/user/pwd/table_name)
+ *   key_col(in)    : remote WHERE column
+ *   op(in)         : comparison operator SQL text ("<", "<=", ">", ">=", "=")
+ *   sink_mode(in)  : DBLINK_SINK_MODE_REDUCE_MIN, DBLINK_SINK_MODE_REDUCE_MAX, or
+ *                    DBLINK_SINK_MODE_EQ_ALL
+ *
+ * What the scan decides, in one table (values_seen counts the rows that reached the reduction, so it is 0
+ * only when the local subquery returned nothing -- a NULL row returns early, before any row is counted):
+ *
+ *   scan outcome                       | remote effect
+ *   -----------------------------------+-------------------------------------------------------------
+ *   a NULL in the set                  | nothing: ALL over a set containing NULL is unknown for every
+ *                                      | remote row. No connection is opened
+ *   values_seen == 0 (empty subquery)  | delete every remote row: ALL over the empty set is vacuously
+ *                                      | true. A WHERE-less DELETE
+ *   EQ_ALL, values differ              | nothing: "col = ALL (...)" is then always false
+ *   otherwise                          | one DELETE bound to the reduced value (MIN, MAX, or the one
+ *                                      | value every row shares)
+ */
+static int
+qexec_execute_remote_delete_reduce (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state,
+				    REMOTE_DML_SINK * sink, const char *key_col, const char *op,
+				    DBLINK_REMOTE_SINK_MODE sink_mode)
+{
+  ACCESS_SPEC_TYPE *specp = xasl->spec_list;
+  SCAN_CODE xb_scan, ls_scan;
+  SCAN_ID *s_id = NULL;
+  DB_VALUE *bindv[1];
+  DB_VALUE boundary;
+  DBLINK_REDUCE_ALT alts[DBLINK_REDUCE_ALT_CNT];
+  const DBLINK_REDUCE_ALT *dissenter;
+  bool alts_live = false;
+  bool has_boundary = false;
+  bool null_seen = false;
+  bool all_equal = true;
+  bool delete_all;
+  int values_seen = 0;
+  int row_affected;
+  DBLINK_DML_STATE dblink_state = { -1, -1 };
+
+  db_make_null (&boundary);
+  memset (alts, 0, sizeof (alts));
+
+  if (qexec_open_scan (thread_p, specp, xasl->val_list, &xasl_state->vd, false, specp->fixed_scan,
+		       specp->grouped_scan, true, &specp->s_id, xasl_state->query_id, S_SELECT, false,
+		       NULL, xasl) != NO_ERROR)
+    {
+      qexec_failure_line (__LINE__, xasl_state);
+      goto exit_on_error;
+    }
+
+  while ((xb_scan = qexec_next_scan_block_iterations (thread_p, xasl)) == S_SUCCESS)
+    {
+      s_id = &xasl->curr_spec->s_id;
+
+      while ((ls_scan = scan_next_scan (thread_p, s_id)) == S_SUCCESS)
+	{
+	  bool skip_row;
+
+	  if (qexec_collect_remote_delete_key (s_id, xasl_state, bindv, &skip_row) != NO_ERROR)
+	    {
+	      goto exit_on_error;
+	    }
+	  if (skip_row)
+	    {
+	      /* NULL in the set: the final answer (no-op) is already decided, but keep draining the
+	       * scan to completion rather than introducing an early-exit path for it. */
+	      null_seen = true;
+	      continue;
+	    }
+	  if (null_seen)
+	    {
+	      continue;
+	    }
+	  if (sink_mode == DBLINK_SINK_MODE_EQ_ALL && !all_equal && !alts_live)
+	    {
+	      /* a differing value already proved "col = ALL (...)" is always false; the outcome
+	       * is decided, so stop paying for tp_value_compare on the remaining rows. While an
+	       * alternate domain is still live the rows keep coming, because that domain may reach
+	       * the opposite verdict and that disagreement is what refuses the statement below. */
+	      continue;
+	    }
+
+	  values_seen++;
+	  if (qexec_remote_delete_alt_feed (alts, bindv[0], !has_boundary, sink_mode, &alts_live) != NO_ERROR)
+	    {
+	      qexec_failure_line (__LINE__, xasl_state);
+	      goto exit_on_error;
+	    }
+
+	  if (!has_boundary)
+	    {
+	      if (pr_clone_value (bindv[0], &boundary) != NO_ERROR)
+		{
+		  qexec_failure_line (__LINE__, xasl_state);
+		  goto exit_on_error;
+		}
+	      has_boundary = true;
+	    }
+	  else
+	    {
+	      DB_VALUE_COMPARE_RESULT cmp = tp_value_compare (bindv[0], &boundary, 1, 1);
+
+	      if (cmp != DB_LT && cmp != DB_EQ && cmp != DB_GT)
+		{
+		  /* not cleanly comparable (e.g. DB_UNK) -- ALL's boundary becomes undecidable,
+		   * the same conservative call as a NULL in the set. */
+		  null_seen = true;
+		  continue;
+		}
+
+	      if (sink_mode == DBLINK_SINK_MODE_EQ_ALL)
+		{
+		  if (cmp != DB_EQ)
+		    {
+		      /* a differing value proves "col = ALL (...)" is always false; boundary no
+		       * longer matters, but keep draining the scan like the NULL case above. */
+		      all_equal = false;
+		    }
+		  continue;
+		}
+
+	      if ((sink_mode == DBLINK_SINK_MODE_REDUCE_MIN && cmp == DB_LT)
+		  || (sink_mode == DBLINK_SINK_MODE_REDUCE_MAX && cmp == DB_GT))
+		{
+		  pr_clear_value (&boundary);
+		  if (pr_clone_value (bindv[0], &boundary) != NO_ERROR)
+		    {
+		      qexec_failure_line (__LINE__, xasl_state);
+		      goto exit_on_error;
+		    }
+		}
+	    }
+	}
+
+      if (ls_scan != S_END)
+	{
+	  qexec_failure_line (__LINE__, xasl_state);
+	  goto exit_on_error;
+	}
+    }
+
+  if (xb_scan != S_END)
+    {
+      qexec_failure_line (__LINE__, xasl_state);
+      goto exit_on_error;
+    }
+
+  qexec_close_scan (thread_p, specp);
+
+  if (null_seen)
+    {
+      qexec_remote_delete_alt_clear (alts);
+      pr_clear_value (&boundary);
+      return NO_ERROR;
+    }
+
+  /* Refuse rather than guess when the fold is not domain-stable: the value about to be pushed differs
+   * from what another domain the same values read as would have picked, so the rows deleted would be
+   * decided by the remote column's type. This is checked before the EQ_ALL shortcut below, because for
+   * EQ_ALL the disagreement IS the verdict ("all rows share one value") rather than a bound. */
+  dissenter = qexec_remote_delete_alt_dissenter (alts, &boundary, all_equal, sink_mode);
+  if (has_boundary && dissenter != NULL)
+    {
+      char msg[512];
+
+      snprintf (msg, sizeof (msg),
+		"remote DELETE subquery: the local values reduce differently as %s and as %s, so which rows "
+		"'%s ALL' deletes would depend on the remote column's type; CAST the subquery result to the "
+		"type the remote column has", pr_type_name (DB_VALUE_DOMAIN_TYPE (&boundary)),
+		pr_type_name (dissenter->type), op);
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK, 1, msg);
+      qexec_remote_delete_alt_clear (alts);
+      pr_clear_value (&boundary);
+
+      return ER_FAILED;
+    }
+  qexec_remote_delete_alt_clear (alts);
+
+  if (sink_mode == DBLINK_SINK_MODE_EQ_ALL && values_seen > 0 && !all_equal)
+    {
+      /* local subquery rows do not all share one value: "col = ALL (...)" is always false */
+      pr_clear_value (&boundary);
+      return NO_ERROR;
+    }
+
+  /* The empty-subquery row of the table above: a NULL key_col makes dblink_dml_build_delete_sql() build a
+   * WHERE-less DELETE, and bind count 0 makes dblink_dml_execute_row() skip binding (boundary stays the
+   * unset DB_NULL and is never read). */
+  delete_all = (values_seen == 0);
+
+  if (dblink_dml_open (thread_p, DBLINK_DML_DELETE, sink->url, sink->user, sink->pwd, sink->table_name, NULL, 0, 0,
+		       delete_all ? NULL : key_col, delete_all ? NULL : op, &dblink_state) != NO_ERROR)
+    {
+      qexec_failure_line (__LINE__, xasl_state);
+      goto dml_error;
+    }
+
+  bindv[0] = &boundary;
+  if (dblink_dml_execute_row (thread_p, &dblink_state, bindv, delete_all ? 0 : 1, &row_affected) != NO_ERROR)
+    {
+      qexec_failure_line (__LINE__, xasl_state);
+      goto dml_error;
+    }
+
+  xasl->list_id->tuple_cnt += row_affected;
+
+  dblink_dml_close (&dblink_state);
+  pr_clear_value (&boundary);
+
+  return NO_ERROR;
+
+  /* failed after the scan was closed and the remote statement opened: undo the remote side */
+dml_error:
+  dblink_dml_close (&dblink_state);
+  dblink_dml_rollback (thread_p, &dblink_state);
+  pr_clear_value (&boundary);
+
+  return ER_FAILED;
+
+  /* failed while scanning, before any remote connection existed */
+exit_on_error:
+  qexec_end_scan (thread_p, specp);
+  qexec_close_scan (thread_p, specp);
+  qexec_remote_delete_alt_clear (alts);
+  pr_clear_value (&boundary);
 
   return ER_FAILED;
 }

@@ -1469,14 +1469,17 @@ sql_build_error:
 }
 
 /*
- * dblink_dml_build_delete_sql () - Build "DELETE FROM <table> WHERE <key_col> <op> ?" (one placeholder).
+ * dblink_dml_build_delete_sql () - Build the remote DELETE SQL text. key_col NULL builds a WHERE-less
+ *   DELETE (comparison ALL over an empty local subquery result is vacuously true, so every remote row
+ *   is deleted -- DELETE rather than TRUNCATE, to preserve 2PC/trigger/rollback semantics).
  *   return: NO_ERROR on success (sql_out set to a db_private_alloc'd string, caller frees with
  *           db_private_free), error code on failure.
- *   thread_p(in)   : thread entry
- *   table_name(in) : remote table name
- *   key_col(in)    : remote WHERE column (left-hand side, e.g. rc1)
- *   op(in)         : comparison operator SQL text ("=", "<>", "<", ">", "<=", ">=")
- *   sql_out(out)   : set to the built SQL text on success
+ *   thread_p(in)     : thread entry
+ *   table_name(in)   : remote table name
+ *   key_col(in)      : remote WHERE column (left-hand side, e.g. rc1); NULL builds a WHERE-less DELETE
+ *   op(in)           : comparison operator SQL text ("=", "<>", "<", ">", "<=", ">="); ignored when key_col
+ *                      is NULL
+ *   sql_out(out)     : set to the built SQL text on success
  *
  * TODO: key_col is appended unquoted, matching the parser-side
  *       push-down paths (pt_copypush_terms, and mq_dblink_append_corr_pred_sql -- see the TODO there).  A
@@ -1493,16 +1496,22 @@ dblink_dml_build_delete_sql (THREAD_ENTRY * thread_p, const char *table_name, co
   int ret, remaining;
   char *sql;
   size_t sql_len;
+  bool has_key = key_col != NULL;
 
   *sql_out = NULL;
 
-  if (key_col == NULL || key_col[0] == '\0' || op == NULL || op[0] == '\0')
+  if (has_key && key_col[0] == '\0')
     {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK, 1, "remote DELETE: key_col/op is NULL or empty");
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK, 1, "remote DELETE: key_col is empty");
+      return ER_DBLINK;
+    }
+  if (has_key && (op == NULL || op[0] == '\0'))
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK, 1, "remote DELETE: op is NULL or empty");
       return ER_DBLINK;
     }
 
-  sql_len = strlen (table_name) + strlen (key_col) + strlen (op) + 64;
+  sql_len = strlen (table_name) + (has_key ? strlen (key_col) + strlen (op) : 0) + 80;
   sql = (char *) db_private_alloc (thread_p, sql_len);
   if (sql == NULL)
     {
@@ -1511,7 +1520,14 @@ dblink_dml_build_delete_sql (THREAD_ENTRY * thread_p, const char *table_name, co
     }
 
   remaining = (int) sql_len;
-  ret = snprintf (sql, remaining, "/* DBLINK DELETE */ DELETE FROM %s WHERE %s %s ?", table_name, key_col, op);
+  if (has_key)
+    {
+      ret = snprintf (sql, remaining, "/* DBLINK DELETE */ DELETE FROM %s WHERE %s %s ?", table_name, key_col, op);
+    }
+  else
+    {
+      ret = snprintf (sql, remaining, "/* DBLINK DELETE */ DELETE FROM %s", table_name);
+    }
   if (ret < 0 || ret >= remaining)
     {
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DBLINK, 1, "remote DELETE: SQL assembly truncated");
@@ -1536,8 +1552,10 @@ dblink_dml_build_delete_sql (THREAD_ENTRY * thread_p, const char *table_name, co
  *   attr_names(in)  : INSERT only -- explicit column names (NULL for positional INSERT)
  *   num_attrs(in)   : INSERT only -- length of attr_names (0 when positional)
  *   num_bind(in)    : INSERT only -- number of ? placeholders (= SELECT column count)
- *   key_col(in)     : DELETE only -- remote WHERE column (left-hand side, e.g. rc1)
- *   op(in)          : DELETE only -- comparison operator SQL text ("=", "<", ">", "<=", ">=")
+ *   key_col(in)     : DELETE only -- remote WHERE column (left-hand side, e.g. rc1); NULL omits the
+ *                     placeholder condition (deletes every remote row)
+ *   op(in)          : DELETE only -- comparison operator SQL text ("=", "<>", "<", ">", "<=", ">="); ignored
+ *                     when key_col is NULL
  *   state(out)      : filled with conn_handle and stmt_handle on success
  *
  * Note: To prevent partial writes, both kinds ALWAYS:

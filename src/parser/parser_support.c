@@ -11891,12 +11891,11 @@ pt_convert_dblink_insert_query (PARSER_CONTEXT * parser, PT_NODE * node, SERVER_
   return;
 }
 
-/* true iff cond is a predicate the sink can push over a subquery: col IN (subquery), col {= | <> | < | > | <= |
- * >=} ANY (subquery), or a scalar comparison. Every admitted shape is satisfied by pushing the local
- * values one at a time and letting the remote compare each; ALL shapes are not, because they need the
- * local result reduced to a single value first and the ordering that reduction must use is the remote
- * column's, which is not visible here. This only gates predicate *shape*; how each shape executes is
- * decided in XASL generation. */
+/* true iff cond is a predicate the sink can push over a subquery: col IN (subquery), col {= | <> | < |
+ * > | <= | >=} ANY (subquery), a scalar comparison, or col {= | < | > | <= | >=} ALL (subquery).
+ * PT_NE_ALL is excluded: whole-set (NOT IN) semantics, not value-push. This only gates predicate
+ * *shape*; how each shape executes -- one push per local value, or one push of a locally reduced
+ * value -- is decided in XASL generation. */
 static bool
 pt_dblink_delete_is_pushable_pred (PT_NODE * cond)
 {
@@ -11922,6 +11921,11 @@ pt_dblink_delete_is_pushable_pred (PT_NODE * cond)
     case PT_GT:
     case PT_LE:
     case PT_GE:
+    case PT_EQ_ALL:		/* col = ALL (subquery) */
+    case PT_LT_ALL:		/* col < ALL (subquery) */
+    case PT_GT_ALL:		/* col > ALL (subquery) */
+    case PT_LE_ALL:		/* col <= ALL (subquery) */
+    case PT_GE_ALL:		/* col >= ALL (subquery) */
       break;
     default:
       return false;

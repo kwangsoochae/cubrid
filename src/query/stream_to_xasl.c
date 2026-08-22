@@ -3875,6 +3875,7 @@ static char *
 stx_build_delete_proc (THREAD_ENTRY * thread_p, char *ptr, DELETE_PROC_NODE * delete_info)
 {
   int offset;
+  int sink_mode;
   XASL_UNPACK_INFO *xasl_unpack_info = get_xasl_unpack_info_ptr (thread_p);
 
   ptr = or_unpack_int (ptr, &delete_info->num_classes);
@@ -3921,6 +3922,9 @@ stx_build_delete_proc (THREAD_ENTRY * thread_p, char *ptr, DELETE_PROC_NODE * de
 
   delete_info->remote_key_col = stx_restore_string (thread_p, ptr);
   delete_info->remote_op = stx_restore_string (thread_p, ptr);
+
+  ptr = or_unpack_int (ptr, &sink_mode);
+  delete_info->remote_sink_mode = (DBLINK_REMOTE_SINK_MODE) sink_mode;
 
   return ptr;
 
