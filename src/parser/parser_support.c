@@ -12274,18 +12274,105 @@ pt_setup_dblink_sink_spec (PARSER_CONTEXT * parser, PT_NODE * node, PT_NODE * sp
   pt_resolve_server_names (parser, spec);
 }
 
+/*
+ * pt_attach_dblink_dml_conn () - attach the converted PT_DBLINK_TABLE_DML node to the remote DML
+ *                                target spec(s) and resolve its connection info
+ *   return: true if ct was attached and resolved; false if the caller must stop
+ *   parser(in):
+ *   node(in): the DML statement, for error reporting
+ *   into_spec(in): INSERT/MERGE target spec, or NULL
+ *   upd_spec(in): UPDATE/DELETE/MERGE target spec, or NULL
+ *   ct(in/out): the PT_DBLINK_TABLE_DML node to attach; its conn/owner_name/owner_list and the
+ *               resolved url/user/pwd are filled in here
+ *   snl(in/out): gathered server names; consumed (freed) here
+ *
+ * Note: false covers both "no server" (an error is set: a subquery target is not allowed) and
+ *   "already converted" (not an error).  The caller stops in either case, which is why one
+ *   boolean is enough.
+ */
+static bool
+pt_attach_dblink_dml_conn (PARSER_CONTEXT * parser, PT_NODE * node, PT_NODE * into_spec, PT_NODE * upd_spec,
+			   PT_NODE * ct, SERVER_NAME_LIST * snl)
+{
+  PT_NODE *server;
+  int i;
+
+  if (into_spec)
+    {
+      server = into_spec->info.spec.remote_server_name;
+    }
+  else
+    {
+      server = upd_spec->info.spec.remote_server_name;
+    }
+
+  if (server == NULL)
+    {
+      /* the subquery target in update query is not allowed */
+      PT_ERRORm (parser, node, MSGCAT_SET_PARSER_SEMANTIC, MSGCAT_SEMANTIC_UPDATE_DERIVED_TABLE);
+      return false;
+    }
+
+  if (server->node_type == PT_DBLINK_TABLE_DML)
+    {
+      /* already converted */
+      return false;
+    }
+
+  ct->info.dblink_table.is_name = true;
+  ct->info.dblink_table.conn = server;
+  if (server->next)
+    {
+      assert (server->next->node_type == PT_NAME);
+      ct->info.dblink_table.owner_name = server->next;
+      server->next = NULL;
+    }
+
+  for (i = 0; i < snl->stored_cnt; i++)
+    {
+      if (snl->stored_cnt != 1)
+	{
+	  if (ct->info.dblink_table.owner_list == NULL && snl->server[i]->next)
+	    {
+	      ct->info.dblink_table.owner_list = snl->server[i]->next;
+	      snl->server[i]->next = NULL;
+	    }
+	}
+
+      if (snl->server[i]->next)
+	{
+	  parser_free_node (parser, snl->server[i]->next);
+	}
+
+      parser_free_node (parser, snl->server[i]);
+    }
+
+  if (into_spec)
+    {
+      into_spec->info.spec.remote_server_name = ct;
+      pt_resolve_server_names (parser, into_spec);
+    }
+
+  if (upd_spec)
+    {
+      upd_spec->info.spec.remote_server_name = ct;
+      pt_resolve_server_names (parser, upd_spec);
+    }
+
+  return true;
+}
+
 static void
 pt_convert_dblink_dml_query (PARSER_CONTEXT * parser, PT_NODE * node,
 			     int local_upd, int remote_upd, SERVER_NAME_LIST * snl)
 {
-  int i;
   int tmp_server_cnt = snl->server_cnt;
   int sub_sel_server_cnt = 0;	/* remote server count found in INSERT SELECT subquery */
   unsigned int save_custom_print;
 
   PT_NODE *sub_sel = NULL;	/* for select sub-query */
   PT_NODE *list = NULL;		/* for insert select list */
-  PT_NODE *into_spec = NULL, *upd_spec = NULL, *server;
+  PT_NODE *into_spec = NULL, *upd_spec = NULL;
 
   PARSER_VARCHAR *comment = NULL, *dml;
 
@@ -12590,69 +12677,12 @@ pt_convert_dblink_dml_query (PARSER_CONTEXT * parser, PT_NODE * node,
 
   PT_NODE_PRINT_VALUE_TO_TEXT (parser, val);
 
-  if (into_spec)
+  if (!pt_attach_dblink_dml_conn (parser, node, into_spec, upd_spec, ct, snl))
     {
-      server = into_spec->info.spec.remote_server_name;
-    }
-  else
-    {
-      server = upd_spec->info.spec.remote_server_name;
-    }
-
-  if (server == NULL)
-    {
-      /* the subquery target in update query is not allowed */
-      PT_ERRORm (parser, node, MSGCAT_SET_PARSER_SEMANTIC, MSGCAT_SEMANTIC_UPDATE_DERIVED_TABLE);
       return;
-    }
-
-  if (server->node_type == PT_DBLINK_TABLE_DML)
-    {
-      /* already converted */
-      return;
-    }
-
-  ct->info.dblink_table.is_name = true;
-  ct->info.dblink_table.conn = server;
-  if (server->next)
-    {
-      assert (server->next->node_type == PT_NAME);
-      ct->info.dblink_table.owner_name = server->next;
-      server->next = NULL;
     }
 
   ct->info.dblink_table.qstr = val;
-
-  for (i = 0; i < snl->stored_cnt; i++)
-    {
-      if (snl->stored_cnt != 1)
-	{
-	  if (ct->info.dblink_table.owner_list == NULL && snl->server[i]->next)
-	    {
-	      ct->info.dblink_table.owner_list = snl->server[i]->next;
-	      snl->server[i]->next = NULL;
-	    }
-	}
-
-      if (snl->server[i]->next)
-	{
-	  parser_free_node (parser, snl->server[i]->next);
-	}
-
-      parser_free_node (parser, snl->server[i]);
-    }
-
-  if (into_spec)
-    {
-      into_spec->info.spec.remote_server_name = ct;
-      pt_resolve_server_names (parser, into_spec);
-    }
-
-  if (upd_spec)
-    {
-      upd_spec->info.spec.remote_server_name = ct;
-      pt_resolve_server_names (parser, upd_spec);
-    }
 
   return;
 }
