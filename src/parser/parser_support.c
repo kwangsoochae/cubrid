@@ -12599,6 +12599,16 @@ pt_convert_dblink_dml_query (PARSER_CONTEXT * parser, PT_NODE * node,
   val->type_enum = PT_TYPE_CHAR;
   val->info.value.string_type = ' ';
 
+  /* Attach and resolve before the statement text is printed, so the resolved connection info
+   * is available at print time.  The text itself does not change: this print sets
+   * PT_PRINT_SUPPRESS_SERVER_NAME, and pt_print_spec () then omits remote_server_name
+   * entirely.  It has to stay ahead of save_custom_print, because the early return here
+   * would otherwise leave custom_print modified. */
+  if (!pt_attach_dblink_dml_conn (parser, node, into_spec, upd_spec, ct, snl))
+    {
+      return;
+    }
+
   /*
      It should be set custom print flag for excluding
      server name from table-name@server-name for pure remote SQL.
@@ -12676,11 +12686,6 @@ pt_convert_dblink_dml_query (PARSER_CONTEXT * parser, PT_NODE * node,
   parser->custom_print = save_custom_print;
 
   PT_NODE_PRINT_VALUE_TO_TEXT (parser, val);
-
-  if (!pt_attach_dblink_dml_conn (parser, node, into_spec, upd_spec, ct, snl))
-    {
-      return;
-    }
 
   ct->info.dblink_table.qstr = val;
 
