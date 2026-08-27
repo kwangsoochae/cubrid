@@ -3460,6 +3460,18 @@ typedef struct host_vars_info
 
 #define PT_DBLINK_MAX_CORR_KEYS 8	/* max correlated push-down keys; currently only [0] is used (single equality) */
 
+/* Normalized remote DBMS kind.  Mapped from the raw cci_get_dbms_type () value, which the
+ * connection handshake fills in, so callers need not know the wire CAS_*_DBMS_* integers;
+ * the native, shard-proxy and CGW variants of one DBMS fold together.  OTHER doubles as
+ * "unknown" -- see pt_dblink_info.dbms_kind for when that happens and what may be asked. */
+typedef enum
+{
+  PT_DBLINK_DBMS_OTHER = 0,
+  PT_DBLINK_DBMS_CUBRID,
+  PT_DBLINK_DBMS_MYSQL,
+  PT_DBLINK_DBMS_ORACLE
+} PT_DBLINK_DBMS_KIND;
+
 typedef struct pt_dblink_info
 {
   PT_NODE *conn;		/* name for DBLINK */
@@ -3479,6 +3491,16 @@ typedef struct pt_dblink_info
   PT_NODE *owner_list;
 
   void *remote_col_list;	/* remote table's column list */
+
+  /* Remote DBMS kind.  Filled in where the remote is contacted: at name resolution for a
+   * SELECT spec, and at DML conversion for a remote DML target -- and there only when the
+   * statement carries a non-ASCII character literal, since that is the only thing the kind
+   * currently decides.  So PT_DBLINK_DBMS_OTHER conflates three states: a non-CUBRID remote,
+   * a probe that could not connect, and "never probed" (an ASCII-only remote DML, whose
+   * remote may well be CUBRID).  Only ask "is this CUBRID?" of it -- the SELECT path does
+   * separate MYSQL from ORACLE, but a caller cannot tell which path filled the field -- and
+   * do not read it on a path that skips the probe. */
+  PT_DBLINK_DBMS_KIND dbms_kind;
 
   /* Correlated equality push-down (single equality: count == 1).
    * corr_key_col_names: stable copy for SQL; corr_key_outer_copy: owning copy for XASL (parser_copy_tree). */

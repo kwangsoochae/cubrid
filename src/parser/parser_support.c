@@ -12275,6 +12275,70 @@ pt_setup_dblink_sink_spec (PARSER_CONTEXT * parser, PT_NODE * node, PT_NODE * sp
 }
 
 /*
+ * pt_value_has_non_ascii () - does a character string value hold a byte outside ASCII?
+ *   return: true if any byte is >= 0x80
+ *   node(in): a PT_VALUE
+ *
+ * ASCII bytes are the same in every codeset CUBRID supports, so a literal made only of them
+ * needs no codeset handling.  intl_text_utf8_to_dbcs () takes the same shortcut.
+ */
+static bool
+pt_value_has_non_ascii (PT_NODE * node)
+{
+  const unsigned char *p, *end;
+
+  if (node == NULL || node->node_type != PT_VALUE
+      || (node->type_enum != PT_TYPE_CHAR && node->type_enum != PT_TYPE_VARCHAR)
+      || node->info.value.data_value.str == NULL)
+    {
+      return false;
+    }
+
+  p = node->info.value.data_value.str->bytes;
+  end = p + node->info.value.data_value.str->length;
+  for (; p < end; p++)
+    {
+      if (*p >= 0x80)
+	{
+	  return true;
+	}
+    }
+
+  return false;
+}
+
+/*
+ * pt_find_non_ascii_literal () - parser_walk_tree pre-function for pt_stmt_has_non_ascii_literal ()
+ */
+static PT_NODE *
+pt_find_non_ascii_literal (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int *continue_walk)
+{
+  bool *found = (bool *) arg;
+
+  if (pt_value_has_non_ascii (node))
+    {
+      *found = true;
+      *continue_walk = PT_STOP_WALK;
+    }
+
+  return node;
+}
+
+/*
+ * pt_stmt_has_non_ascii_literal () - does the statement contain a non-ASCII character literal?
+ *   return: true if at least one is found
+ */
+static bool
+pt_stmt_has_non_ascii_literal (PARSER_CONTEXT * parser, PT_NODE * node)
+{
+  bool found = false;
+
+  (void) parser_walk_tree (parser, node, pt_find_non_ascii_literal, &found, NULL, NULL);
+
+  return found;
+}
+
+/*
  * pt_attach_dblink_dml_conn () - attach the converted PT_DBLINK_TABLE_DML node to the remote DML
  *                                target spec(s) and resolve its connection info
  *   return: true if ct was attached and resolved; false if the caller must stop
@@ -12295,6 +12359,7 @@ pt_attach_dblink_dml_conn (PARSER_CONTEXT * parser, PT_NODE * node, PT_NODE * in
 			   PT_NODE * ct, SERVER_NAME_LIST * snl)
 {
   PT_NODE *server;
+  bool need_dbms_kind;
   int i;
 
   if (into_spec)
@@ -12318,6 +12383,13 @@ pt_attach_dblink_dml_conn (PARSER_CONTEXT * parser, PT_NODE * node, PT_NODE * in
       /* already converted */
       return false;
     }
+
+  /* Decide here, before ct is linked into the statement, whether the remote DBMS kind will be
+   * needed: the walk would otherwise also see ct's own url/user/pwd values.  Specs already
+   * resolved at name resolution still carry their connection info in the tree, so a non-ASCII
+   * password there triggers a probe -- an extra connect, never a wrong answer.  Erring toward
+   * probing is the safe direction: a missed probe would leave a literal unhandled. */
+  need_dbms_kind = pt_stmt_has_non_ascii_literal (parser, node);
 
   ct->info.dblink_table.is_name = true;
   ct->info.dblink_table.conn = server;
@@ -12357,6 +12429,20 @@ pt_attach_dblink_dml_conn (PARSER_CONTEXT * parser, PT_NODE * node, PT_NODE * in
     {
       upd_spec->info.spec.remote_server_name = ct;
       pt_resolve_server_names (parser, upd_spec);
+    }
+
+  /* Probe the remote DBMS kind, but only for a statement that carries a non-ASCII character
+   * literal.  The kind is consulted solely to decide whether such a literal may declare its
+   * codeset to the remote, and unlike the SELECT path there is no connection open here, so
+   * the probe costs a connect: skipping it for the ASCII-only majority keeps that cost off
+   * the common path.  Best effort besides -- an unreachable remote leaves the kind unknown
+   * rather than failing a statement that used to compile. */
+  if (need_dbms_kind && ct->info.dblink_table.url && ct->info.dblink_table.user && ct->info.dblink_table.pwd)
+    {
+      ct->info.dblink_table.dbms_kind =
+	pt_dblink_probe_remote_dbms_kind ((const char *) ct->info.dblink_table.url->info.value.data_value.str->bytes,
+					  (const char *) ct->info.dblink_table.user->info.value.data_value.str->bytes,
+					  (const char *) ct->info.dblink_table.pwd->info.value.data_value.str->bytes);
     }
 
   return true;

@@ -255,6 +255,7 @@ static void pt_set_attr_list_types (PARSER_CONTEXT * parser, PT_NODE * as_attr_l
 static PT_NODE *pt_count_with_clauses (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int *continue_walk);
 
 static int pt_resolve_dblink_server_name (PARSER_CONTEXT * parser, PT_NODE * node, char **server_owner_name);
+static PT_DBLINK_DBMS_KIND pt_dblink_dbms_kind (int cci_dbms_type);
 static int pt_resolve_dblink_check_owner_name (PARSER_CONTEXT * parser, PT_NODE * node, char **server_owner_name);
 
 static void pt_gather_dblink_colums (PARSER_CONTEXT * parser, PT_NODE * query_stmt);
@@ -5453,6 +5454,9 @@ pt_dblink_table_get_column_defs (PARSER_CONTEXT * parser, PT_NODE * dblink, S_RE
     {
       goto set_parser_error;
     }
+
+  /* free once connected: the handshake already carried the remote DBMS type */
+  dblink_table->dbms_kind = pt_dblink_dbms_kind (cci_get_dbms_type (conn));
 
   req = cci_prepare (conn, sql, 0, &cci_error);
   if (req < 0)
@@ -12153,6 +12157,74 @@ pt_check_dblink_column_alias (PARSER_CONTEXT * parser, PT_NODE * dblink)
     }
 
   return NO_ERROR;
+}
+
+/*
+ * pt_dblink_dbms_kind () - normalize a raw cci_get_dbms_type () value
+ *   return: PT_DBLINK_DBMS_KIND; PT_DBLINK_DBMS_OTHER for anything unrecognized
+ *   cci_dbms_type(in): value from cci_get_dbms_type ()
+ *
+ * The native, shard-proxy and CGW variants of one DBMS fold together: callers care which
+ * SQL dialect the remote speaks, not how the connection reaches it.
+ */
+static PT_DBLINK_DBMS_KIND
+pt_dblink_dbms_kind (int cci_dbms_type)
+{
+  switch (cci_dbms_type)
+    {
+    case CAS_DBMS_CUBRID:
+    case CAS_PROXY_DBMS_CUBRID:
+      return PT_DBLINK_DBMS_CUBRID;
+
+    case CAS_DBMS_MYSQL:
+    case CAS_PROXY_DBMS_MYSQL:
+    case CAS_CGW_DBMS_MYSQL:
+    case CAS_CGW_DBMS_MARIADB:
+      return PT_DBLINK_DBMS_MYSQL;
+
+    case CAS_DBMS_ORACLE:
+    case CAS_PROXY_DBMS_ORACLE:
+    case CAS_CGW_DBMS_ORACLE:
+      return PT_DBLINK_DBMS_ORACLE;
+
+    default:
+      return PT_DBLINK_DBMS_OTHER;
+    }
+}
+
+/*
+ * pt_dblink_probe_remote_dbms_kind () - connect to a remote just to learn its DBMS kind
+ *   return: PT_DBLINK_DBMS_KIND; PT_DBLINK_DBMS_OTHER when the remote cannot be reached
+ *   url(in), user(in), passwd(in): resolved connection info
+ *
+ * For callers that have no connection open at compile time (the remote DML path).  The kind
+ * itself is free once connected -- cci_get_dbms_type () reads what the handshake already
+ * filled in -- so the cost here is the connect.
+ *
+ * Note: best effort.  A connect failure returns OTHER and sets no error, because the
+ * statement did not need a compile-time connection before; failing it here would reject
+ * statements that used to compile.  A real connection problem still surfaces at execution.
+ */
+PT_DBLINK_DBMS_KIND
+pt_dblink_probe_remote_dbms_kind (const char *url, const char *user, const char *passwd)
+{
+  char conn_url[MAX_LEN_CONNECTION_URL] = { 0, };
+  T_CCI_ERROR cci_error;
+  PT_DBLINK_DBMS_KIND kind;
+  int conn;
+
+  snprintf (conn_url, MAX_LEN_CONNECTION_URL, "%s%s", url, strstr (url, ":?") ? "&__gateway=true" : "?__gateway=true");
+
+  conn = cci_connect_with_url_ex (conn_url, (char *) user, (char *) passwd, &cci_error);
+  if (conn < 0)
+    {
+      return PT_DBLINK_DBMS_OTHER;
+    }
+
+  kind = pt_dblink_dbms_kind (cci_get_dbms_type (conn));
+  cci_disconnect (conn, &cci_error);
+
+  return kind;
 }
 
 /*

@@ -729,6 +729,7 @@ extern "C"
   extern void pt_free_dblink_remote_cols (PARSER_CONTEXT * parser);
   extern int pt_check_dblink_column_alias (PARSER_CONTEXT * parser, PT_NODE * dblink);
   extern int pt_dblink_get_remote_col_charset (void *remote_col_list, const char *col_name);
+  extern PT_DBLINK_DBMS_KIND pt_dblink_probe_remote_dbms_kind (const char *url, const char *user, const char *passwd);
   extern PT_NODE *pt_count_name_nodes (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int *continue_walk);
 #ifdef __cplusplus
 }
