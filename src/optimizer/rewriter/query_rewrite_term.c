@@ -27,7 +27,11 @@
 
 static void qo_converse_sarg_terms (PARSER_CONTEXT * parser, PT_NODE * where);
 static void qo_reduce_comp_pair_terms (PARSER_CONTEXT * parser, PT_NODE ** wherep);
-static void qo_rewrite_like_terms (PARSER_CONTEXT * parser, PT_NODE ** wherep);
+static void qo_rewrite_like_terms (PARSER_CONTEXT * parser, PT_NODE ** wherep, PT_NODE * spec_list);
+static bool qo_derived_col_name_eq (const char *n1, const char *n2);
+static PT_NODE *qo_dblink_spec_of (PARSER_CONTEXT * parser, PT_NODE * spec_list, PT_NODE * name,
+				   const char **remote_col);
+static bool qo_like_range_bound_is_portable (PARSER_CONTEXT * parser, PT_NODE * like, PT_NODE * spec_list);
 static void qo_convert_to_range (PARSER_CONTEXT * parser, PT_NODE ** wherep);
 static void qo_apply_range_intersection (PARSER_CONTEXT * parser, PT_NODE ** wherep);
 static void qo_fold_is_and_not_null (PARSER_CONTEXT * parser, PT_NODE * from, PT_NODE ** wherep);
@@ -49,7 +53,7 @@ qo_rewrite_terms (PARSER_CONTEXT * parser, PT_NODE * nodes, PT_NODE ** terms)
     {
       qo_converse_sarg_terms (parser, *terms);
       qo_reduce_comp_pair_terms (parser, terms);
-      qo_rewrite_like_terms (parser, terms);
+      qo_rewrite_like_terms (parser, terms, nodes);
       qo_convert_to_range (parser, terms);
       qo_apply_range_intersection (parser, terms);
       qo_fold_is_and_not_null (parser, nodes, terms);
@@ -1964,6 +1968,142 @@ error_exit:
 }
 
 /*
+ * qo_derived_col_name_eq () - do these two derived-column names mean the same column?
+ *   return: true when they match ignoring case and a surrounding double quote
+ *   n1(in), n2(in): identifiers to compare, either of which may be quoted
+ *
+ * Note: a DBLink column name kept in the parse tree may carry the quotes it was declared with,
+ *   which is why pt_dblink_get_remote_col_charset () uses the _for_dblink variant.  That variant
+ *   strips its first argument only, and here either side can be the quoted one.
+ */
+static bool
+qo_derived_col_name_eq (const char *n1, const char *n2)
+{
+  if (n1 == NULL || n2 == NULL)
+    {
+      return false;
+    }
+
+  return (intl_identifier_casecmp (n1, n2) == 0
+	  || intl_identifier_casecmp_for_dblink (n1, n2) == 0 || intl_identifier_casecmp_for_dblink (n2, n1) == 0);
+}
+
+/*
+ * qo_dblink_spec_of () - the DBLink spec a name resolves to, if it resolves to one
+ *   return: the spec whose derived table is a DBLink table, or NULL
+ *   parser(in):
+ *   spec_list(in): FROM list the name resolves against
+ *   name(in): the name to resolve
+ *   remote_col(out): the name the remote holds for it.  Read it only when a spec is returned.
+ *
+ * Note: "t@server" reaches the optimizer as a subquery wrapping the DBLink table.  A subquery the
+ *   user wrote around it is usually merged away first, but one that blocks merging (DISTINCT,
+ *   GROUP BY, LIMIT) stays above that wrap, putting the DBLink spec more than one level down --
+ *   hence the descent rather than a single unwrap.
+ *
+ *   A level naming more than one thing stops it: which spec the name came from is not evident
+ *   here, and answering with the first would read a local column's codeset off a remote.  NULL
+ *   then leaves the rewrite alone, as it was before this guard existed.
+ */
+static PT_NODE *
+qo_dblink_spec_of (PARSER_CONTEXT * parser, PT_NODE * spec_list, PT_NODE * name, const char **remote_col)
+{
+  PT_NODE *spec, *derived, *attr, *col;
+  int idx;
+
+  *remote_col = (name != NULL) ? name->info.name.original : NULL;
+  if (*remote_col == NULL)
+    {
+      return NULL;
+    }
+
+  spec = pt_find_spec (parser, spec_list, name);
+
+  while (spec != NULL)
+    {
+      if (spec->info.spec.derived_table_type == PT_DERIVED_DBLINK_TABLE)
+	{
+	  return (spec->info.spec.derived_table != NULL) ? spec : NULL;
+	}
+
+      derived = spec->info.spec.derived_table;
+      if (derived == NULL || derived->node_type != PT_SELECT)
+	{
+	  return NULL;
+	}
+
+      /* A level that renamed the column exposes a name its own source never had, so carry the name
+       * down with the descent.  Looking the remote up with the outer name would miss and read as
+       * "codeset unknown", which lets the rewrite through -- the case this guard exists to stop. */
+      for (attr = spec->info.spec.as_attr_list, idx = 0; attr != NULL; attr = attr->next, idx++)
+	{
+	  if (qo_derived_col_name_eq (attr->info.name.original, *remote_col))
+	    {
+	      break;
+	    }
+	}
+      if (attr == NULL)
+	{
+	  return NULL;
+	}
+
+      for (col = pt_get_select_list (parser, derived); col != NULL && idx > 0; col = col->next, idx--)
+	{
+	  ;			/* step to the item this level exposes */
+	}
+      if (col == NULL || col->node_type != PT_NAME)
+	{
+	  return NULL;
+	}
+      *remote_col = col->info.name.original;
+
+      spec = derived->info.query.q.select.from;
+      if (spec != NULL && spec->next != NULL)
+	{
+	  return NULL;
+	}
+    }
+
+  return NULL;
+}
+
+/*
+ * qo_like_range_bound_is_portable () - does a range bound derived from this LIKE still mean the
+ *                                      same thing where the comparison will run?
+ *   return: false only when the compared column lives on a DBLink remote in another codeset
+ *   parser(in):
+ *   like(in): the LIKE expression
+ *   spec_list(in): FROM list the comparison resolves against; NULL when unknown
+ */
+static bool
+qo_like_range_bound_is_portable (PARSER_CONTEXT * parser, PT_NODE * like, PT_NODE * spec_list)
+{
+  PT_NODE *col, *spec;
+  const char *remote_col;
+  int remote_cs, local_cs;
+
+  col = (like != NULL) ? like->info.expr.arg1 : NULL;
+  if (spec_list == NULL || col == NULL || col->node_type != PT_NAME)
+    {
+      return true;
+    }
+
+  spec = qo_dblink_spec_of (parser, spec_list, col, &remote_col);
+  if (spec == NULL)
+    {
+      return true;
+    }
+
+  /* The codeset the remote reports for the column is the one the comparison runs in there.  With
+   * nothing reported there is nothing to compare against, so the rewrite is left alone. */
+  remote_cs =
+    pt_dblink_get_remote_col_charset (spec->info.spec.derived_table->info.dblink_table.remote_col_list, remote_col);
+  local_cs = (col->data_type != NULL) ? col->data_type->info.data_type.units : -1;
+
+  return !(remote_cs >= 0 && local_cs >= 0 && remote_cs != local_cs);
+}
+
+/*
  * qo_rewrite_one_like_term () - Convert a leftmost LIKE term to a BETWEEN
  *			         (GE_LT) term to increase the chance of using
  *                               an index.
@@ -1987,7 +2127,7 @@ error_exit:
  */
 static void
 qo_rewrite_one_like_term (PARSER_CONTEXT * const parser, PT_NODE * const like, PT_NODE * const pattern,
-			  PT_NODE * const escape, bool * const perform_generic_rewrite)
+			  PT_NODE * const escape, bool * const perform_generic_rewrite, PT_NODE * const spec_list)
 {
   int error_code = NO_ERROR;
   bool has_escape_char = false;
@@ -2154,6 +2294,17 @@ qo_rewrite_one_like_term (PARSER_CONTEXT * const parser, PT_NODE * const like, P
       if (!(lang_get_collation (collation_id)->options.allow_like_rewrite))
 	{
 	  *perform_generic_rewrite = true;
+	  goto fast_exit;
+	}
+
+      /* Same reason one step further out: the bound below is the pattern's own bytes stepped by one,
+       * so it delimits the pattern's rows only in the code space that step was taken in.  A DBLink
+       * remote in another codeset is a different space, where that bound admits rows the pattern
+       * does not, or shuts out rows it does.  Leave the term alone rather than fall back to the
+       * generic rewrite, which would put the bound beside the LIKE and send it anyway; the remote
+       * derives its own from the LIKE and reaches the same index. */
+      if (!qo_like_range_bound_is_portable (parser, like, spec_list))
+	{
 	  goto fast_exit;
 	}
 
@@ -2470,7 +2621,7 @@ qo_check_like_expression_pre (PARSER_CONTEXT * parser, PT_NODE * node, void *arg
  *   cnf_list(in):
  */
 static void
-qo_rewrite_like_terms (PARSER_CONTEXT * parser, PT_NODE ** cnf_list)
+qo_rewrite_like_terms (PARSER_CONTEXT * parser, PT_NODE ** cnf_list, PT_NODE * spec_list)
 {
   bool error_saved = false;
   PT_NODE *cnf_node = NULL;
@@ -2549,7 +2700,7 @@ qo_rewrite_like_terms (PARSER_CONTEXT * parser, PT_NODE ** cnf_list)
 	  if (pt_is_ascii_string_value_node (pattern)
 	      && (escape == NULL || PT_IS_NULL_NODE (escape) || pt_is_ascii_string_value_node (escape)))
 	    {
-	      qo_rewrite_one_like_term (parser, crt_expr, pattern, escape, &perform_generic_rewrite);
+	      qo_rewrite_one_like_term (parser, crt_expr, pattern, escape, &perform_generic_rewrite, spec_list);
 	      if (!perform_generic_rewrite)
 		{
 		  continue;
