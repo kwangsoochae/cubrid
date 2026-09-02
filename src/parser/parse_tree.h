@@ -3382,6 +3382,7 @@ struct pt_truncate_info
 struct pt_do_info
 {
   PT_NODE *expr;		/* PT_EXPR */
+  int repeat_count;		/* PoC: 0 이면 기존 DO, >0 이면 DO <n> LOOP <expr> */
 };
 
 struct pt_set_session_variable_info

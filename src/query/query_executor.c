@@ -15603,6 +15603,7 @@ qexec_clear_mainblock_iterations (THREAD_ENTRY * thread_p, XASL_NODE * xasl)
     case MERGE_PROC:
     case BUILD_SCHEMA_PROC:
     case CTE_PROC:
+    case PLCS_REPEAT_PROC:
       break;
 
     default:
@@ -15989,6 +15990,30 @@ qexec_execute_mainblock_internal (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XAS
 	}
       /* monitor */
       perfmon_inc_stat (thread_p, PSTAT_QM_NUM_INSERTS);
+      break;
+
+    case PLCS_REPEAT_PROC:
+      /* PoC 절차 노드. 구조는 qexec_execute_cte 와 같다 —
+       * 실행 시점 루프 + 무한 반복 가드 + 자식 실행 + 에러 전파. */
+      {
+	int plcs_i;
+	int plcs_max = prm_get_integer_value (PRM_ID_CTE_MAX_RECURSIONS);
+
+	if (xasl->proc.plcs_repeat.repeat_count > plcs_max)
+	  {
+	    er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_CTE_MAX_RECURSION_REACHED, 1, plcs_max);
+	    return ER_FAILED;
+	  }
+
+	for (plcs_i = 0; plcs_i < xasl->proc.plcs_repeat.repeat_count; plcs_i++)
+	  {
+	    error = qexec_execute_do_stmt (thread_p, xasl, xasl_state);
+	    if (error != NO_ERROR)
+	      {
+		return error;
+	      }
+	  }
+      }
       break;
 
     case DO_PROC:

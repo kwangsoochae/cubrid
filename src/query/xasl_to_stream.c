@@ -250,6 +250,8 @@ static int xts_sizeof_sort_list (const SORT_LIST * ptr);
 static int xts_sizeof_connectby_proc (const CONNECTBY_PROC_NODE * ptr);
 static int xts_sizeof_regu_value_list (const REGU_VALUE_LIST * regu_value_list);
 static int xts_sizeof_cte_proc (const CTE_PROC_NODE * ptr);
+static char *xts_process_plcs_repeat_proc (char *ptr, const PLCS_REPEAT_PROC_NODE * plcs_repeat);
+static int xts_sizeof_plcs_repeat_proc (const PLCS_REPEAT_PROC_NODE * ptr);
 static int xts_sizeof_sp_type (const SP_TYPE * sp);
 
 static int xts_mark_ptr_visited (const void *ptr, int offset);
@@ -3178,6 +3180,10 @@ xts_process_xasl_node (char *ptr, const XASL_NODE * xasl)
       break;
 
     case DO_PROC:
+      break;
+
+    case PLCS_REPEAT_PROC:
+      ptr = xts_process_plcs_repeat_proc (ptr, &xasl->proc.plcs_repeat);
       break;
 
     case MERGE_PROC:
@@ -6237,6 +6243,10 @@ xts_sizeof_xasl_node (const XASL_NODE * xasl)
       size += xts_sizeof_cte_proc (&xasl->proc.cte);
       break;
 
+    case PLCS_REPEAT_PROC:
+      size += xts_sizeof_plcs_repeat_proc (&xasl->proc.plcs_repeat);
+      break;
+
     default:
       xts_Xasl_errcode = ER_QPROC_INVALID_XASLNODE;
       return ER_FAILED;
@@ -6654,6 +6664,21 @@ xts_sizeof_merge_proc (const MERGE_PROC_NODE * merge_info)
  * return
  * ptr(in)  :
  */
+/* PoC 절차 노드: payload 가 int 하나뿐이라 pack/sizeof 도 한 줄이다 */
+static char *
+xts_process_plcs_repeat_proc (char *ptr, const PLCS_REPEAT_PROC_NODE * plcs_repeat)
+{
+  ptr = or_pack_int (ptr, plcs_repeat->repeat_count);
+
+  return ptr;
+}
+
+static int
+xts_sizeof_plcs_repeat_proc (const PLCS_REPEAT_PROC_NODE * plcs_repeat)
+{
+  return OR_INT_SIZE;		/* repeat_count */
+}
+
 static int
 xts_sizeof_cte_proc (const CTE_PROC_NODE * cte_info)
 {

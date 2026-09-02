@@ -24857,10 +24857,23 @@ parser_generate_do_stmt_xasl (PARSER_CONTEXT * parser, PT_NODE * node)
 
   parser->dbval_cnt = 0;
 
-  xasl = regu_xasl_node_alloc (DO_PROC);
-  if (!xasl)
+  /* PoC: DO <n> LOOP <expr> 는 절차 노드로 내려간다. 나머지는 기존과 같다. */
+  if (node->info.do_.repeat_count > 0)
     {
-      return NULL;
+      xasl = regu_xasl_node_alloc (PLCS_REPEAT_PROC);
+      if (!xasl)
+	{
+	  return NULL;
+	}
+      xasl->proc.plcs_repeat.repeat_count = node->info.do_.repeat_count;
+    }
+  else
+    {
+      xasl = regu_xasl_node_alloc (DO_PROC);
+      if (!xasl)
+	{
+	  return NULL;
+	}
     }
 
   /* populate statement's aptr_list; in this context, uncorrelated subqueries mean top level queries in expr tree */

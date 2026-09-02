@@ -111,6 +111,7 @@ static char *stx_build_delete_proc (THREAD_ENTRY * thread_p, char *tmp, DELETE_P
 static char *stx_build_insert_proc (THREAD_ENTRY * thread_p, char *tmp, INSERT_PROC_NODE * ptr);
 static char *stx_build_merge_proc (THREAD_ENTRY * thread_p, char *tmp, MERGE_PROC_NODE * ptr);
 static char *stx_build_cte_proc (THREAD_ENTRY * thread_p, char *tmp, CTE_PROC_NODE * ptr);
+static char *stx_build_plcs_repeat_proc (THREAD_ENTRY * thread_p, char *tmp, PLCS_REPEAT_PROC_NODE * ptr);
 static char *stx_build_outptr_list (THREAD_ENTRY * thread_p, char *tmp, OUTPTR_LIST * ptr);
 static char *stx_build_selupd_list (THREAD_ENTRY * thread_p, char *tmp, SELUPD_LIST * ptr);
 static char *stx_build_pred_expr (THREAD_ENTRY * thread_p, char *tmp, PRED_EXPR * ptr);
@@ -2340,6 +2341,10 @@ stx_build_xasl_node (THREAD_ENTRY * thread_p, char *ptr, XASL_NODE * xasl)
       ptr = stx_build_cte_proc (thread_p, ptr, &xasl->proc.cte);
       break;
 
+    case PLCS_REPEAT_PROC:
+      ptr = stx_build_plcs_repeat_proc (thread_p, ptr, &xasl->proc.plcs_repeat);
+      break;
+
     default:
       stx_set_xasl_errcode (thread_p, ER_QPROC_INVALID_XASLNODE);
       return NULL;
@@ -4130,6 +4135,15 @@ stx_build_merge_proc (THREAD_ENTRY * thread_p, char *ptr, MERGE_PROC_NODE * merg
 error:
   stx_set_xasl_errcode (thread_p, ER_OUT_OF_VIRTUAL_MEMORY);
   return NULL;
+}
+
+/* PoC 절차 노드 역직렬화 */
+static char *
+stx_build_plcs_repeat_proc (THREAD_ENTRY * thread_p, char *ptr, PLCS_REPEAT_PROC_NODE * plcs_repeat)
+{
+  ptr = or_unpack_int (ptr, &plcs_repeat->repeat_count);
+
+  return ptr;
 }
 
 static char *

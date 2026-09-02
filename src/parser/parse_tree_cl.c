@@ -8387,6 +8387,16 @@ pt_print_do (PARSER_CONTEXT * parser, PT_NODE * p)
   parser->custom_print = save_custom;
 
   q = pt_append_nulstring (parser, q, "do ");
+  if (p->info.do_.repeat_count > 0)
+    {
+      char buf[32];
+
+      /* 반복 횟수는 키 텍스트에 반드시 나와야 한다. 빠지면 DO 3 LOOP x 와
+       * DO 5 LOOP x 가 같은 SHA-1 로 수렴해 xcache 에서 서로의 계획을 쓴다. */
+      snprintf (buf, sizeof (buf), "%d", p->info.do_.repeat_count);
+      q = pt_append_nulstring (parser, q, buf);
+      q = pt_append_nulstring (parser, q, " loop ");
+    }
   q = pt_append_varchar (parser, q, r1);
 
   return q;

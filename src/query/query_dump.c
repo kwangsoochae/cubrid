@@ -2850,6 +2850,8 @@ qdump_xasl_type_string (XASL_NODE * xasl_p)
       return "DO";
     case CTE_PROC:
       return "CTE";
+    case PLCS_REPEAT_PROC:
+      return "PLCS_REPEAT";
     default:
       assert (false);
       return "";

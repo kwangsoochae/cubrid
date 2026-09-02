@@ -4436,6 +4436,19 @@ do_stmt
 			$$ = node;
 			PARSER_SAVE_ERR_CONTEXT ($$, @$.buffer_pos)
 		}}
+	| DO UNSIGNED_INTEGER LOOP expression_
+		{{
+			/* PoC: 절차 반복. 확장 XASL 노드(PLCS_REPEAT_PROC)로 내려간다. */
+			PT_NODE *node = parser_new_node (this_parser, PT_DO);
+			if (node)
+			  {
+			    node->info.do_.expr = $4;
+			    node->info.do_.repeat_count = atoi ($2);
+			  }
+
+			$$ = node;
+			PARSER_SAVE_ERR_CONTEXT ($$, @$.buffer_pos)
+		}}
 	;
 
 drop_stmt

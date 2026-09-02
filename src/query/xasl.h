@@ -203,7 +203,8 @@ typedef enum
   DO_PROC,
   MERGE_PROC,
   BUILD_SCHEMA_PROC,
-  CTE_PROC
+  CTE_PROC,
+  PLCS_REPEAT_PROC		/* PoC: 절차 반복 노드 (클라이언트 컴파일 · 서버 실행) */
 } PROC_TYPE;
 
 typedef struct qproc_db_value_list *QPROC_DB_VALUE_LIST;	/* TODO */
@@ -481,6 +482,14 @@ struct merge_proc_node
   XASL_NODE *update_xasl;	/* XASL for UPDATE part */
   XASL_NODE *insert_xasl;	/* XASL for INSERT part */
   bool has_delete;		/* MERGE statement has DELETE */
+};
+
+/* PLCS_REPEAT_PROC — PoC 절차 노드. 본문을 repeat_count 회 실행한다.
+ * payload 가 int 하나뿐이라 직렬화도 or_pack_int 한 번이다. */
+typedef struct plcs_repeat_proc_node PLCS_REPEAT_PROC_NODE;
+struct plcs_repeat_proc_node
+{
+  int repeat_count;		/* 반복 횟수 (컴파일 시점 상수) */
 };
 
 typedef struct cte_proc_node CTE_PROC_NODE;
@@ -1201,6 +1210,7 @@ struct xasl_node
     CONNECTBY_PROC_NODE connect_by;	/* CONNECTBY_PROC */
     MERGE_PROC_NODE merge;	/* MERGE_PROC */
     CTE_PROC_NODE cte;		/* CTE_PROC */
+    PLCS_REPEAT_PROC_NODE plcs_repeat;	/* PLCS_REPEAT_PROC */
   } proc;
 
   /* XASL cache related information */
