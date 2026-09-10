@@ -152,6 +152,7 @@ static char *xts_process_delete_proc (char *ptr, const DELETE_PROC_NODE * delete
 static char *xts_process_insert_proc (char *ptr, const INSERT_PROC_NODE * insert_proc);
 static char *xts_process_merge_proc (char *ptr, const MERGE_PROC_NODE * merge_info);
 static char *xts_process_cte_proc (char *ptr, const CTE_PROC_NODE * cte_proc);
+static char *xts_process_plcs_proc (char *ptr, const PLCS_PROC_NODE * plcs_proc);
 
 static char *xts_process_outptr_list (char *ptr, const OUTPTR_LIST * outptr_list);
 static char *xts_process_selupd_list (char *ptr, const SELUPD_LIST * selupd_list);
@@ -250,6 +251,7 @@ static int xts_sizeof_sort_list (const SORT_LIST * ptr);
 static int xts_sizeof_connectby_proc (const CONNECTBY_PROC_NODE * ptr);
 static int xts_sizeof_regu_value_list (const REGU_VALUE_LIST * regu_value_list);
 static int xts_sizeof_cte_proc (const CTE_PROC_NODE * ptr);
+static int xts_sizeof_plcs_proc (const PLCS_PROC_NODE * ptr);
 static int xts_sizeof_sp_type (const SP_TYPE * sp);
 
 static int xts_mark_ptr_visited (const void *ptr, int offset);
@@ -3191,6 +3193,10 @@ xts_process_xasl_node (char *ptr, const XASL_NODE * xasl)
       ptr = xts_process_cte_proc (ptr, &xasl->proc.cte);
       break;
 
+    case PLCS_PROC:
+      ptr = xts_process_plcs_proc (ptr, &xasl->proc.plcs);
+      break;
+
     default:
       xts_Xasl_errcode = ER_QPROC_INVALID_XASLNODE;
       return NULL;
@@ -3685,6 +3691,37 @@ xts_process_cte_proc (char *ptr, const CTE_PROC_NODE * cte_proc)
       return NULL;
     }
   ptr = or_pack_int (ptr, offset);
+
+  return ptr;
+}
+
+static char *
+xts_process_plcs_proc (char *ptr, const PLCS_PROC_NODE * plcs_proc)
+{
+  int offset;
+  int i;
+
+  ptr = or_pack_int (ptr, plcs_proc->op);
+  ptr = or_pack_int (ptr, plcs_proc->flags);
+  ptr = or_pack_int (ptr, plcs_proc->target_slot);
+
+  offset = xts_save_regu_variable (plcs_proc->expr);
+  if (offset == ER_FAILED)
+    {
+      return NULL;
+    }
+  ptr = or_pack_int (ptr, offset);
+
+  ptr = or_pack_int (ptr, plcs_proc->children_cnt);
+  for (i = 0; i < plcs_proc->children_cnt; i++)
+    {
+      offset = xts_save_xasl_node (plcs_proc->children[i]);
+      if (offset == ER_FAILED)
+	{
+	  return NULL;
+	}
+      ptr = or_pack_int (ptr, offset);
+    }
 
   return ptr;
 }
@@ -6237,6 +6274,10 @@ xts_sizeof_xasl_node (const XASL_NODE * xasl)
       size += xts_sizeof_cte_proc (&xasl->proc.cte);
       break;
 
+    case PLCS_PROC:
+      size += xts_sizeof_plcs_proc (&xasl->proc.plcs);
+      break;
+
     default:
       xts_Xasl_errcode = ER_QPROC_INVALID_XASLNODE;
       return ER_FAILED;
@@ -6662,6 +6703,26 @@ xts_sizeof_cte_proc (const CTE_PROC_NODE * cte_info)
   size += (PTR_SIZE		/* non_recursive_part */
 	   + PTR_SIZE		/* recursive_part */
 	   + PTR_SIZE);		/* list_id */
+
+  return size;
+}
+
+/*
+ * xts_sizeof_plcs_proc () -
+ *   return:
+ *   ptr(in)    :
+ */
+static int
+xts_sizeof_plcs_proc (const PLCS_PROC_NODE * plcs_proc)
+{
+  int size = 0;
+
+  size += (OR_INT_SIZE		/* op */
+	   + OR_INT_SIZE	/* flags */
+	   + OR_INT_SIZE	/* target_slot */
+	   + PTR_SIZE		/* expr */
+	   + OR_INT_SIZE	/* children_cnt */
+	   + (plcs_proc->children_cnt * PTR_SIZE));	/* children */
 
   return size;
 }
