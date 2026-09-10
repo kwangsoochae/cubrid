@@ -224,6 +224,8 @@ set(MONITOR_HEADERS
 set(PARSER_SOURCES
   ${BISON_csql_grammar_OUTPUTS}
   ${FLEX_csql_lexer_OUTPUTS}
+  ${BISON_sp_grammar_OUTPUTS}
+  ${FLEX_sp_lexer_OUTPUTS}
   ${PARSER_DIR}/cnf.c
   ${PARSER_DIR}/compile.c
   ${PARSER_DIR}/double_byte_support.c
@@ -628,6 +630,8 @@ set_source_files_properties(${BISON_csql_grammar_OUTPUTS} PROPERTIES GENERATED t
 set_source_files_properties(${FLEX_csql_lexer_OUTPUTS} PROPERTIES GENERATED true)
 set_source_files_properties(${BISON_loader_grammar_OUTPUTS} PROPERTIES GENERATED true)
 set_source_files_properties(${FLEX_loader_lexer_OUTPUTS} PROPERTIES GENERATED true)
+set_source_files_properties(${BISON_sp_grammar_OUTPUTS} PROPERTIES GENERATED true)
+set_source_files_properties(${FLEX_sp_lexer_OUTPUTS} PROPERTIES GENERATED true)
 set_source_files_properties(${PROBES_OBJECT} PROPERTIES EXTERNAL_OBJECT true GENERATED true)
 
 if(UNIX)
@@ -702,6 +706,8 @@ SET_SOURCE_FILES_PROPERTIES(
 SET_SOURCE_FILES_PROPERTIES(
   ${CSQL_GRAMMAR_OUTPUT}
   ${CSQL_LEXER_OUTPUT}
+  ${SP_GRAMMAR_OUTPUT}
+  ${SP_LEXER_OUTPUT}
   ${COMPAT_SOURCES_C}
   PROPERTIES LANGUAGE C
   )
@@ -764,6 +770,8 @@ if(WIN32)
     ${LOADER_GRAMMAR_OUTPUT}
     ${CSQL_LEXER_OUTPUT}
     ${LOADER_LEXER_OUTPUT}
+    ${SP_GRAMMAR_OUTPUT}
+    ${SP_LEXER_OUTPUT}
     PROPERTIES COMPILE_FLAGS /WX-
   )
   set_source_files_properties(${BISON_csql_grammar_OUTPUTS} PROPERTIES COMPILE_FLAGS "${COMPILE_FLAGS} -Og-")
@@ -803,6 +811,8 @@ add_dependencies(cubridsa
   gen_csql_lexer
   gen_loader_grammar
   gen_loader_lexer
+  gen_sp_grammar
+  gen_sp_lexer
   ${EP_TARGETS}
   )
 

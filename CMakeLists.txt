@@ -309,6 +309,10 @@ set(LOADER_GRAMMAR_INPUT ${CMAKE_SOURCE_DIR}/src/loaddb/load_grammar.yy)
 set(LOADER_GRAMMAR_OUTPUT ${CMAKE_BINARY_DIR}/load_grammar.cpp)
 set(LOADER_LEXER_INPUT ${CMAKE_SOURCE_DIR}/src/loaddb/load_lexer.l)
 set(LOADER_LEXER_OUTPUT ${CMAKE_BINARY_DIR}/load_lexer.cpp)
+set(SP_GRAMMAR_INPUT ${CMAKE_SOURCE_DIR}/src/parser/sp_grammar.y)
+set(SP_GRAMMAR_OUTPUT ${CMAKE_BINARY_DIR}/sp_grammar.c)
+set(SP_LEXER_INPUT ${CMAKE_SOURCE_DIR}/src/parser/sp_lexer.l)
+set(SP_LEXER_OUTPUT ${CMAKE_BINARY_DIR}/sp_lexer.c)
 
 # include 3rdparty
 message("Including Third Party Libraries")
@@ -355,6 +359,22 @@ flex_target(loader_lexer ${LOADER_LEXER_INPUT} ${LOADER_LEXER_OUTPUT}
 add_flex_bison_dependency(loader_lexer loader_grammar)
 add_custom_target(gen_loader_grammar DEPENDS ${BISON_loader_grammar_OUTPUTS})
 add_custom_target(gen_loader_lexer DEPENDS ${FLEX_loader_lexer_OUTPUTS})
+
+# PL/CSQL FLEX/BISON targets
+# sp_grammar.y is written against current bison directives, so it does not go through
+# upgrade_bison_grammar.cmake the way csql_grammar.y does
+set(BISON_SP_FLAGS "--no-lines --name-prefix=sp_yy -d -r all")
+if(CMAKE_BUILD_TYPE MATCHES "Debug")
+  set(BISON_SP_FLAGS "${BISON_SP_FLAGS} --debug")
+endif()
+
+bison_target(sp_grammar ${SP_GRAMMAR_INPUT} ${SP_GRAMMAR_OUTPUT}
+  COMPILE_FLAGS "${BISON_SP_FLAGS}")
+flex_target(sp_lexer ${SP_LEXER_INPUT} ${SP_LEXER_OUTPUT}
+  COMPILE_FLAGS "--noline --never-interactive --prefix=sp_yy")
+add_flex_bison_dependency(sp_lexer sp_grammar)
+add_custom_target(gen_sp_grammar DEPENDS ${BISON_sp_grammar_OUTPUTS})
+add_custom_target(gen_sp_lexer DEPENDS ${FLEX_sp_lexer_OUTPUTS})
 
 # Build types
 if(CMAKE_BUILD_TYPE MATCHES "Coverage")
