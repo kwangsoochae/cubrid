@@ -1097,6 +1097,7 @@ enum pt_node_type
   PT_DBLINK_TABLE,
   PT_DBLINK_TABLE_DML,
   PT_SP_BODY,
+  PT_SP_STMT,
   PT_NODE_NUMBER,		/* This is the number of node types */
   PT_LAST_NODE_NUMBER = PT_NODE_NUMBER
 };
@@ -1723,6 +1724,7 @@ typedef struct pt_execute_info PT_EXECUTE_INFO;
 typedef struct pt_stored_proc_param_info PT_STORED_PROC_PARAM_INFO;
 typedef struct pt_stored_proc_body_info PT_SP_BODY_INFO;
 typedef struct pt_truncate_info PT_TRUNCATE_INFO;
+typedef struct pt_sp_stmt_info PT_SP_STMT_INFO;
 typedef struct pt_do_info PT_DO_INFO;
 typedef union pt_statement_info PT_STATEMENT_INFO;
 typedef struct pt_node_list_info PT_NODE_LIST_INFO;
@@ -3379,6 +3381,42 @@ struct pt_truncate_info
   bool is_cascade;		/* whether to truncate cascade FK-referring classes */
 };
 
+/* PL/CSQL STATEMENT INFO */
+
+/* One node kind carries every procedural statement, told apart by op - the parse tree
+ * mirrors the XASL node here (see PLCS_OP). Their payloads are small and alike, and a
+ * PT_NODE kind of its own costs a set of apply, init and print functions each. */
+typedef enum
+{
+  PT_SP_BLOCK,			/* declarations and body */
+  PT_SP_DECL,			/* one variable or constant declaration */
+  PT_SP_ASSIGN,
+  PT_SP_IF,			/* ELSIF is a nested IF in the else branch */
+  PT_SP_LOOP,
+  PT_SP_NULL_STMT		/* the NULL statement */
+} PT_SP_STMT_OP;
+
+/* pt_sp_stmt_info.flags */
+#define PT_SP_LOOP_BASIC     0x00	/* LOOP ... END LOOP */
+#define PT_SP_LOOP_WHILE     0x01
+#define PT_SP_LOOP_FOR       0x02
+#define PT_SP_LOOP_FORM_MASK 0x03
+#define PT_SP_LOOP_REVERSE   0x04	/* FOR i IN REVERSE lo .. hi */
+#define PT_SP_DECL_CONSTANT  0x08
+#define PT_SP_BLOCK_NESTED   0x10	/* a block written as a statement, so it carries DECLARE */
+
+struct pt_sp_stmt_info
+{
+  PT_SP_STMT_OP op;
+  int flags;
+  PT_NODE *name;		/* PT_NAME - assignment target, declared name, loop variable */
+  PT_NODE *expr;		/* condition, assigned value, declaration default, lower bound */
+  PT_NODE *expr2;		/* upper bound of a FOR range */
+  PT_NODE *decl_list;		/* BLOCK: the declarations */
+  PT_NODE *body;		/* BLOCK, LOOP: statements. IF: the then branch */
+  PT_NODE *else_body;		/* IF: the else branch */
+};
+
 /* DO ENTITY INFO */
 struct pt_do_info
 {
@@ -3679,6 +3717,7 @@ union pt_statement_info
   PT_KILLSTMT_INFO killstmt;
   PT_WITH_CLAUSE_INFO with_clause;
   PT_SP_BODY_INFO sp_body;
+  PT_SP_STMT_INFO sp_stmt;
 };
 
 /*
