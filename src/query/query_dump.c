@@ -125,6 +125,7 @@ static void qdump_check_node (XASL_NODE * xasl, QDUMP_XASL_CHECK_NODE * chk_node
 static int qdump_print_inconsistencies (QDUMP_XASL_CHECK_NODE * chk_nodes[HASH_NUMBER]);
 #endif /* CUBRID_DEBUG */
 static const char *qdump_hashjoin_type_string (HASH_METHOD hash_method);
+static const char *qdump_plcs_op_string (PLCS_OP op);
 static void qdump_print_hashjoin_stats_text (FILE * fp, xasl_node * xasl_p, int indent);
 static void qdump_print_hashjoin_stats_json (xasl_node * xasl_p, trace_json_t * parent);
 static void qdump_print_px_subquery_stats_json (parallel_query_execute::query_executor * px_executor,
@@ -186,6 +187,9 @@ qdump_print_xasl_type (XASL_NODE * xasl_p)
       break;
     case CTE_PROC:
       type_string_p = "cte_proc";
+      break;
+    case PLCS_PROC:
+      type_string_p = "plcs_proc";
       break;
     default:
       return false;
@@ -1612,6 +1616,40 @@ qdump_bool_operator_string (BOOL_OP bool_op)
     }
 }
 
+/*
+ * qdump_plcs_op_string () -
+ *   return:
+ *   op(in)     :
+ */
+static const char *
+qdump_plcs_op_string (PLCS_OP op)
+{
+  switch (op)
+    {
+    case PLCS_OP_BLOCK:
+      return "BLOCK";
+    case PLCS_OP_ASSIGN:
+      return "ASSIGN";
+    case PLCS_OP_IF:
+      return "IF";
+    case PLCS_OP_CASE:
+      return "CASE";
+    case PLCS_OP_LOOP:
+      return "LOOP";
+    case PLCS_OP_JUMP:
+      return "JUMP";
+    case PLCS_OP_RAISE:
+      return "RAISE";
+    case PLCS_OP_CURSOR:
+      return "CURSOR";
+    case PLCS_OP_CALL:
+      return "CALL";
+    default:
+      assert (false);
+      return "";
+    }
+}
+
 static bool
 qdump_print_lhs_predicate (PRED_EXPR * pred_p)
 {
@@ -2758,6 +2796,12 @@ qdump_print_xasl (xasl_node * xasl_p)
       /* TODO - dump anchor and recursive part of CTE when we need */
       break;
 
+    case PLCS_PROC:
+      fprintf (foutput, "op:%s flags:%d target_slot:%d children:%d\n",
+	       qdump_plcs_op_string (xasl_p->proc.plcs.op), xasl_p->proc.plcs.flags,
+	       xasl_p->proc.plcs.target_slot, xasl_p->proc.plcs.children_cnt);
+      break;
+
     default:
       return false;
     }
@@ -2780,6 +2824,14 @@ qdump_print_xasl (xasl_node * xasl_p)
     {
       qdump_print_xasl (xasl_p->proc.cte.non_recursive_part);
       qdump_print_xasl (xasl_p->proc.cte.recursive_part);
+    }
+
+  if (xasl_p->type == PLCS_PROC)
+    {
+      for (i = 0; i < xasl_p->proc.plcs.children_cnt; i++)
+	{
+	  qdump_print_xasl (xasl_p->proc.plcs.children[i]);
+	}
     }
 
   qdump_print_xasl (xasl_p->next);
@@ -2851,6 +2903,8 @@ qdump_xasl_type_string (XASL_NODE * xasl_p)
       return "DO";
     case CTE_PROC:
       return "CTE";
+    case PLCS_PROC:
+      return "PLCS";
     default:
       assert (false);
       return "";
@@ -3167,11 +3221,13 @@ qdump_print_stats_json (xasl_node * xasl_p, trace_json_t * parent)
   trace_json_t *subquery, *groupby, *orderby, *analytic, *parallel;
   trace_json_t *outer, *inner;
   trace_json_t *cte_non_recursive_part, *cte_recursive_part;
+  trace_json_t *plcs_children, *plcs_child;
   trace_json_t *temp;
   trace_json_t *func;
   xasl_node *xptr;
   trace_json_t *sq_cache;
   trace_json_t *memoize;
+  int i;
 
   if (xasl_p == NULL || parent == NULL)
     {
@@ -3271,6 +3327,22 @@ qdump_print_stats_json (xasl_node * xasl_p, trace_json_t * parent)
 
       trace_json_object_set_new (proc, "update", inner);
       trace_json_object_set_new (proc, "insert", outer);
+      break;
+
+    case PLCS_PROC:
+      trace_json_object_set_new (proc, "op", trace_json_string (qdump_plcs_op_string (xasl_p->proc.plcs.op)));
+      if (xasl_p->proc.plcs.children_cnt > 0)
+	{
+	  /* An array, not one key per child: children of the same type would share a key. */
+	  plcs_children = trace_json_array ();
+	  for (i = 0; i < xasl_p->proc.plcs.children_cnt; i++)
+	    {
+	      plcs_child = trace_json_object ();
+	      qdump_print_stats_json (xasl_p->proc.plcs.children[i], plcs_child);
+	      trace_json_array_append_new (plcs_children, plcs_child);
+	    }
+	  trace_json_object_set_new (proc, "children", plcs_children);
+	}
       break;
 
     case CTE_PROC:
@@ -3750,6 +3822,7 @@ qdump_print_stats_text (FILE * fp, xasl_node * xasl_p, int indent)
   GROUPBY_STATS *gstats;
   ANALYTIC_STATS *astats;
   xasl_node *xptr;
+  int i;
 
   if (xasl_p == NULL)
     {
@@ -3851,6 +3924,14 @@ qdump_print_stats_text (FILE * fp, xasl_node * xasl_p, int indent)
       fprintf (fp, "MERGE\n");
       qdump_print_stats_text (fp, xasl_p->proc.merge.update_xasl, indent);
       qdump_print_stats_text (fp, xasl_p->proc.merge.insert_xasl, indent);
+      break;
+
+    case PLCS_PROC:
+      fprintf (fp, "PLCS (%s)\n", qdump_plcs_op_string (xasl_p->proc.plcs.op));
+      for (i = 0; i < xasl_p->proc.plcs.children_cnt; i++)
+	{
+	  qdump_print_stats_text (fp, xasl_p->proc.plcs.children[i], indent);
+	}
       break;
 
     case CTE_PROC:
