@@ -4192,6 +4192,7 @@ stx_build_plcs_proc (THREAD_ENTRY * thread_p, char *ptr, PLCS_PROC_NODE * plcs_p
 
   ptr = or_unpack_int (ptr, &plcs_proc->flags);
   ptr = or_unpack_int (ptr, &plcs_proc->target_slot);
+  ptr = or_unpack_int (ptr, &plcs_proc->locals_cnt);
 
   ptr = or_unpack_int (ptr, &offset);
   if (offset == 0)
@@ -4202,6 +4203,20 @@ stx_build_plcs_proc (THREAD_ENTRY * thread_p, char *ptr, PLCS_PROC_NODE * plcs_p
     {
       plcs_proc->expr = stx_restore_regu_variable (thread_p, &xasl_unpack_info->packed_xasl[offset]);
       if (plcs_proc->expr == NULL)
+	{
+	  goto error;
+	}
+    }
+
+  ptr = or_unpack_int (ptr, &offset);
+  if (offset == 0)
+    {
+      plcs_proc->expr2 = NULL;
+    }
+  else
+    {
+      plcs_proc->expr2 = stx_restore_regu_variable (thread_p, &xasl_unpack_info->packed_xasl[offset]);
+      if (plcs_proc->expr2 == NULL)
 	{
 	  goto error;
 	}
@@ -5868,6 +5883,10 @@ stx_unpack_regu_variable_value (THREAD_ENTRY * thread_p, char *ptr, REGU_VARIABL
 
     case TYPE_POS_VALUE:
       ptr = or_unpack_int (ptr, &regu_var->value.val_pos);
+      break;
+
+    case TYPE_PLCS_SLOT:
+      ptr = or_unpack_int (ptr, &regu_var->value.plcs_slot);
       break;
 
     case TYPE_OID:

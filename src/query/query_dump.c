@@ -1115,6 +1115,8 @@ qdump_regu_type_string (REGU_DATATYPE type)
       return "TYPE_REGU_VAR_LIST";
     case TYPE_SP:
       return "TYPE_SP";
+    case TYPE_PLCS_SLOT:
+      return "TYPE_PLCS_SLOT";
     default:
       return "undefined";
     }
@@ -1321,6 +1323,12 @@ qdump_print_value (REGU_VARIABLE * value_p)
       fprintf (foutput, "[type:%s]", qdump_data_type_string (value_p->domain->type->id));
       return true;
 
+    case TYPE_PLCS_SLOT:
+      /* the slot number, unlike the siblings above: it is what tells two locals apart in a plan. */
+      fprintf (foutput, "[type:%s][slot:%d]", qdump_data_type_string (value_p->domain->type->id),
+	       value_p->value.plcs_slot);
+      return true;
+
     case TYPE_FUNC:
       qdump_print_function_value (value_p);
       return true;
@@ -1408,6 +1416,10 @@ qdump_print_value_type_addr (REGU_VARIABLE * regu_var_p)
 
     case TYPE_POS_VALUE:
       addr = (void *) &regu_var_p->value.val_pos;
+      break;
+
+    case TYPE_PLCS_SLOT:
+      addr = (void *) &regu_var_p->value.plcs_slot;
       break;
 
     case TYPE_OID:
@@ -2797,9 +2809,9 @@ qdump_print_xasl (xasl_node * xasl_p)
       break;
 
     case PLCS_PROC:
-      fprintf (foutput, "op:%s flags:%d target_slot:%d children:%d\n",
+      fprintf (foutput, "op:%s flags:%d target_slot:%d locals:%d children:%d\n",
 	       qdump_plcs_op_string (xasl_p->proc.plcs.op), xasl_p->proc.plcs.flags,
-	       xasl_p->proc.plcs.target_slot, xasl_p->proc.plcs.children_cnt);
+	       xasl_p->proc.plcs.target_slot, xasl_p->proc.plcs.locals_cnt, xasl_p->proc.plcs.children_cnt);
       break;
 
     default:

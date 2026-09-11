@@ -199,7 +199,9 @@ typedef enum
   PT_DETERMINISTIC,
 
   PT_LOGIN,			/* user login capability */
-  PT_NOLOGIN
+  PT_NOLOGIN,
+
+  PT_PLCS_LOCAL			/* a name bound to a PL/CSQL frame slot */
     // todo: separate into relevant enumerations
 } PT_MISC_TYPE;
 

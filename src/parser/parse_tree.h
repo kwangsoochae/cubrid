@@ -2695,7 +2695,8 @@ struct pt_name_info
   SM_PARTITION *partition;	/* partition info reference */
   PT_NODE *path_correlation;	/* as in a.b.c [path_correlation].d.e.f */
   PT_TYPE_ENUM virt_type_enum;	/* type of oid's in ldb for proxies. */
-  PT_MISC_TYPE meta_class;	/* 0 or PT_META or PT_PARAMETER or PT_CLASS */
+  PT_MISC_TYPE meta_class;	/* 0 or PT_META or PT_PARAMETER or PT_CLASS or PT_PLCS_LOCAL */
+  int plcs_slot;		/* the frame slot, read only where meta_class is PT_PLCS_LOCAL */
   PT_NODE *default_value;	/* PT_VALUE the default value of the attribute */
   PT_NODE *constant_value;	/* constant value derived from qo_reduce_equality_terms () */
   unsigned int custom_print;

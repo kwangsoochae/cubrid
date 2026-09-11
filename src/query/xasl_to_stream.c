@@ -3704,8 +3704,16 @@ xts_process_plcs_proc (char *ptr, const PLCS_PROC_NODE * plcs_proc)
   ptr = or_pack_int (ptr, plcs_proc->op);
   ptr = or_pack_int (ptr, plcs_proc->flags);
   ptr = or_pack_int (ptr, plcs_proc->target_slot);
+  ptr = or_pack_int (ptr, plcs_proc->locals_cnt);
 
   offset = xts_save_regu_variable (plcs_proc->expr);
+  if (offset == ER_FAILED)
+    {
+      return NULL;
+    }
+  ptr = or_pack_int (ptr, offset);
+
+  offset = xts_save_regu_variable (plcs_proc->expr2);
   if (offset == ER_FAILED)
     {
       return NULL;
@@ -5545,6 +5553,10 @@ xts_pack_regu_variable_value (char *ptr, const REGU_VARIABLE * regu_var)
       ptr = or_pack_int (ptr, regu_var->value.val_pos);
       break;
 
+    case TYPE_PLCS_SLOT:
+      ptr = or_pack_int (ptr, regu_var->value.plcs_slot);
+      break;
+
     case TYPE_OID:
     case TYPE_CLASSOID:
       break;
@@ -6720,7 +6732,9 @@ xts_sizeof_plcs_proc (const PLCS_PROC_NODE * plcs_proc)
   size += (OR_INT_SIZE		/* op */
 	   + OR_INT_SIZE	/* flags */
 	   + OR_INT_SIZE	/* target_slot */
+	   + OR_INT_SIZE	/* locals_cnt */
 	   + PTR_SIZE		/* expr */
+	   + PTR_SIZE		/* expr2 */
 	   + OR_INT_SIZE	/* children_cnt */
 	   + (plcs_proc->children_cnt * PTR_SIZE));	/* children */
 
@@ -7485,6 +7499,10 @@ xts_get_regu_variable_value_size (const REGU_VARIABLE * regu_var)
 
     case TYPE_POS_VALUE:
       size = OR_INT_SIZE;	/* val_pos */
+      break;
+
+    case TYPE_PLCS_SLOT:
+      size = OR_INT_SIZE;	/* plcs_slot */
       break;
 
     case TYPE_OID:

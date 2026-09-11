@@ -4756,6 +4756,23 @@ fetch_peek_dbval_slow (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_de
       *peek_dbval = (DB_VALUE *) vd->dbval_ptr + regu_var->value.val_pos;
       break;
 
+    case TYPE_PLCS_SLOT:	/* fetch a PL/CSQL local out of the frame */
+      /* NOT_CONST where the TYPE_POS_VALUE sibling above is ALL_CONST: a host variable holds
+       * still while the statement runs, but an assignment in the procedure body rewrites a
+       * local, and fetch_peek_arith () would go on serving the value it cached on first pass. */
+      REGU_VARIABLE_SET_FLAG (regu_var, REGU_VARIABLE_FETCH_NOT_CONST);
+      assert (!REGU_VARIABLE_IS_FLAGED (regu_var, REGU_VARIABLE_FETCH_ALL_CONST));
+      assert (regu_var->value.plcs_slot >= 0);
+
+      if (vd->xasl_state == NULL || vd->xasl_state->plcs_frame == NULL
+	  || regu_var->value.plcs_slot >= vd->xasl_state->plcs_frame->locals_cnt)
+	{
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_XASLNODE, 0);
+	  goto exit_on_error;
+	}
+      *peek_dbval = &vd->xasl_state->plcs_frame->locals[regu_var->value.plcs_slot];
+      break;
+
     case TYPE_CONSTANT:	/* fetch constant-column value */
       /* is not constant */
       REGU_VARIABLE_SET_FLAG (regu_var, REGU_VARIABLE_FETCH_NOT_CONST);

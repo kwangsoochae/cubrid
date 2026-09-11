@@ -60,7 +60,8 @@ typedef enum
   TYPE_FUNC,			/* use funcp */
   TYPE_REGUVAL_LIST,		/* use reguval_list */
   TYPE_REGU_VAR_LIST,		/* use regu_variable_list for 'CUME_DIST' and 'PERCENT_RANK' */
-  TYPE_SP                       /* use sp_ptr */
+  TYPE_SP,                      /* use sp_ptr */
+  TYPE_PLCS_SLOT		/* use plcs_slot for PL/CSQL local references */
 } REGU_DATATYPE;
 
 /* declare ahead REGU_VARIABLE */
@@ -195,6 +196,7 @@ class regu_variable_node
       QFILE_TUPLE_VALUE_POSITION pos_descr;	/* list file columns */
       QFILE_SORTED_LIST_ID *srlist_id;	/* sorted list identifier for subquery results */
       int val_pos;		/* host variable references */
+      int plcs_slot;		/* PL/CSQL local: the frame slot the compiler numbered */
       struct function_node *funcp;	/* function */
       REGU_VALUE_LIST *reguval_list;	/* for "values" query */
       REGU_VARIABLE_LIST regu_var_list;	/* for CUME_DIST and PERCENT_RANK */
