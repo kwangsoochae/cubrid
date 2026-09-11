@@ -30574,11 +30574,19 @@ pt_plcs_new_node (PLCS_OP op)
  *   parser(in) :
  *   slot(in)   : the frame slot written
  *   value(in/out) : the expression assigned; typing can replace the node
+ *   target(in) : the declared name of what is written, NULL when there is nothing to coerce to
+ *
+ * note: the value is cast to the declared type rather than stored as it came out. That is where
+ *       the language's checks live - a number past the type's range and a string past its length
+ *       are errors, not truncations - and where the type that later prints the value is settled.
+ *       T_CAST is the operator the SQL side coerces with, so the checks and the messages are the
+ *       ones already in use.
  */
 static XASL_NODE *
-pt_to_plcs_assign (PARSER_CONTEXT * parser, int slot, PT_NODE ** value)
+pt_to_plcs_assign (PARSER_CONTEXT * parser, int slot, PT_NODE ** value, PT_NODE * target)
 {
   XASL_NODE *xasl = pt_plcs_new_node (PLCS_OP_ASSIGN);
+  TP_DOMAIN *domain;
 
   if (xasl == NULL)
     {
@@ -30590,6 +30598,21 @@ pt_to_plcs_assign (PARSER_CONTEXT * parser, int slot, PT_NODE ** value)
   if (xasl->proc.plcs.expr == NULL)
     {
       return NULL;
+    }
+
+  domain = (target != NULL) ? pt_xasl_node_to_domain (parser, target) : NULL;
+  if (domain != NULL && TP_DOMAIN_TYPE (domain) != DB_TYPE_VARIABLE && xasl->proc.plcs.expr->domain != domain)
+    {
+      REGU_VARIABLE *cast = pt_make_regu_arith (NULL, xasl->proc.plcs.expr, NULL, T_CAST, domain);
+
+      if (cast == NULL)
+	{
+	  return NULL;
+	}
+      /* T_CAST reads the target type off the regu variable, not off the arith, and
+       * pt_make_regu_arith () only fills the latter */
+      cast->domain = domain;
+      xasl->proc.plcs.expr = cast;
     }
 
   return xasl;
@@ -30611,7 +30634,7 @@ pt_to_plcs_open_local (PARSER_CONTEXT * parser, PT_NODE * decl)
 
   if (decl->info.sp_stmt.expr != NULL)
     {
-      return pt_to_plcs_assign (parser, name->info.name.plcs_slot, &decl->info.sp_stmt.expr);
+      return pt_to_plcs_assign (parser, name->info.name.plcs_slot, &decl->info.sp_stmt.expr, name);
     }
 
   /* no default: the slot opens as NULL of the declared type, not as the untyped NULL
@@ -30782,7 +30805,8 @@ pt_to_plcs_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt)
       return pt_to_plcs_block (parser, stmt);
 
     case PT_SP_ASSIGN:
-      return pt_to_plcs_assign (parser, stmt->info.sp_stmt.name->info.name.plcs_slot, &stmt->info.sp_stmt.expr);
+      return pt_to_plcs_assign (parser, stmt->info.sp_stmt.name->info.name.plcs_slot, &stmt->info.sp_stmt.expr,
+				stmt->info.sp_stmt.name);
 
     case PT_SP_CALL:
       xasl = pt_plcs_new_node (PLCS_OP_CALL);
@@ -31152,6 +31176,12 @@ pt_plcs_plan_stream (const cubpl::pl_signature * sig, std::string & plan)
   return NO_ERROR;
 }
 
+/* Depth of pt_plcs_compile_body (). A call inside a body being compiled gets no plan of its
+ * own: only builtins may be called natively and those have no PL/CSQL body, and without this a
+ * procedure that calls itself would compile forever - pt_stored_procedure_to_regu () lowers the
+ * call, which compiles the callee, which lowers the call again. */
+static int pt_Plcs_compile_depth = 0;
+
 static XASL_NODE *
 pt_plcs_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig)
 {
@@ -31164,6 +31194,11 @@ pt_plcs_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig)
   int save;
 
   if (!prm_get_bool_value (PRM_ID_PL_NATIVE_EXECUTION) || sig == NULL || sig->type != PL_TYPE_PLCSQL)
+    {
+      return NULL;
+    }
+
+  if (pt_Plcs_compile_depth > 0)
     {
       return NULL;
     }
@@ -31223,7 +31258,9 @@ pt_plcs_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig)
 
   if (block != NULL && !pt_has_error (body_parser))
     {
+      pt_Plcs_compile_depth++;
       xasl = pt_to_plcs_xasl (body_parser, block, params);
+      pt_Plcs_compile_depth--;
       if (pt_has_error (body_parser))
 	{
 	  xasl = NULL;
