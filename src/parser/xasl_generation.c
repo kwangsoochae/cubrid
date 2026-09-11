@@ -30079,3 +30079,311 @@ pt_aggregate_arg_eq (PARSER_CONTEXT * parser, PT_NODE * p, PT_NODE * q)
       }
     }
 }
+
+/*
+ * Resolving a PL/CSQL procedure's locals to frame slots
+ *
+ * Scope in PL/CSQL is static, so a name need not be looked up while the procedure runs.
+ * Each declaration takes a slot in the activation frame and every reference is rewritten to
+ * that number here, once. Slots are not reused when a block ends - numbering runs flat over
+ * the whole procedure - so an inner declaration shadows an outer one simply by holding a
+ * different number, and the count this pass returns is the frame size.
+ */
+
+typedef struct pt_plcs_scope PT_PLCS_SCOPE;
+struct pt_plcs_scope
+{
+  PT_NODE *decl_list;		/* the declarations a block opened, in source order */
+  PT_NODE *visible;		/* the last of them in scope at this point: a declaration's default
+				 * expression sees only the declarations written before it */
+  PT_NODE *loop_var;		/* a FOR loop variable, which is a scope of its own over the body */
+  PT_PLCS_SCOPE *outer;
+};
+
+typedef struct pt_plcs_resolve_arg PT_PLCS_RESOLVE_ARG;
+struct pt_plcs_resolve_arg
+{
+  PT_PLCS_SCOPE *scope;
+  int error;
+};
+
+static PT_NODE *pt_plcs_find_decl (PT_PLCS_SCOPE * scope, const char *name);
+static int pt_plcs_bind_name (PARSER_CONTEXT * parser, PT_NODE * name, PT_PLCS_SCOPE * scope);
+static PT_NODE *pt_plcs_bind_name_pre (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int *continue_walk);
+static int pt_plcs_resolve_expr (PARSER_CONTEXT * parser, PT_NODE * expr, PT_PLCS_SCOPE * scope);
+static int pt_plcs_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCS_SCOPE * scope, int *next_slot);
+static int pt_plcs_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCS_SCOPE * outer, int *next_slot);
+
+/*
+ * pt_plcs_find_decl () - the declaration a name refers to, innermost scope first
+ *   return: the PT_SP_DECL, or the FOR loop variable's PT_NAME, NULL when the name is free
+ *   scope(in) : the innermost scope at the point of reference
+ *   name(in)  : the identifier as written
+ */
+static PT_NODE *
+pt_plcs_find_decl (PT_PLCS_SCOPE * scope, const char *name)
+{
+  PT_NODE *decl, *found;
+
+  for (; scope != NULL; scope = scope->outer)
+    {
+      if (scope->loop_var != NULL && intl_identifier_casecmp (scope->loop_var->info.name.original, name) == 0)
+	{
+	  return scope->loop_var;
+	}
+
+      /* the last match wins, so a block declaring the same name twice behaves like the outer
+       * one being shadowed - the same rule that holds between blocks. Nothing of this block is
+       * in scope yet while its first declaration's default expression is read, which is why a
+       * NULL visible stops the scan instead of running the whole list. */
+      found = NULL;
+      for (decl = scope->visible != NULL ? scope->decl_list : NULL; decl != NULL; decl = decl->next)
+	{
+	  if (intl_identifier_casecmp (decl->info.sp_stmt.name->info.name.original, name) == 0)
+	    {
+	      found = decl;
+	    }
+	  if (decl == scope->visible)
+	    {
+	      break;
+	    }
+	}
+      if (found != NULL)
+	{
+	  return found;
+	}
+    }
+
+  return NULL;
+}
+
+/*
+ * pt_plcs_bind_name () - rewrite one reference into the slot it reads
+ *   return: NO_ERROR, or ER_FAILED with the error left on the parser
+ *   parser(in) :
+ *   name(in/out) : the PT_NAME to bind
+ *   scope(in)  : the innermost scope at the point of reference
+ */
+static int
+pt_plcs_bind_name (PARSER_CONTEXT * parser, PT_NODE * name, PT_PLCS_SCOPE * scope)
+{
+  PT_NODE *decl;
+
+  decl = pt_plcs_find_decl (scope, name->info.name.original);
+  if (decl == NULL)
+    {
+      PT_ERRORmf (parser, name, MSGCAT_SET_PARSER_SEMANTIC, MSGCAT_SEMANTIC_IS_NOT_DEFINED, name->info.name.original);
+      return ER_FAILED;
+    }
+
+  /* pt_plcs_find_decl () answers with a PT_SP_STMT for a declaration and with the bare PT_NAME
+   * of a FOR loop variable, which is its own declaration */
+  if (decl->node_type == PT_SP_STMT)
+    {
+      assert (decl->info.sp_stmt.op == PT_SP_DECL);
+      decl = decl->info.sp_stmt.name;
+    }
+
+  name->info.name.meta_class = PT_PLCS_LOCAL;
+  name->info.name.plcs_slot = decl->info.name.plcs_slot;
+
+  /* the declared type travels to the reference, which is what gives the regu variable its
+   * domain - nothing later re-derives it from the declaration */
+  name->type_enum = decl->type_enum;
+  if (decl->data_type != NULL)
+    {
+      name->data_type = parser_copy_tree (parser, decl->data_type);
+      if (name->data_type == NULL)
+	{
+	  return ER_FAILED;
+	}
+    }
+
+  return NO_ERROR;
+}
+
+/*
+ * pt_plcs_bind_name_pre () - parser_walk_tree () hook binding every name in an expression
+ *   return: node
+ */
+static PT_NODE *
+pt_plcs_bind_name_pre (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int *continue_walk)
+{
+  PT_PLCS_RESOLVE_ARG *resolve = (PT_PLCS_RESOLVE_ARG *) arg;
+
+  if (node->node_type == PT_NAME && pt_plcs_bind_name (parser, node, resolve->scope) != NO_ERROR)
+    {
+      resolve->error = ER_FAILED;
+      *continue_walk = PT_STOP_WALK;
+    }
+
+  return node;
+}
+
+/*
+ * pt_plcs_resolve_expr () - bind every name in one procedural expression
+ *   return: NO_ERROR or ER_FAILED
+ *   parser(in) :
+ *   expr(in/out) :
+ *   scope(in)  : the innermost scope at the point of reference
+ */
+static int
+pt_plcs_resolve_expr (PARSER_CONTEXT * parser, PT_NODE * expr, PT_PLCS_SCOPE * scope)
+{
+  PT_PLCS_RESOLVE_ARG resolve;
+
+  if (expr == NULL)
+    {
+      return NO_ERROR;
+    }
+
+  resolve.scope = scope;
+  resolve.error = NO_ERROR;
+  (void) parser_walk_tree (parser, expr, pt_plcs_bind_name_pre, &resolve, NULL, NULL);
+
+  return resolve.error;
+}
+
+/*
+ * pt_plcs_resolve_stmt_list () - resolve a statement list in one scope
+ *   return: NO_ERROR or ER_FAILED
+ *   parser(in) :
+ *   list(in/out) : PT_SP_STMT nodes, linked
+ *   scope(in)  : the scope the statements stand in
+ *   next_slot(in/out) : the next free frame slot
+ */
+static int
+pt_plcs_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCS_SCOPE * scope, int *next_slot)
+{
+  PT_NODE *stmt;
+  PT_PLCS_SCOPE loop_scope;
+
+  for (stmt = list; stmt != NULL; stmt = stmt->next)
+    {
+      switch (stmt->info.sp_stmt.op)
+	{
+	case PT_SP_BLOCK:
+	  if (pt_plcs_resolve_block (parser, stmt, scope, next_slot) != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
+	  break;
+
+	case PT_SP_ASSIGN:
+	  if (pt_plcs_resolve_expr (parser, stmt->info.sp_stmt.expr, scope) != NO_ERROR
+	      || pt_plcs_bind_name (parser, stmt->info.sp_stmt.name, scope) != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
+	  break;
+
+	case PT_SP_IF:
+	  if (pt_plcs_resolve_expr (parser, stmt->info.sp_stmt.expr, scope) != NO_ERROR
+	      || pt_plcs_resolve_stmt_list (parser, stmt->info.sp_stmt.body, scope, next_slot) != NO_ERROR
+	      || pt_plcs_resolve_stmt_list (parser, stmt->info.sp_stmt.else_body, scope, next_slot) != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
+	  break;
+
+	case PT_SP_LOOP:
+	  /* the bounds of a FOR are read once, before the variable exists, so they stand in the
+	   * enclosing scope - the same one a WHILE condition stands in */
+	  if (pt_plcs_resolve_expr (parser, stmt->info.sp_stmt.expr, scope) != NO_ERROR
+	      || pt_plcs_resolve_expr (parser, stmt->info.sp_stmt.expr2, scope) != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
+
+	  loop_scope.decl_list = NULL;
+	  loop_scope.visible = NULL;
+	  loop_scope.loop_var = NULL;
+	  loop_scope.outer = scope;
+
+	  if ((stmt->info.sp_stmt.flags & PT_SP_LOOP_FORM_MASK) == PT_SP_LOOP_FOR)
+	    {
+	      loop_scope.loop_var = stmt->info.sp_stmt.name;
+	      loop_scope.loop_var->info.name.meta_class = PT_PLCS_LOCAL;
+	      loop_scope.loop_var->info.name.plcs_slot = (*next_slot)++;
+	      loop_scope.loop_var->type_enum = PT_TYPE_INTEGER;
+	    }
+
+	  if (pt_plcs_resolve_stmt_list (parser, stmt->info.sp_stmt.body, &loop_scope, next_slot) != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
+	  break;
+
+	case PT_SP_NULL_STMT:
+	  break;
+
+	case PT_SP_DECL:
+	default:
+	  /* a declaration is reached through decl_list, never as a statement */
+	  assert (false);
+	  PT_INTERNAL_ERROR (parser, "resolve plcs");
+	  return ER_FAILED;
+	}
+    }
+
+  return NO_ERROR;
+}
+
+/*
+ * pt_plcs_resolve_block () - give a block's declarations their slots, then resolve its body
+ *   return: NO_ERROR or ER_FAILED
+ *   parser(in) :
+ *   block(in/out) : a PT_SP_BLOCK
+ *   outer(in)  : the enclosing scope, NULL at the procedure body
+ *   next_slot(in/out) : the next free frame slot
+ */
+static int
+pt_plcs_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCS_SCOPE * outer, int *next_slot)
+{
+  PT_PLCS_SCOPE scope;
+  PT_NODE *decl;
+
+  scope.decl_list = block->info.sp_stmt.decl_list;
+  scope.visible = NULL;
+  scope.loop_var = NULL;
+  scope.outer = outer;
+
+  for (decl = scope.decl_list; decl != NULL; decl = decl->next)
+    {
+      /* the default expression first, while this declaration is still out of scope */
+      if (pt_plcs_resolve_expr (parser, decl->info.sp_stmt.expr, &scope) != NO_ERROR)
+	{
+	  return ER_FAILED;
+	}
+
+      decl->info.sp_stmt.name->info.name.meta_class = PT_PLCS_LOCAL;
+      decl->info.sp_stmt.name->info.name.plcs_slot = (*next_slot)++;
+      decl->info.sp_stmt.name->type_enum = decl->type_enum;
+      decl->info.sp_stmt.name->data_type = decl->data_type;
+
+      scope.visible = decl;
+    }
+
+  return pt_plcs_resolve_stmt_list (parser, block->info.sp_stmt.body, &scope, next_slot);
+}
+
+/*
+ * pt_plcs_resolve_locals () - bind a procedure body's names to frame slots
+ *   return: how many slots the frame needs, -1 when a name did not resolve
+ *   parser(in) :
+ *   block(in/out) : the PT_SP_BLOCK sp_parse_body () returned
+ */
+int
+pt_plcs_resolve_locals (PARSER_CONTEXT * parser, PT_NODE * block)
+{
+  int next_slot = 0;
+
+  assert (block != NULL && block->node_type == PT_SP_STMT && block->info.sp_stmt.op == PT_SP_BLOCK);
+
+  if (pt_plcs_resolve_block (parser, block, NULL, &next_slot) != NO_ERROR)
+    {
+      return -1;
+    }
+
+  return next_slot;
+}
