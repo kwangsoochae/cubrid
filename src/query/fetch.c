@@ -4615,17 +4615,18 @@ error:
  *   thread_p(in) :
  *   sp(in)     : the call, whose plcs is the procedure's plan
  *   vd(in)     : the value descriptor of the statement making the call
+ *   obj_oid(in), tpl(in) : what the arguments are evaluated against
  *
- * note: the frame is made and taken down here because this is where a call begins and ends.
- *       Arguments do not reach it yet - nothing numbers a parameter into a slot - so the client
- *       only builds a plan for a procedure that takes none (pt_plcs_compile_body ()).
+ * note: the frame is made and taken down here because this is where a call begins and ends,
+ *       and because the arguments have to be in their slots before the body starts.
  */
 static int
-fetch_execute_plcs (THREAD_ENTRY * thread_p, SP_TYPE * sp, val_descr * vd)
+fetch_execute_plcs (THREAD_ENTRY * thread_p, SP_TYPE * sp, val_descr * vd, OID * obj_oid, QFILE_TUPLE tpl)
 {
   XASL_STATE *xasl_state = vd->xasl_state;
   PLCS_FRAME *caller, *frame;
-  int error;
+  REGU_VARIABLE_LIST arg;
+  int error, i;
 
   if (xasl_state == NULL)
     {
@@ -4637,6 +4638,27 @@ fetch_execute_plcs (THREAD_ENTRY * thread_p, SP_TYPE * sp, val_descr * vd)
   if (frame == NULL)
     {
       return ER_FAILED;
+    }
+
+  /* the parameters hold the first slots, in declared order, so the arguments go in by position.
+   * They are evaluated in the caller's frame, before this one is the current one. */
+  i = 0;
+  for (arg = sp->args; arg != NULL; arg = arg->next, i++)
+    {
+      DB_VALUE *value = NULL;
+
+      if (i >= frame->locals_cnt)
+	{
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_XASLNODE, 0);
+	  qexec_free_plcs_frame (thread_p, frame);
+	  return ER_FAILED;
+	}
+      if (fetch_peek_dbval (thread_p, &arg->value, vd, NULL, obj_oid, tpl, &value) != NO_ERROR
+	  || pr_clone_value (value, &frame->locals[i]) != NO_ERROR)
+	{
+	  qexec_free_plcs_frame (thread_p, frame);
+	  return ER_FAILED;
+	}
     }
 
   caller = xasl_state->plcs_frame;
@@ -4922,7 +4944,7 @@ fetch_peek_dbval_slow (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_de
 	    /* the client could build the procedure's own plan, so the server runs it here instead
 	     * of handing the call to the PL engine. Everything the grammar does not take still
 	     * arrives with a NULL plan and goes the way below. */
-	    error = fetch_execute_plcs (thread_p, regu_var->value.sp_ptr, vd);
+	    error = fetch_execute_plcs (thread_p, regu_var->value.sp_ptr, vd, obj_oid, tpl);
 	    if (error != NO_ERROR)
 	      {
 		goto exit_on_error;

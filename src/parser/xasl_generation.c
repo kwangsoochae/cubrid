@@ -74,6 +74,7 @@
 #include "px_query_checker.hpp"
 #include "sp_parse.h"
 #include "sp_constants.hpp"
+#include "object_accessor.h"
 #if defined(WINDOWS)
 #include "wintcp.h"
 #endif /* WINDOWS */
@@ -6941,6 +6942,7 @@ pt_make_function (PARSER_CONTEXT * parser, int function_code, const REGU_VARIABL
  *   function(in/out):
  *
  */
+static PT_NODE *pt_plcs_parameters (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig);
 static XASL_NODE *pt_plcs_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig);
 
 static REGU_VARIABLE *
@@ -30111,7 +30113,8 @@ struct pt_plcs_scope
   PT_NODE *decl_list;		/* the declarations a block opened, in source order */
   PT_NODE *visible;		/* the last of them in scope at this point: a declaration's default
 				 * expression sees only the declarations written before it */
-  PT_NODE *loop_var;		/* a FOR loop variable, which is a scope of its own over the body */
+  PT_NODE *names;		/* bare PT_NAMEs a scope opens without a declaration: the procedure's
+				 * parameters at the outside, a FOR loop variable over its body */
   PT_PLCS_SCOPE *outer;
 };
 
@@ -30142,9 +30145,12 @@ pt_plcs_find_decl (PT_PLCS_SCOPE * scope, const char *name)
 
   for (; scope != NULL; scope = scope->outer)
     {
-      if (scope->loop_var != NULL && intl_identifier_casecmp (scope->loop_var->info.name.original, name) == 0)
+      for (decl = scope->names; decl != NULL; decl = decl->next)
 	{
-	  return scope->loop_var;
+	  if (intl_identifier_casecmp (decl->info.name.original, name) == 0)
+	    {
+	      return decl;
+	    }
 	}
 
       /* the last match wins, so a block declaring the same name twice behaves like the outer
@@ -30191,8 +30197,8 @@ pt_plcs_bind_name (PARSER_CONTEXT * parser, PT_NODE * name, PT_PLCS_SCOPE * scop
       return ER_FAILED;
     }
 
-  /* pt_plcs_find_decl () answers with a PT_SP_STMT for a declaration and with the bare PT_NAME
-   * of a FOR loop variable, which is its own declaration */
+  /* pt_plcs_find_decl () answers with a PT_SP_STMT for a declaration and with a bare PT_NAME
+   * for a parameter or a FOR loop variable, each of which is its own declaration */
   if (decl->node_type == PT_SP_STMT)
     {
       assert (decl->info.sp_stmt.op == PT_SP_DECL);
@@ -30312,15 +30318,15 @@ pt_plcs_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCS_SCOP
 
 	  loop_scope.decl_list = NULL;
 	  loop_scope.visible = NULL;
-	  loop_scope.loop_var = NULL;
+	  loop_scope.names = NULL;
 	  loop_scope.outer = scope;
 
 	  if ((stmt->info.sp_stmt.flags & PT_SP_LOOP_FORM_MASK) == PT_SP_LOOP_FOR)
 	    {
-	      loop_scope.loop_var = stmt->info.sp_stmt.name;
-	      loop_scope.loop_var->info.name.meta_class = PT_PLCS_LOCAL;
-	      loop_scope.loop_var->info.name.plcs_slot = (*next_slot)++;
-	      loop_scope.loop_var->type_enum = PT_TYPE_INTEGER;
+	      loop_scope.names = stmt->info.sp_stmt.name;
+	      loop_scope.names->info.name.meta_class = PT_PLCS_LOCAL;
+	      loop_scope.names->info.name.plcs_slot = (*next_slot)++;
+	      loop_scope.names->type_enum = PT_TYPE_INTEGER;
 	    }
 
 	  if (pt_plcs_resolve_stmt_list (parser, stmt->info.sp_stmt.body, &loop_scope, next_slot) != NO_ERROR)
@@ -30369,7 +30375,7 @@ pt_plcs_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCS_SCOPE *
 
   scope.decl_list = block->info.sp_stmt.decl_list;
   scope.visible = NULL;
-  scope.loop_var = NULL;
+  scope.names = NULL;
   scope.outer = outer;
 
   for (decl = scope.decl_list; decl != NULL; decl = decl->next)
@@ -30396,15 +30402,32 @@ pt_plcs_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCS_SCOPE *
  *   return: how many slots the frame needs, -1 when a name did not resolve
  *   parser(in) :
  *   block(in/out) : the PT_SP_BLOCK sp_parse_body () returned
+ *   params(in/out) : the parameters, a PT_NAME list in declared order, NULL when there are none
+ *
+ * note: the parameters take the first slots, in order, so the caller can fill them by position
+ *       without being told which slot each went to. The body's declarations follow.
  */
 int
-pt_plcs_resolve_locals (PARSER_CONTEXT * parser, PT_NODE * block)
+pt_plcs_resolve_locals (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params)
 {
+  PT_PLCS_SCOPE outer;
+  PT_NODE *p;
   int next_slot = 0;
 
   assert (block != NULL && block->node_type == PT_SP_STMT && block->info.sp_stmt.op == PT_SP_BLOCK);
 
-  if (pt_plcs_resolve_block (parser, block, NULL, &next_slot) != NO_ERROR)
+  outer.decl_list = NULL;
+  outer.visible = NULL;
+  outer.names = params;
+  outer.outer = NULL;
+
+  for (p = params; p != NULL; p = p->next)
+    {
+      p->info.name.meta_class = PT_PLCS_LOCAL;
+      p->info.name.plcs_slot = next_slot++;
+    }
+
+  if (pt_plcs_resolve_block (parser, block, (params != NULL) ? &outer : NULL, &next_slot) != NO_ERROR)
     {
       return -1;
     }
@@ -30882,14 +30905,15 @@ pt_to_plcs_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt)
  *   return: the outermost PLCS_PROC node, NULL on error
  *   parser(in) :
  *   block(in/out) : the PT_SP_BLOCK sp_parse_body () returned, names not yet bound
+ *   params(in/out) : the procedure's parameters in declared order, NULL when it takes none
  */
 XASL_NODE *
-pt_to_plcs_xasl (PARSER_CONTEXT * parser, PT_NODE * block)
+pt_to_plcs_xasl (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params)
 {
   XASL_NODE *xasl;
   int locals_cnt;
 
-  locals_cnt = pt_plcs_resolve_locals (parser, block);
+  locals_cnt = pt_plcs_resolve_locals (parser, block, params);
   if (locals_cnt < 0)
     {
       return NULL;
@@ -30907,6 +30931,82 @@ pt_to_plcs_xasl (PARSER_CONTEXT * parser, PT_NODE * block)
 }
 
 /*
+ * pt_plcs_parameters () - the procedure's parameters, as names the resolution pass can bind
+ *   return: a PT_NAME list in declared order, NULL when the routine takes none or on error
+ *   parser(in) :
+ *   sig(in)    : the signature of the call being lowered
+ *
+ * note: the names are not in the signature - it carries modes and types because that is all the
+ *       PL engine needs - so they are read from the catalog here, the same rows
+ *       jsp_make_pl_args () reads.
+ */
+static PT_NODE *
+pt_plcs_parameters (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig)
+{
+  PT_NODE *list = NULL, *name;
+  DB_VALUE args_val, elem, attr;
+  DB_SET *args;
+  MOP sp_mop;
+  int i, save;
+
+  if (sig->arg.arg_size == 0)
+    {
+      return NULL;
+    }
+
+  db_make_null (&args_val);
+  AU_SAVE_AND_DISABLE (save);
+
+  sp_mop = jsp_find_stored_procedure (sig->name, DB_AUTH_EXECUTE);
+  if (sp_mop == NULL || obj_get (sp_mop, SP_ATTR_ARGS, &args_val) != NO_ERROR)
+    {
+      AU_RESTORE (save);
+      er_clear ();
+      return NULL;
+    }
+
+  args = db_get_set (&args_val);
+  for (i = 0; i < sig->arg.arg_size; i++)
+    {
+      db_make_null (&elem);
+      db_make_null (&attr);
+
+      if (args == NULL || set_get_element (args, i, &elem) != NO_ERROR || db_get_object (&elem) == NULL
+	  || obj_get (db_get_object (&elem), SP_ARG_ATTR_ARG_NAME, &attr) != NO_ERROR || db_get_string (&attr) == NULL)
+	{
+	  pr_clear_value (&attr);
+	  pr_clear_value (&elem);
+	  goto give_up;
+	}
+
+      name = pt_name (parser, pt_append_string (parser, NULL, db_get_string (&attr)));
+      pr_clear_value (&attr);
+      pr_clear_value (&elem);
+      if (name == NULL)
+	{
+	  goto give_up;
+	}
+
+      /* the declared type travels with the name, the way a declaration's does, so a reference
+       * to a parameter gets a domain like any other local */
+      name->type_enum = pt_db_to_type_enum ((DB_TYPE) sig->arg.arg_type[i]);
+      list = parser_append_node (name, list);
+    }
+
+  pr_clear_value (&args_val);
+  AU_RESTORE (save);
+
+  return list;
+
+give_up:
+  pr_clear_value (&args_val);
+  AU_RESTORE (save);
+  er_clear ();
+
+  return NULL;
+}
+
+/*
  * pt_plcs_compile_body () - build the procedure's own plan, if this build can
  *   return: the plan, NULL when the call stays with the PL engine
  *   parser(in) :
@@ -30920,7 +31020,7 @@ static XASL_NODE *
 pt_plcs_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig)
 {
   PARSER_CONTEXT *body_parser;
-  PT_NODE *block;
+  PT_NODE *block, *params;
   XASL_NODE *xasl = NULL;
   MOP code_mop;
   DB_VALUE scode;
@@ -30932,10 +31032,25 @@ pt_plcs_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig)
       return NULL;
     }
 
-  /* arguments live in the frame's slots and nothing numbers them yet, and a result comes back
-   * through RETURN, which the grammar does not take yet - so only a procedure called with
-   * neither can run here */
-  if (sig->arg.arg_size > 0 || (DB_TYPE) sig->result_type != DB_TYPE_NULL || OID_ISNULL (&sig->ext.sp.code_oid))
+  /* a result comes back through RETURN, which the grammar does not take yet, so a function
+   * still goes to the PL engine */
+  if ((DB_TYPE) sig->result_type != DB_TYPE_NULL || OID_ISNULL (&sig->ext.sp.code_oid))
+    {
+      return NULL;
+    }
+
+  /* an OUT parameter has to travel back out of the frame after the call, which the call site
+   * does not do yet */
+  for (int i = 0; i < sig->arg.arg_size; i++)
+    {
+      if (sig->arg.arg_mode[i] != SP_MODE_IN)
+	{
+	  return NULL;
+	}
+    }
+
+  params = pt_plcs_parameters (parser, sig);
+  if (sig->arg.arg_size > 0 && params == NULL)
     {
       return NULL;
     }
@@ -30972,7 +31087,7 @@ pt_plcs_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig)
 
   if (block != NULL && !pt_has_error (body_parser))
     {
-      xasl = pt_to_plcs_xasl (body_parser, block);
+      xasl = pt_to_plcs_xasl (body_parser, block, params);
       if (pt_has_error (body_parser))
 	{
 	  xasl = NULL;
