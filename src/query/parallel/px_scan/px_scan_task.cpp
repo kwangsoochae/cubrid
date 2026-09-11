@@ -633,6 +633,7 @@ namespace parallel_scan
       }
     m_xasl_state->qp_xasl_line = m_orig_vd->xasl_state->qp_xasl_line;
     m_xasl_state->query_id = m_orig_vd->xasl_state->query_id;
+    m_xasl_state->plcs_frame = m_orig_vd->xasl_state->plcs_frame;
     m_vd = &m_xasl_state->vd;
     memcpy (m_vd, m_orig_vd, sizeof (val_descr));
     m_vd->xasl_state = m_xasl_state;

@@ -83,6 +83,34 @@ struct val_descr
   XASL_STATE *xasl_state;	/* XASL_STATE pointer */
 };				/* Value Descriptor */
 
+/* Non-local control flow out of a PL/CSQL statement. RETURN, EXIT and CONTINUE are not
+ * errors, so GOTO_EXIT_ON_ERROR cannot carry them: a statement returns NO_ERROR and raises
+ * a signal instead, which the enclosing block or loop reads. */
+typedef enum
+{
+  PLCS_SIGNAL_NONE = 0,
+  PLCS_SIGNAL_RETURN,
+  PLCS_SIGNAL_EXIT,
+  PLCS_SIGNAL_CONTINUE
+} PLCS_SIGNAL;
+
+/* One activation of a PL/CSQL procedure. Locals live in slots the compiler numbers. */
+typedef struct plcs_frame PLCS_FRAME;
+struct plcs_frame
+{
+  DB_VALUE *locals;
+  int locals_cnt;
+
+  PLCS_SIGNAL signal;
+  int signal_level;		/* how many enclosing loops a labelled EXIT or CONTINUE leaves */
+
+  int sqlcode;			/* the manual's 0 - 9, 1000 for a user-defined exception */
+  char *sqlerrm;
+
+  int call_depth;
+  PLCS_FRAME *caller;
+};
+
 // XASL_STATE
 typedef struct xasl_state XASL_STATE;
 struct xasl_state
@@ -90,6 +118,10 @@ struct xasl_state
   VAL_DESCR vd;			/* Value Descriptor */
   QUERY_ID query_id;		/* Query associated with XASL */
   int qp_xasl_line;		/* Error line */
+  /* A pointer, because nearly every qexec_* function carries this struct: outside a
+   * procedure it stays NULL and neither the behaviour nor the cost of the existing paths
+   * changes. */
+  PLCS_FRAME *plcs_frame;
 };
 
 extern qfile_list_id *qexec_execute_query (THREAD_ENTRY * thread_p, xasl_node * xasl, int dbval_cnt,
@@ -114,6 +146,8 @@ extern int qexec_clear_xasl_for_parallel_aptr (THREAD_ENTRY * thread_p, xasl_nod
 extern qfile_list_id *qexec_get_xasl_list_id (xasl_node * xasl);
 extern xasl_state *qexec_deep_copy_xasl_state (THREAD_ENTRY * thread_p, xasl_state * xasl_state);
 extern void qexec_free_xasl_state (THREAD_ENTRY * thread_p, xasl_state * xasl_state);
+extern PLCS_FRAME *qexec_alloc_plcs_frame (THREAD_ENTRY * thread_p, int locals_cnt, PLCS_FRAME * caller);
+extern void qexec_free_plcs_frame (THREAD_ENTRY * thread_p, PLCS_FRAME * frame);
 #if defined(CUBRID_DEBUG)
 extern void get_xasl_dumper_linked_in ();
 #endif

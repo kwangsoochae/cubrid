@@ -3687,6 +3687,9 @@ qexec_deep_copy_xasl_state (THREAD_ENTRY * thread_p, xasl_state * xasl_state_p)
     }
   new_xasl_state->qp_xasl_line = xasl_state_p->qp_xasl_line;
   new_xasl_state->query_id = xasl_state_p->query_id;
+  /* The frame is not copied: the copy reads the same activation, and only the procedural
+   * executor writes to it. */
+  new_xasl_state->plcs_frame = xasl_state_p->plcs_frame;
   new_xasl_state->vd.xasl_state = new_xasl_state;
   new_xasl_state->vd.dbval_cnt = xasl_state_p->vd.dbval_cnt;
   new_xasl_state->vd.drand = xasl_state_p->vd.drand;
@@ -3731,6 +3734,88 @@ qexec_free_xasl_state (THREAD_ENTRY * thread_p, xasl_state * xasl_state)
       db_private_free (thread_p, xasl_state->vd.dbval_ptr);
     }
   db_private_free (thread_p, xasl_state);
+}
+
+/*
+ * qexec_alloc_plcs_frame () - build one activation of a PL/CSQL procedure
+ *   return: the frame, NULL on error
+ *   thread_p(in)   :
+ *   locals_cnt(in) : how many slots the compiler numbered
+ *   caller(in)     : the frame that made the call, NULL at the outermost one
+ */
+PLCS_FRAME *
+qexec_alloc_plcs_frame (THREAD_ENTRY * thread_p, int locals_cnt, PLCS_FRAME * caller)
+{
+  PLCS_FRAME *frame;
+  int i;
+
+  assert (locals_cnt >= 0);
+
+  frame = (PLCS_FRAME *) db_private_alloc (thread_p, sizeof (PLCS_FRAME));
+  if (frame == NULL)
+    {
+      return NULL;
+    }
+
+  frame->locals = NULL;
+  frame->locals_cnt = locals_cnt;
+  frame->signal = PLCS_SIGNAL_NONE;
+  frame->signal_level = 0;
+  frame->sqlcode = 0;
+  frame->sqlerrm = NULL;
+  frame->call_depth = (caller != NULL) ? caller->call_depth + 1 : 0;
+  frame->caller = caller;
+
+  if (locals_cnt > 0)
+    {
+      frame->locals = (DB_VALUE *) db_private_alloc (thread_p, sizeof (DB_VALUE) * locals_cnt);
+      if (frame->locals == NULL)
+	{
+	  db_private_free_and_init (thread_p, frame);
+	  return NULL;
+	}
+
+      for (i = 0; i < locals_cnt; i++)
+	{
+	  db_make_null (&frame->locals[i]);
+	}
+    }
+
+  return frame;
+}
+
+/*
+ * qexec_free_plcs_frame () -
+ *   return:
+ *   thread_p(in) :
+ *   frame(in)    :
+ *
+ * note: the caller chain is not walked. Each frame is freed by the call that made it.
+ */
+void
+qexec_free_plcs_frame (THREAD_ENTRY * thread_p, PLCS_FRAME * frame)
+{
+  int i;
+
+  if (frame == NULL)
+    {
+      return;
+    }
+
+  if (frame->locals != NULL)
+    {
+      for (i = 0; i < frame->locals_cnt; i++)
+	{
+	  pr_clear_value (&frame->locals[i]);
+	}
+      db_private_free_and_init (thread_p, frame->locals);
+    }
+  if (frame->sqlerrm != NULL)
+    {
+      db_private_free_and_init (thread_p, frame->sqlerrm);
+    }
+
+  db_private_free (thread_p, frame);
 }
 
 /*
@@ -17366,6 +17451,9 @@ qexec_execute_query (THREAD_ENTRY * thread_p, xasl_node * xasl, int dbval_cnt, c
 
   /* initialize error line */
   xasl_state.qp_xasl_line = 0;
+
+  /* no procedure is running here. fetch.c raises a frame when it enters one */
+  xasl_state.plcs_frame = NULL;
 
   time_t sec;
   int millisec;
