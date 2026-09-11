@@ -6943,7 +6943,6 @@ pt_make_function (PARSER_CONTEXT * parser, int function_code, const REGU_VARIABL
  *   function(in/out):
  *
  */
-static PT_NODE *pt_plcs_parameters (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig);
 static XASL_NODE *pt_plcs_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig);
 
 static REGU_VARIABLE *
@@ -30451,7 +30450,7 @@ pt_plcs_resolve_locals (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * para
 static REGU_VARIABLE *pt_plcs_expr_to_regu (PARSER_CONTEXT * parser, PT_NODE ** expr);
 static bool pt_plcs_callee_is_builtin (const REGU_VARIABLE * regu);
 static XASL_NODE *pt_to_plcs_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt);
-static XASL_NODE *pt_to_plcs_block (PARSER_CONTEXT * parser, PT_NODE * block);
+static XASL_NODE *pt_to_plcs_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params);
 static XASL_NODE *pt_to_plcs_stmt_list_block (PARSER_CONTEXT * parser, PT_NODE * list);
 static int pt_plcs_set_children (PARSER_CONTEXT * parser, XASL_NODE * xasl, XASL_NODE ** buf, int cnt);
 
@@ -30575,6 +30574,9 @@ pt_plcs_new_node (PLCS_OP op)
  *   slot(in)   : the frame slot written
  *   value(in/out) : the expression assigned; typing can replace the node
  *   target(in) : the declared name of what is written, NULL when there is nothing to coerce to
+ *   always_cast(in) : cast even where the two types read the same. A parameter needs this: the
+ *                  slot is declared one type and the caller put a value of another in it, and
+ *                  only the runtime value knows the difference
  *
  * note: the value is cast to the declared type rather than stored as it came out. That is where
  *       the language's checks live - a number past the type's range and a string past its length
@@ -30583,7 +30585,7 @@ pt_plcs_new_node (PLCS_OP op)
  *       ones already in use.
  */
 static XASL_NODE *
-pt_to_plcs_assign (PARSER_CONTEXT * parser, int slot, PT_NODE ** value, PT_NODE * target)
+pt_to_plcs_assign (PARSER_CONTEXT * parser, int slot, PT_NODE ** value, PT_NODE * target, bool always_cast)
 {
   XASL_NODE *xasl = pt_plcs_new_node (PLCS_OP_ASSIGN);
   TP_DOMAIN *domain;
@@ -30601,7 +30603,8 @@ pt_to_plcs_assign (PARSER_CONTEXT * parser, int slot, PT_NODE ** value, PT_NODE 
     }
 
   domain = (target != NULL) ? pt_xasl_node_to_domain (parser, target) : NULL;
-  if (domain != NULL && TP_DOMAIN_TYPE (domain) != DB_TYPE_VARIABLE && xasl->proc.plcs.expr->domain != domain)
+  if (domain != NULL && TP_DOMAIN_TYPE (domain) != DB_TYPE_VARIABLE
+      && (always_cast || xasl->proc.plcs.expr->domain != domain))
     {
       /* T_CAST_WRAP with STRICT_TYPE_CAST is the pair that refuses rather than forces: it goes
        * through tp_value_cast (), where a value the type cannot hold is an error. Plain T_CAST
@@ -30639,7 +30642,7 @@ pt_to_plcs_open_local (PARSER_CONTEXT * parser, PT_NODE * decl)
 
   if (decl->info.sp_stmt.expr != NULL)
     {
-      return pt_to_plcs_assign (parser, name->info.name.plcs_slot, &decl->info.sp_stmt.expr, name);
+      return pt_to_plcs_assign (parser, name->info.name.plcs_slot, &decl->info.sp_stmt.expr, name, false);
     }
 
   /* no default: the slot opens as NULL of the declared type, not as the untyped NULL
@@ -30728,12 +30731,13 @@ pt_to_plcs_stmt_list_block (PARSER_CONTEXT * parser, PT_NODE * list)
  *   return: the node, NULL on error
  *   parser(in) :
  *   block(in)  : a PT_SP_BLOCK
+ *   params(in) : the routine's parameters at its outermost block, NULL anywhere else
  */
 static XASL_NODE *
-pt_to_plcs_block (PARSER_CONTEXT * parser, PT_NODE * block)
+pt_to_plcs_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params)
 {
   XASL_NODE *xasl, **buf = NULL;
-  PT_NODE *decl, *stmt;
+  PT_NODE *decl, *stmt, *param;
   int cnt = 0, i = 0;
 
   xasl = pt_plcs_new_node (PLCS_OP_BLOCK);
@@ -30742,6 +30746,10 @@ pt_to_plcs_block (PARSER_CONTEXT * parser, PT_NODE * block)
       return NULL;
     }
 
+  for (param = params; param != NULL; param = param->next)
+    {
+      cnt++;
+    }
   for (decl = block->info.sp_stmt.decl_list; decl != NULL; decl = decl->next)
     {
       cnt++;
@@ -30760,6 +30768,27 @@ pt_to_plcs_block (PARSER_CONTEXT * parser, PT_NODE * block)
       if (buf == NULL)
 	{
 	  return NULL;
+	}
+
+      /* the caller put the argument in the slot as it had it - it has no way to know what the
+       * declared type is - so the check that the type can hold it happens here, at the head of
+       * the procedure, where both ways a call can arrive pass through */
+      for (param = params; param != NULL; param = param->next)
+	{
+	  PT_NODE *ref = parser_copy_tree (parser, param);
+
+	  if (ref == NULL)
+	    {
+	      return NULL;
+	    }
+	  ref->next = NULL;
+
+	  buf[i] = pt_to_plcs_assign (parser, param->info.name.plcs_slot, &ref, param, true);
+	  if (buf[i] == NULL)
+	    {
+	      return NULL;
+	    }
+	  i++;
 	}
 
       for (decl = block->info.sp_stmt.decl_list; decl != NULL; decl = decl->next)
@@ -30807,11 +30836,11 @@ pt_to_plcs_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt)
   switch (stmt->info.sp_stmt.op)
     {
     case PT_SP_BLOCK:
-      return pt_to_plcs_block (parser, stmt);
+      return pt_to_plcs_block (parser, stmt, NULL);
 
     case PT_SP_ASSIGN:
       return pt_to_plcs_assign (parser, stmt->info.sp_stmt.name->info.name.plcs_slot, &stmt->info.sp_stmt.expr,
-				stmt->info.sp_stmt.name);
+				stmt->info.sp_stmt.name, false);
 
     case PT_SP_CALL:
       xasl = pt_plcs_new_node (PLCS_OP_CALL);
@@ -30964,7 +30993,7 @@ pt_to_plcs_xasl (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params)
       return NULL;
     }
 
-  xasl = pt_to_plcs_block (parser, block);
+  xasl = pt_to_plcs_block (parser, block, params);
   if (xasl == NULL)
     {
       return NULL;
@@ -30973,155 +31002,6 @@ pt_to_plcs_xasl (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params)
   xasl->proc.plcs.locals_cnt = locals_cnt;
 
   return xasl;
-}
-
-/*
- * pt_plcs_body_of () - where the body starts inside a stored routine's source
- *   return: the first character after the header's AS or IS, NULL when there is none
- *   scode(in) : what the catalog holds, which is the whole CREATE statement
- *
- * note: sp_parse_body () starts at the declarations, so the header has to be stepped over, and
- *       the header is longer than the name and the parameters - AUTHID sits there too. It ends
- *       at the AS or IS that no parenthesis encloses. A string or a comment can hold either
- *       word, so those are stepped over rather than searched through.
- */
-static const char *
-pt_plcs_body_of (const char *scode)
-{
-  const char *p = scode;
-  int depth = 0;
-
-  while (*p != '\0')
-    {
-      if (*p == '\'')
-	{
-	  for (p++; *p != '\0'; p++)
-	    {
-	      if (*p == '\'')
-		{
-		  if (p[1] != '\'')
-		    {
-		      break;
-		    }
-		  p++;
-		}
-	    }
-	}
-      else if (p[0] == '-' && p[1] == '-')
-	{
-	  while (*p != '\0' && *p != '\n')
-	    {
-	      p++;
-	    }
-	  continue;
-	}
-      else if (p[0] == '/' && p[1] == '*')
-	{
-	  for (p += 2; *p != '\0' && !(p[0] == '*' && p[1] == '/'); p++)
-	    ;
-	  if (*p != '\0')
-	    {
-	      p++;
-	    }
-	}
-      else if (*p == '(')
-	{
-	  depth++;
-	}
-      else if (*p == ')')
-	{
-	  depth--;
-	}
-      else if (depth == 0 && (p == scode || !char_isalnum (p[-1])) && p[-1] != '_'
-	       && (char_tolower (p[0]) == 'a' || char_tolower (p[0]) == 'i') && char_tolower (p[1]) == 's'
-	       && !char_isalnum (p[2]) && p[2] != '_')
-	{
-	  return p + 2;
-	}
-
-      if (*p != '\0')
-	{
-	  p++;
-	}
-    }
-
-  return NULL;
-}
-
-/*
- * pt_plcs_parameters () - the procedure's parameters, as names the resolution pass can bind
- *   return: a PT_NAME list in declared order, NULL when the routine takes none or on error
- *   parser(in) :
- *   sig(in)    : the signature of the call being lowered
- *
- * note: the names are not in the signature - it carries modes and types because that is all the
- *       PL engine needs - so they are read from the catalog here, the same rows
- *       jsp_make_pl_args () reads.
- */
-static PT_NODE *
-pt_plcs_parameters (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig)
-{
-  PT_NODE *list = NULL, *name;
-  DB_VALUE args_val, elem, attr;
-  DB_SET *args;
-  MOP sp_mop;
-  int i, save;
-
-  if (sig->arg.arg_size == 0)
-    {
-      return NULL;
-    }
-
-  db_make_null (&args_val);
-  AU_SAVE_AND_DISABLE (save);
-
-  sp_mop = jsp_find_stored_procedure (sig->name, DB_AUTH_EXECUTE);
-  if (sp_mop == NULL || obj_get (sp_mop, SP_ATTR_ARGS, &args_val) != NO_ERROR)
-    {
-      AU_RESTORE (save);
-      er_clear ();
-      return NULL;
-    }
-
-  args = db_get_set (&args_val);
-  for (i = 0; i < sig->arg.arg_size; i++)
-    {
-      db_make_null (&elem);
-      db_make_null (&attr);
-
-      if (args == NULL || set_get_element (args, i, &elem) != NO_ERROR || db_get_object (&elem) == NULL
-	  || obj_get (db_get_object (&elem), SP_ARG_ATTR_ARG_NAME, &attr) != NO_ERROR || db_get_string (&attr) == NULL)
-	{
-	  pr_clear_value (&attr);
-	  pr_clear_value (&elem);
-	  goto give_up;
-	}
-
-      name = pt_name (parser, pt_append_string (parser, NULL, db_get_string (&attr)));
-      pr_clear_value (&attr);
-      pr_clear_value (&elem);
-      if (name == NULL)
-	{
-	  goto give_up;
-	}
-
-      /* the declared type travels with the name, the way a declaration's does, so a reference
-       * to a parameter gets a domain like any other local */
-      name->type_enum = pt_db_to_type_enum ((DB_TYPE) sig->arg.arg_type[i]);
-      list = parser_append_node (name, list);
-    }
-
-  pr_clear_value (&args_val);
-  AU_RESTORE (save);
-
-  return list;
-
-give_up:
-  pr_clear_value (&args_val);
-  AU_RESTORE (save);
-  er_clear ();
-
-  return NULL;
 }
 
 /*
@@ -31225,11 +31105,6 @@ pt_plcs_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig)
 	}
     }
 
-  params = pt_plcs_parameters (parser, sig);
-  if (sig->arg.arg_size > 0 && params == NULL)
-    {
-      return NULL;
-    }
 
   db_make_null (&scode);
   AU_SAVE_AND_DISABLE (save);
@@ -31242,7 +31117,7 @@ pt_plcs_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig)
     }
   AU_RESTORE (save);
 
-  text = (db_get_string (&scode) != NULL) ? pt_plcs_body_of (db_get_string (&scode)) : NULL;
+  text = db_get_string (&scode);
   if (text == NULL)
     {
       pr_clear_value (&scode);
@@ -31263,6 +31138,15 @@ pt_plcs_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig)
 
   if (block != NULL && !pt_has_error (body_parser))
     {
+      /* the header the grammar just read is where a parameter's declared type comes from, so
+       * the count has to agree with the signature the caller was built against */
+      params = block->info.sp_stmt.params;
+      if (pt_length_of_list (params) != sig->arg.arg_size)
+	{
+	  parser_free_parser (body_parser);
+	  return NULL;
+	}
+
       pt_Plcs_compile_depth++;
       xasl = pt_to_plcs_xasl (body_parser, block, params);
       pt_Plcs_compile_depth--;
