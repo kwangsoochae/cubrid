@@ -3704,8 +3704,16 @@ xts_process_plcs_proc (char *ptr, const PLCS_PROC_NODE * plcs_proc)
   ptr = or_pack_int (ptr, plcs_proc->op);
   ptr = or_pack_int (ptr, plcs_proc->flags);
   ptr = or_pack_int (ptr, plcs_proc->target_slot);
+  ptr = or_pack_int (ptr, plcs_proc->locals_cnt);
 
   offset = xts_save_regu_variable (plcs_proc->expr);
+  if (offset == ER_FAILED)
+    {
+      return NULL;
+    }
+  ptr = or_pack_int (ptr, offset);
+
+  offset = xts_save_regu_variable (plcs_proc->expr2);
   if (offset == ER_FAILED)
     {
       return NULL;
@@ -6724,7 +6732,9 @@ xts_sizeof_plcs_proc (const PLCS_PROC_NODE * plcs_proc)
   size += (OR_INT_SIZE		/* op */
 	   + OR_INT_SIZE	/* flags */
 	   + OR_INT_SIZE	/* target_slot */
+	   + OR_INT_SIZE	/* locals_cnt */
 	   + PTR_SIZE		/* expr */
+	   + PTR_SIZE		/* expr2 */
 	   + OR_INT_SIZE	/* children_cnt */
 	   + (plcs_proc->children_cnt * PTR_SIZE));	/* children */
 

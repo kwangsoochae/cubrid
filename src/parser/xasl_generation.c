@@ -9635,7 +9635,17 @@ pt_to_regu_variable (PARSER_CONTEXT * parser, PT_NODE * node, UNBOX unbox)
 	      break;
 
 	    case PT_NAME:
-	      if (node->info.name.meta_class == PT_PARAMETER)
+	      if (node->info.name.meta_class == PT_PLCS_LOCAL)
+		{
+		  regu_alloc (regu);
+		  if (regu != NULL)
+		    {
+		      regu->type = TYPE_PLCS_SLOT;
+		      regu->domain = pt_xasl_node_to_domain (parser, node);
+		      regu->value.plcs_slot = node->info.name.plcs_slot;
+		    }
+		}
+	      else if (node->info.name.meta_class == PT_PARAMETER)
 		{
 		  value = pt_find_value_of_label (node->info.name.original);
 		  if (value)
@@ -30386,4 +30396,420 @@ pt_plcs_resolve_locals (PARSER_CONTEXT * parser, PT_NODE * block)
     }
 
   return next_slot;
+}
+
+/*
+ * Generating a procedure's XASL
+ *
+ * One PLCS_PROC node per statement, told apart by op, mirroring the parse tree the PL/CSQL
+ * grammar built. Two shapes are not one-to-one with it and are worth naming here. A branch or a
+ * loop body becomes a block of its own, so the number of children says what a node holds instead
+ * of a count having to be carried beside it. And a declaration becomes an assignment at the head
+ * of its block, the default expression when it has one and NULL when it has not, so that entering
+ * a block is what gives a local its starting value - a nested block re-entered on the next turn
+ * of a loop must not see what the previous turn left behind.
+ */
+
+static XASL_NODE *pt_to_plcs_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt);
+static XASL_NODE *pt_to_plcs_block (PARSER_CONTEXT * parser, PT_NODE * block);
+static XASL_NODE *pt_to_plcs_stmt_list_block (PARSER_CONTEXT * parser, PT_NODE * list);
+static int pt_plcs_set_children (PARSER_CONTEXT * parser, XASL_NODE * xasl, XASL_NODE ** buf, int cnt);
+
+/*
+ * pt_plcs_set_children () - hand a node the children built for it
+ *   return: NO_ERROR or ER_FAILED
+ *   parser(in) :
+ *   xasl(in/out) : a PLCS_PROC node
+ *   buf(in)    : the children, in order
+ *   cnt(in)    : how many
+ */
+static int
+pt_plcs_set_children (PARSER_CONTEXT * parser, XASL_NODE * xasl, XASL_NODE ** buf, int cnt)
+{
+  int i;
+
+  if (cnt == 0)
+    {
+      xasl->proc.plcs.children = NULL;
+      xasl->proc.plcs.children_cnt = 0;
+      return NO_ERROR;
+    }
+
+  regu_array_alloc (&xasl->proc.plcs.children, (size_t) cnt);
+  if (xasl->proc.plcs.children == NULL)
+    {
+      return ER_FAILED;
+    }
+
+  for (i = 0; i < cnt; i++)
+    {
+      xasl->proc.plcs.children[i] = buf[i];
+    }
+  xasl->proc.plcs.children_cnt = cnt;
+
+  return NO_ERROR;
+}
+
+/*
+ * pt_plcs_new_node () - a PLCS_PROC node with the fields no op uses left empty
+ *   return: the node, NULL when it could not be allocated
+ *   op(in) : which statement
+ */
+static XASL_NODE *
+pt_plcs_new_node (PLCS_OP op)
+{
+  XASL_NODE *xasl = regu_xasl_node_alloc (PLCS_PROC);
+
+  if (xasl != NULL)
+    {
+      xasl->proc.plcs.op = op;
+      xasl->proc.plcs.flags = 0;
+      xasl->proc.plcs.expr = NULL;
+      xasl->proc.plcs.expr2 = NULL;
+      xasl->proc.plcs.target_slot = -1;
+      xasl->proc.plcs.locals_cnt = 0;
+      xasl->proc.plcs.children = NULL;
+      xasl->proc.plcs.children_cnt = 0;
+    }
+
+  return xasl;
+}
+
+/*
+ * pt_to_plcs_assign () - an assignment writing one slot
+ *   return: the node, NULL on error
+ *   parser(in) :
+ *   slot(in)   : the frame slot written
+ *   value(in)  : the expression assigned
+ */
+static XASL_NODE *
+pt_to_plcs_assign (PARSER_CONTEXT * parser, int slot, PT_NODE * value)
+{
+  XASL_NODE *xasl = pt_plcs_new_node (PLCS_OP_ASSIGN);
+
+  if (xasl == NULL)
+    {
+      return NULL;
+    }
+
+  xasl->proc.plcs.target_slot = slot;
+  xasl->proc.plcs.expr = pt_to_regu_variable (parser, value, UNBOX_AS_VALUE);
+  if (xasl->proc.plcs.expr == NULL)
+    {
+      return NULL;
+    }
+
+  return xasl;
+}
+
+/*
+ * pt_to_plcs_open_local () - the assignment a declaration turns into
+ *   return: the node, NULL on error
+ *   parser(in) :
+ *   decl(in)   : a PT_SP_DECL whose name is already bound to its slot
+ */
+static XASL_NODE *
+pt_to_plcs_open_local (PARSER_CONTEXT * parser, PT_NODE * decl)
+{
+  PT_NODE *name = decl->info.sp_stmt.name;
+  XASL_NODE *xasl;
+  DB_VALUE *val = NULL;
+  TP_DOMAIN *domain;
+
+  if (decl->info.sp_stmt.expr != NULL)
+    {
+      return pt_to_plcs_assign (parser, name->info.name.plcs_slot, decl->info.sp_stmt.expr);
+    }
+
+  /* no default: the slot opens as NULL of the declared type, not as the untyped NULL
+   * pt_to_regu_variable () makes of a missing node - the type is what later comparisons read */
+  xasl = pt_plcs_new_node (PLCS_OP_ASSIGN);
+  domain = pt_xasl_node_to_domain (parser, name);
+  if (xasl == NULL || domain == NULL)
+    {
+      return NULL;
+    }
+
+  regu_alloc (val);
+  if (val == NULL || db_value_domain_init (val, TP_DOMAIN_TYPE (domain), domain->precision, domain->scale) != NO_ERROR)
+    {
+      return NULL;
+    }
+
+  xasl->proc.plcs.target_slot = name->info.name.plcs_slot;
+  xasl->proc.plcs.expr = pt_make_regu_constant (parser, val, TP_DOMAIN_TYPE (domain), name);
+  if (xasl->proc.plcs.expr == NULL)
+    {
+      return NULL;
+    }
+
+  return xasl;
+}
+
+/*
+ * pt_to_plcs_stmt_list_block () - wrap a statement list in a block that declares nothing
+ *   return: the node, NULL on error
+ *   parser(in) :
+ *   list(in)   : PT_SP_STMT nodes, linked; NULL gives an empty block
+ */
+static XASL_NODE *
+pt_to_plcs_stmt_list_block (PARSER_CONTEXT * parser, PT_NODE * list)
+{
+  XASL_NODE *xasl, **buf = NULL;
+  PT_NODE *stmt;
+  int cnt = 0, i = 0;
+
+  xasl = pt_plcs_new_node (PLCS_OP_BLOCK);
+  if (xasl == NULL)
+    {
+      return NULL;
+    }
+
+  for (stmt = list; stmt != NULL; stmt = stmt->next)
+    {
+      if (stmt->info.sp_stmt.op != PT_SP_NULL_STMT)
+	{
+	  cnt++;
+	}
+    }
+
+  if (cnt > 0)
+    {
+      regu_array_alloc (&buf, (size_t) cnt);
+      if (buf == NULL)
+	{
+	  return NULL;
+	}
+
+      for (stmt = list; stmt != NULL; stmt = stmt->next)
+	{
+	  /* the NULL statement does nothing, and nothing downstream needs to be told that it
+	   * was written, so it does not reach the plan */
+	  if (stmt->info.sp_stmt.op == PT_SP_NULL_STMT)
+	    {
+	      continue;
+	    }
+
+	  buf[i] = pt_to_plcs_stmt (parser, stmt);
+	  if (buf[i] == NULL)
+	    {
+	      return NULL;
+	    }
+	  i++;
+	}
+    }
+
+  return pt_plcs_set_children (parser, xasl, buf, cnt) == NO_ERROR ? xasl : NULL;
+}
+
+/*
+ * pt_to_plcs_block () - a block: its declarations turned into assignments, then its statements
+ *   return: the node, NULL on error
+ *   parser(in) :
+ *   block(in)  : a PT_SP_BLOCK
+ */
+static XASL_NODE *
+pt_to_plcs_block (PARSER_CONTEXT * parser, PT_NODE * block)
+{
+  XASL_NODE *xasl, **buf = NULL;
+  PT_NODE *decl, *stmt;
+  int cnt = 0, i = 0;
+
+  xasl = pt_plcs_new_node (PLCS_OP_BLOCK);
+  if (xasl == NULL)
+    {
+      return NULL;
+    }
+
+  for (decl = block->info.sp_stmt.decl_list; decl != NULL; decl = decl->next)
+    {
+      cnt++;
+    }
+  for (stmt = block->info.sp_stmt.body; stmt != NULL; stmt = stmt->next)
+    {
+      if (stmt->info.sp_stmt.op != PT_SP_NULL_STMT)
+	{
+	  cnt++;
+	}
+    }
+
+  if (cnt > 0)
+    {
+      regu_array_alloc (&buf, (size_t) cnt);
+      if (buf == NULL)
+	{
+	  return NULL;
+	}
+
+      for (decl = block->info.sp_stmt.decl_list; decl != NULL; decl = decl->next)
+	{
+	  buf[i] = pt_to_plcs_open_local (parser, decl);
+	  if (buf[i] == NULL)
+	    {
+	      return NULL;
+	    }
+	  i++;
+	}
+
+      for (stmt = block->info.sp_stmt.body; stmt != NULL; stmt = stmt->next)
+	{
+	  if (stmt->info.sp_stmt.op == PT_SP_NULL_STMT)
+	    {
+	      continue;
+	    }
+
+	  buf[i] = pt_to_plcs_stmt (parser, stmt);
+	  if (buf[i] == NULL)
+	    {
+	      return NULL;
+	    }
+	  i++;
+	}
+    }
+
+  return pt_plcs_set_children (parser, xasl, buf, cnt) == NO_ERROR ? xasl : NULL;
+}
+
+/*
+ * pt_to_plcs_stmt () - one procedural statement
+ *   return: the node, NULL on error
+ *   parser(in) :
+ *   stmt(in)   : a PT_SP_STMT other than a declaration or the NULL statement
+ */
+static XASL_NODE *
+pt_to_plcs_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt)
+{
+  XASL_NODE *xasl, *buf[2];
+  int form;
+
+  switch (stmt->info.sp_stmt.op)
+    {
+    case PT_SP_BLOCK:
+      return pt_to_plcs_block (parser, stmt);
+
+    case PT_SP_ASSIGN:
+      return pt_to_plcs_assign (parser, stmt->info.sp_stmt.name->info.name.plcs_slot, stmt->info.sp_stmt.expr);
+
+    case PT_SP_IF:
+      xasl = pt_plcs_new_node (PLCS_OP_IF);
+      if (xasl == NULL)
+	{
+	  return NULL;
+	}
+
+      xasl->proc.plcs.expr = pt_to_regu_variable (parser, stmt->info.sp_stmt.expr, UNBOX_AS_VALUE);
+      if (xasl->proc.plcs.expr == NULL)
+	{
+	  return NULL;
+	}
+
+      /* the then branch is always there and the else branch only when it was written, so one
+       * child means there is no else */
+      buf[0] = pt_to_plcs_stmt_list_block (parser, stmt->info.sp_stmt.body);
+      if (buf[0] == NULL)
+	{
+	  return NULL;
+	}
+      if (stmt->info.sp_stmt.else_body == NULL)
+	{
+	  return pt_plcs_set_children (parser, xasl, buf, 1) == NO_ERROR ? xasl : NULL;
+	}
+
+      buf[1] = pt_to_plcs_stmt_list_block (parser, stmt->info.sp_stmt.else_body);
+      if (buf[1] == NULL)
+	{
+	  return NULL;
+	}
+      return pt_plcs_set_children (parser, xasl, buf, 2) == NO_ERROR ? xasl : NULL;
+
+    case PT_SP_LOOP:
+      xasl = pt_plcs_new_node (PLCS_OP_LOOP);
+      if (xasl == NULL)
+	{
+	  return NULL;
+	}
+
+      form = stmt->info.sp_stmt.flags & PT_SP_LOOP_FORM_MASK;
+      switch (form)
+	{
+	case PT_SP_LOOP_BASIC:
+	  xasl->proc.plcs.flags = PLCS_LOOP_BASIC;
+	  break;
+
+	case PT_SP_LOOP_WHILE:
+	  xasl->proc.plcs.flags = PLCS_LOOP_WHILE;
+	  xasl->proc.plcs.expr = pt_to_regu_variable (parser, stmt->info.sp_stmt.expr, UNBOX_AS_VALUE);
+	  if (xasl->proc.plcs.expr == NULL)
+	    {
+	      return NULL;
+	    }
+	  break;
+
+	case PT_SP_LOOP_FOR:
+	  xasl->proc.plcs.flags = PLCS_LOOP_FOR;
+	  if ((stmt->info.sp_stmt.flags & PT_SP_LOOP_REVERSE) != 0)
+	    {
+	      xasl->proc.plcs.flags |= PLCS_LOOP_REVERSE;
+	    }
+
+	  xasl->proc.plcs.target_slot = stmt->info.sp_stmt.name->info.name.plcs_slot;
+	  xasl->proc.plcs.expr = pt_to_regu_variable (parser, stmt->info.sp_stmt.expr, UNBOX_AS_VALUE);
+	  xasl->proc.plcs.expr2 = pt_to_regu_variable (parser, stmt->info.sp_stmt.expr2, UNBOX_AS_VALUE);
+	  if (xasl->proc.plcs.expr == NULL || xasl->proc.plcs.expr2 == NULL)
+	    {
+	      return NULL;
+	    }
+	  break;
+
+	default:
+	  assert (false);
+	  PT_INTERNAL_ERROR (parser, "generate plcs");
+	  return NULL;
+	}
+
+      buf[0] = pt_to_plcs_stmt_list_block (parser, stmt->info.sp_stmt.body);
+      if (buf[0] == NULL)
+	{
+	  return NULL;
+	}
+      return pt_plcs_set_children (parser, xasl, buf, 1) == NO_ERROR ? xasl : NULL;
+
+    case PT_SP_DECL:
+    case PT_SP_NULL_STMT:
+    default:
+      /* a declaration is reached through its block, and the NULL statement is dropped before
+       * this point */
+      assert (false);
+      PT_INTERNAL_ERROR (parser, "generate plcs");
+      return NULL;
+    }
+}
+
+/*
+ * pt_to_plcs_xasl () - the plan of a whole PL/CSQL procedure body
+ *   return: the outermost PLCS_PROC node, NULL on error
+ *   parser(in) :
+ *   block(in/out) : the PT_SP_BLOCK sp_parse_body () returned, names not yet bound
+ */
+XASL_NODE *
+pt_to_plcs_xasl (PARSER_CONTEXT * parser, PT_NODE * block)
+{
+  XASL_NODE *xasl;
+  int locals_cnt;
+
+  locals_cnt = pt_plcs_resolve_locals (parser, block);
+  if (locals_cnt < 0)
+    {
+      return NULL;
+    }
+
+  xasl = pt_to_plcs_block (parser, block);
+  if (xasl == NULL)
+    {
+      return NULL;
+    }
+
+  xasl->proc.plcs.locals_cnt = locals_cnt;
+
+  return xasl;
 }

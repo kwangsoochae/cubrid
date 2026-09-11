@@ -2809,9 +2809,9 @@ qdump_print_xasl (xasl_node * xasl_p)
       break;
 
     case PLCS_PROC:
-      fprintf (foutput, "op:%s flags:%d target_slot:%d children:%d\n",
+      fprintf (foutput, "op:%s flags:%d target_slot:%d locals:%d children:%d\n",
 	       qdump_plcs_op_string (xasl_p->proc.plcs.op), xasl_p->proc.plcs.flags,
-	       xasl_p->proc.plcs.target_slot, xasl_p->proc.plcs.children_cnt);
+	       xasl_p->proc.plcs.target_slot, xasl_p->proc.plcs.locals_cnt, xasl_p->proc.plcs.children_cnt);
       break;
 
     default:

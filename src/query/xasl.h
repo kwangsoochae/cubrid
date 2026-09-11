@@ -507,13 +507,24 @@ typedef enum
   PLCS_OP_CALL			/* procedure call */
 } PLCS_OP;
 
+/* plcs_proc_node.flags of a PLCS_OP_LOOP. These mirror the parse tree's PT_SP_LOOP_*, which the
+ * XASL side cannot include; pt_to_plcs_stmt () maps one onto the other rather than casting. */
+#define PLCS_LOOP_BASIC		0x00	/* LOOP ... END LOOP */
+#define PLCS_LOOP_WHILE		0x01
+#define PLCS_LOOP_FOR		0x02
+#define PLCS_LOOP_FORM_MASK	0x03
+#define PLCS_LOOP_REVERSE	0x04	/* FOR i IN REVERSE lo .. hi */
+
 typedef struct plcs_proc_node PLCS_PROC_NODE;
 struct plcs_proc_node
 {
   PLCS_OP op;
   int flags;			/* op-specific: which loop form, which jump */
   REGU_VARIABLE *expr;		/* condition, assigned value, RAISE argument */
+  REGU_VARIABLE *expr2;		/* LOOP: the upper bound of a FOR, NULL in every other form */
   int target_slot;		/* frame slot an assignment writes, -1 when there is none */
+  int locals_cnt;		/* BLOCK: how many slots the frame needs. Numbering is flat over the
+				 * procedure, so only its outermost block carries the count */
   /* An SQL statement inside a procedure is a plain XASL node, not a kind of its own, and
    * hangs here as a child. */
   XASL_NODE **children;
