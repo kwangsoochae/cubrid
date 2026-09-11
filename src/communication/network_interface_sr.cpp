@@ -28,6 +28,10 @@
 #include <stdio.h>
 #include <string.h>
 #include <assert.h>
+#include <optional>
+
+#include "stream_to_xasl.h"
+#include "xasl_unpack_info.hpp"
 
 #include "filesys.hpp"
 #include "filesys_temp.hpp"
@@ -11201,16 +11205,47 @@ spl_call (THREAD_ENTRY *thread_p, unsigned int rid, char *request, int reqlen)
   /* 1) unpack arguments */
   cubpl::pl_signature sig;
   std::vector < DB_VALUE > args;
-  unpacker.unpack_all (sig, args);
+  std::string plan;
+  unpacker.unpack_all (sig, args, plan);
 
   std::vector < std::reference_wrapper < DB_VALUE >> ref_args (args.begin (), args.end ());
 
-  /* 2) invoke */
-  cubpl::executor executor (sig);
-  error_code = executor.fetch_args_peek (ref_args);
-  if (error_code == NO_ERROR)
+  /* 2) invoke. The executor is raised only on the PL engine path - building one opens an
+   *    execution stack on the session, which a natively run procedure has no use for. */
+  std::optional < cubpl::executor > executor;
+  std::vector < DB_VALUE > no_out_args;
+
+  if (!plan.empty ())
     {
-      error_code = executor.execute (ret_value);
+      /* the client built the procedure's own plan, so the server runs it here. A procedure has
+       * no value to give back, and the reply is packed the same way either way. */
+      XASL_NODE *xasl = NULL;
+      XASL_UNPACK_INFO *unpack_info = NULL;
+
+      error_code = stx_map_stream_to_xasl (thread_p, &xasl, false, (char *) plan.data (), (int) plan.size (),
+					   &unpack_info);
+      if (error_code == NO_ERROR && xasl != NULL)
+	{
+	  error_code = qexec_call_plcs (thread_p, xasl, args.data (), (int) args.size ());
+	}
+      else if (error_code == NO_ERROR)
+	{
+	  error_code = ER_FAILED;
+	}
+
+      if (unpack_info != NULL)
+	{
+	  free_xasl_unpack_info (thread_p, unpack_info);
+	}
+    }
+  else
+    {
+      executor.emplace (sig);
+      error_code = executor->fetch_args_peek (ref_args);
+      if (error_code == NO_ERROR)
+	{
+	  error_code = executor->execute (ret_value);
+	}
     }
 
   packing_packer packer;
@@ -11218,14 +11253,14 @@ spl_call (THREAD_ENTRY *thread_p, unsigned int rid, char *request, int reqlen)
   if (error_code == NO_ERROR)
     {
       /* 3) pack */
-      packer.set_buffer_and_pack_all (eb, ret_value, executor.get_out_args ());
+      packer.set_buffer_and_pack_all (eb, ret_value, executor ? executor->get_out_args () : no_out_args);
     }
   else
     {
       std::string err_msg;
-      if (executor.get_stack ())
+      if (executor && executor->get_stack ())
 	{
-	  err_msg = executor.get_stack ()->get_error_message ();
+	  err_msg = executor->get_stack ()->get_error_message ();
 	}
       if (err_msg.empty () && error_code != ER_SP_EXECUTE_ERROR)
 	{

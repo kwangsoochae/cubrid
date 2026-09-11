@@ -55,6 +55,7 @@
 #include "schema_manager.h"
 #include "numeric_opfunc.h"
 #include "jsp_cl.h"
+#include "xasl_generation.h"
 #include "system_parameter.h"
 #include "network_interface_cl.h"
 #include "unicode_support.h"
@@ -790,6 +791,7 @@ jsp_call_stored_procedure (PARSER_CONTEXT *parser, PT_NODE *statement)
 
   /* call sp */
   std::vector <std::reference_wrapper <DB_VALUE>> args;
+  std::string plan;
   cubpl::pl_signature sig;
   bool flag_si_datetime = false;
   error = jsp_make_pl_signature (parser, statement, NULL, sig);
@@ -813,7 +815,10 @@ jsp_call_stored_procedure (PARSER_CONTEXT *parser, PT_NODE *statement)
   if (error == NO_ERROR && locator_get_sig_interrupt () == 0)
     {
       std::vector <DB_VALUE> out_args;
-      error = pl_call (sig, args, out_args, ret_value);
+
+      /* an empty plan means the PL engine takes the call, which is still the common case */
+      (void) pt_plcs_plan_stream (&sig, plan);
+      error = pl_call (sig, plan, args, out_args, ret_value);
       if (error == NO_ERROR)
 	{
 	  for (int i = 0, j = 0; i < sig.arg.arg_size; i++)
