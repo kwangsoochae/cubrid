@@ -6282,6 +6282,21 @@ stx_build_sp_type (THREAD_ENTRY * thread_p, char *ptr, SP_TYPE * sp)
 	}
     }
 
+  ptr = or_unpack_int (ptr, &offset);
+  if (offset == 0)
+    {
+      sp->plcs = NULL;
+    }
+  else
+    {
+      sp->plcs = stx_restore_xasl_node (thread_p, &xasl_unpack_info->packed_xasl[offset]);
+      if (sp->plcs == NULL)
+	{
+	  stx_set_xasl_errcode (thread_p, ER_OUT_OF_VIRTUAL_MEMORY);
+	  return NULL;
+	}
+    }
+
   return ptr;
 }
 

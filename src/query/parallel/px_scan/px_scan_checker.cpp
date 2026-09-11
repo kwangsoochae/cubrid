@@ -182,7 +182,7 @@ namespace parallel_scan
 	break;
       case TYPE_SP:
 	result |= check<is_outptr_list> (arg->value.sp_ptr->args);
-	if (!px_sp_is_parallel_eligible (arg->value.sp_ptr->sig))
+	if (!px_sp_is_parallel_eligible (arg->value.sp_ptr))
 	  {
 	    /* SP not executable in child threads. */
 	    set_flag (result, is_outptr_list ? CANNOT_LIST_MERGE : CANNOT_PARALLEL_SCAN);

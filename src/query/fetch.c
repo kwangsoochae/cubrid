@@ -4610,6 +4610,47 @@ error:
 }
 
 /*
+ * fetch_execute_plcs () - run a procedure the server has a plan for
+ *   return: NO_ERROR or ER_FAILED
+ *   thread_p(in) :
+ *   sp(in)     : the call, whose plcs is the procedure's plan
+ *   vd(in)     : the value descriptor of the statement making the call
+ *
+ * note: the frame is made and taken down here because this is where a call begins and ends.
+ *       Arguments do not reach it yet - nothing numbers a parameter into a slot - so the client
+ *       only builds a plan for a procedure that takes none (pt_plcs_compile_body ()).
+ */
+static int
+fetch_execute_plcs (THREAD_ENTRY * thread_p, SP_TYPE * sp, val_descr * vd)
+{
+  XASL_STATE *xasl_state = vd->xasl_state;
+  PLCS_FRAME *caller, *frame;
+  int error;
+
+  if (xasl_state == NULL)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_XASLNODE, 0);
+      return ER_FAILED;
+    }
+
+  frame = qexec_alloc_plcs_frame (thread_p, sp->plcs->proc.plcs.locals_cnt, xasl_state->plcs_frame);
+  if (frame == NULL)
+    {
+      return ER_FAILED;
+    }
+
+  caller = xasl_state->plcs_frame;
+  xasl_state->plcs_frame = frame;
+  error = qexec_execute_plcs (thread_p, sp->plcs, xasl_state);
+  xasl_state->plcs_frame = caller;
+
+  /* a procedure has no result to give back, and the caller cleared the value before the call */
+  qexec_free_plcs_frame (thread_p, frame);
+
+  return error;
+}
+
+/*
  * fetch_peek_dbval_slow () - full fetch path for every regu_var type; the hot cached-attribute case is
  *                            served by the inline fetch_peek_dbval () wrapper in fetch.h.
  *   return: NO_ERROR or ER_code
@@ -4875,6 +4916,20 @@ fetch_peek_dbval_slow (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_de
 	/* clear any value from a previous iteration */
 	pr_clear_value (regu_var->value.sp_ptr->value);
 	fetch_force_not_const_recursive (*regu_var);
+
+	if (regu_var->value.sp_ptr->plcs != NULL)
+	  {
+	    /* the client could build the procedure's own plan, so the server runs it here instead
+	     * of handing the call to the PL engine. Everything the grammar does not take still
+	     * arrives with a NULL plan and goes the way below. */
+	    error = fetch_execute_plcs (thread_p, regu_var->value.sp_ptr, vd);
+	    if (error != NO_ERROR)
+	      {
+		goto exit_on_error;
+	      }
+	    *peek_dbval = regu_var->value.sp_ptr->value;
+	    break;
+	  }
 
 	if (thread_is_on_trace (thread_p))
 	  {
