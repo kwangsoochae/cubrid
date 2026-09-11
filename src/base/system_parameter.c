@@ -819,6 +819,7 @@ static const char sysprm_ha_conf_file_name[] = "cubrid_ha.conf";
 #define PRM_NAME_PLAN_CACHE_BIND_SENSITIVITY "plan_cache_bind_sensitivity"
 
 #define PRM_NAME_PL_NATIVE_EXECUTION "pl_native_execution"
+#define PRM_NAME_PL_MAX_LOOP_ITERATIONS "pl_max_loop_iterations"
 
 // #endregion 
 
@@ -5553,6 +5554,18 @@ SYSPRM_PARAM prm_Def[] = {
    {false, {.b = false}},
    NULL_SYSPRM_PARAM_VALUE,
    NULL_SYSPRM_PARAM_VALUE,
+   (char *) NULL,
+   (DUP_PRM_FUNC) NULL,
+   (DUP_PRM_FUNC) NULL},
+  {PRM_ID_PL_MAX_LOOP_ITERATIONS,
+   PRM_NAME_PL_MAX_LOOP_ITERATIONS,
+   (PRM_FOR_SERVER | PRM_USER_CHANGE | PRM_HIDDEN),
+   PRM_INTEGER,
+   PRM_CLEAR_DYNAMIC_FLAG,
+   {false, {.i = 2000}},
+   {false, {.i = 2000}},
+   {false, {.i = 1000000}},
+   {false, {.i = 2}},
    (char *) NULL,
    (DUP_PRM_FUNC) NULL,
    (DUP_PRM_FUNC) NULL},

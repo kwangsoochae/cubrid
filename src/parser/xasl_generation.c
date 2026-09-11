@@ -30410,10 +30410,38 @@ pt_plcs_resolve_locals (PARSER_CONTEXT * parser, PT_NODE * block)
  * of a loop must not see what the previous turn left behind.
  */
 
+static REGU_VARIABLE *pt_plcs_expr_to_regu (PARSER_CONTEXT * parser, PT_NODE ** expr);
 static XASL_NODE *pt_to_plcs_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt);
 static XASL_NODE *pt_to_plcs_block (PARSER_CONTEXT * parser, PT_NODE * block);
 static XASL_NODE *pt_to_plcs_stmt_list_block (PARSER_CONTEXT * parser, PT_NODE * list);
 static int pt_plcs_set_children (PARSER_CONTEXT * parser, XASL_NODE * xasl, XASL_NODE ** buf, int cnt);
+
+/*
+ * pt_plcs_expr_to_regu () - type one procedural expression, then lower it
+ *   return: the regu variable, NULL on error
+ *   parser(in) :
+ *   expr(in/out) : the expression; constant folding can replace the node, so the caller's
+ *                  pointer is written back
+ *
+ * note: the type check runs here and not in the resolution pass because folding rewrites the
+ *       tree, and a tree that has been folded is no longer the one a later pass would resolve
+ *       names in. What settles the remaining differences from the Java engine's typing is
+ *       50011; this is what an arithmetic operator needs to have a result domain at all.
+ */
+static REGU_VARIABLE *
+pt_plcs_expr_to_regu (PARSER_CONTEXT * parser, PT_NODE ** expr)
+{
+  PT_NODE *typed;
+
+  typed = pt_semantic_type (parser, *expr, NULL);
+  if (typed == NULL)
+    {
+      return NULL;
+    }
+  *expr = typed;
+
+  return pt_to_regu_variable (parser, typed, UNBOX_AS_VALUE);
+}
 
 /*
  * pt_plcs_set_children () - hand a node the children built for it
@@ -30480,10 +30508,10 @@ pt_plcs_new_node (PLCS_OP op)
  *   return: the node, NULL on error
  *   parser(in) :
  *   slot(in)   : the frame slot written
- *   value(in)  : the expression assigned
+ *   value(in/out) : the expression assigned; typing can replace the node
  */
 static XASL_NODE *
-pt_to_plcs_assign (PARSER_CONTEXT * parser, int slot, PT_NODE * value)
+pt_to_plcs_assign (PARSER_CONTEXT * parser, int slot, PT_NODE ** value)
 {
   XASL_NODE *xasl = pt_plcs_new_node (PLCS_OP_ASSIGN);
 
@@ -30493,7 +30521,7 @@ pt_to_plcs_assign (PARSER_CONTEXT * parser, int slot, PT_NODE * value)
     }
 
   xasl->proc.plcs.target_slot = slot;
-  xasl->proc.plcs.expr = pt_to_regu_variable (parser, value, UNBOX_AS_VALUE);
+  xasl->proc.plcs.expr = pt_plcs_expr_to_regu (parser, value);
   if (xasl->proc.plcs.expr == NULL)
     {
       return NULL;
@@ -30518,7 +30546,7 @@ pt_to_plcs_open_local (PARSER_CONTEXT * parser, PT_NODE * decl)
 
   if (decl->info.sp_stmt.expr != NULL)
     {
-      return pt_to_plcs_assign (parser, name->info.name.plcs_slot, decl->info.sp_stmt.expr);
+      return pt_to_plcs_assign (parser, name->info.name.plcs_slot, &decl->info.sp_stmt.expr);
     }
 
   /* no default: the slot opens as NULL of the declared type, not as the untyped NULL
@@ -30688,7 +30716,7 @@ pt_to_plcs_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt)
       return pt_to_plcs_block (parser, stmt);
 
     case PT_SP_ASSIGN:
-      return pt_to_plcs_assign (parser, stmt->info.sp_stmt.name->info.name.plcs_slot, stmt->info.sp_stmt.expr);
+      return pt_to_plcs_assign (parser, stmt->info.sp_stmt.name->info.name.plcs_slot, &stmt->info.sp_stmt.expr);
 
     case PT_SP_IF:
       xasl = pt_plcs_new_node (PLCS_OP_IF);
@@ -30697,7 +30725,7 @@ pt_to_plcs_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt)
 	  return NULL;
 	}
 
-      xasl->proc.plcs.expr = pt_to_regu_variable (parser, stmt->info.sp_stmt.expr, UNBOX_AS_VALUE);
+      xasl->proc.plcs.expr = pt_plcs_expr_to_regu (parser, &stmt->info.sp_stmt.expr);
       if (xasl->proc.plcs.expr == NULL)
 	{
 	  return NULL;
@@ -30738,7 +30766,7 @@ pt_to_plcs_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt)
 
 	case PT_SP_LOOP_WHILE:
 	  xasl->proc.plcs.flags = PLCS_LOOP_WHILE;
-	  xasl->proc.plcs.expr = pt_to_regu_variable (parser, stmt->info.sp_stmt.expr, UNBOX_AS_VALUE);
+	  xasl->proc.plcs.expr = pt_plcs_expr_to_regu (parser, &stmt->info.sp_stmt.expr);
 	  if (xasl->proc.plcs.expr == NULL)
 	    {
 	      return NULL;
@@ -30753,8 +30781,8 @@ pt_to_plcs_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt)
 	    }
 
 	  xasl->proc.plcs.target_slot = stmt->info.sp_stmt.name->info.name.plcs_slot;
-	  xasl->proc.plcs.expr = pt_to_regu_variable (parser, stmt->info.sp_stmt.expr, UNBOX_AS_VALUE);
-	  xasl->proc.plcs.expr2 = pt_to_regu_variable (parser, stmt->info.sp_stmt.expr2, UNBOX_AS_VALUE);
+	  xasl->proc.plcs.expr = pt_plcs_expr_to_regu (parser, &stmt->info.sp_stmt.expr);
+	  xasl->proc.plcs.expr2 = pt_plcs_expr_to_regu (parser, &stmt->info.sp_stmt.expr2);
 	  if (xasl->proc.plcs.expr == NULL || xasl->proc.plcs.expr2 == NULL)
 	    {
 	      return NULL;

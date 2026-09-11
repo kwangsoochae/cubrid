@@ -148,6 +148,7 @@ extern xasl_state *qexec_deep_copy_xasl_state (THREAD_ENTRY * thread_p, xasl_sta
 extern void qexec_free_xasl_state (THREAD_ENTRY * thread_p, xasl_state * xasl_state);
 extern PLCS_FRAME *qexec_alloc_plcs_frame (THREAD_ENTRY * thread_p, int locals_cnt, PLCS_FRAME * caller);
 extern void qexec_free_plcs_frame (THREAD_ENTRY * thread_p, PLCS_FRAME * frame);
+extern int qexec_execute_plcs (THREAD_ENTRY * thread_p, xasl_node * xasl, xasl_state * xstate);
 #if defined(CUBRID_DEBUG)
 extern void get_xasl_dumper_linked_in ();
 #endif
