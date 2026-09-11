@@ -5545,6 +5545,10 @@ xts_pack_regu_variable_value (char *ptr, const REGU_VARIABLE * regu_var)
       ptr = or_pack_int (ptr, regu_var->value.val_pos);
       break;
 
+    case TYPE_PLCS_SLOT:
+      ptr = or_pack_int (ptr, regu_var->value.plcs_slot);
+      break;
+
     case TYPE_OID:
     case TYPE_CLASSOID:
       break;
@@ -7485,6 +7489,10 @@ xts_get_regu_variable_value_size (const REGU_VARIABLE * regu_var)
 
     case TYPE_POS_VALUE:
       size = OR_INT_SIZE;	/* val_pos */
+      break;
+
+    case TYPE_PLCS_SLOT:
+      size = OR_INT_SIZE;	/* plcs_slot */
       break;
 
     case TYPE_OID:

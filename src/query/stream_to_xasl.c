@@ -5870,6 +5870,10 @@ stx_unpack_regu_variable_value (THREAD_ENTRY * thread_p, char *ptr, REGU_VARIABL
       ptr = or_unpack_int (ptr, &regu_var->value.val_pos);
       break;
 
+    case TYPE_PLCS_SLOT:
+      ptr = or_unpack_int (ptr, &regu_var->value.plcs_slot);
+      break;
+
     case TYPE_OID:
     case TYPE_CLASSOID:
       break;
