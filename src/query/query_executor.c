@@ -29054,6 +29054,15 @@ qexec_execute_plcs_stmt (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE *
     case PLCS_OP_LOOP:
       return qexec_execute_plcs_loop (thread_p, xasl, xasl_state);
 
+    case PLCS_OP_CALL:
+      {
+	DB_VALUE *ignored = NULL;
+
+	/* the expression is a TYPE_SP regu variable, so fetching it is the call. A procedure
+	 * has no value to give back and the fetch has already cleared the one it holds. */
+	return qexec_plcs_fetch_value (thread_p, xasl->proc.plcs.expr, xasl_state, &ignored);
+      }
+
     default:
       /* the grammar builds no other op yet, and one arriving here means the plan and this
        * executor disagree rather than that the procedure did something */
