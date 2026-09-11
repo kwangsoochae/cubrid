@@ -121,6 +121,15 @@ regu_xasl_proc_init (xasl_node &node, PROC_TYPE type)
       node.proc.cte.non_recursive_part = NULL;
       break;
 
+    case PLCS_PROC:
+      node.proc.plcs.op = PLCS_OP_BLOCK;
+      node.proc.plcs.flags = 0;
+      node.proc.plcs.expr = NULL;
+      node.proc.plcs.target_slot = -1;
+      node.proc.plcs.children = NULL;
+      node.proc.plcs.children_cnt = 0;
+      break;
+
     default:
       /* BUILD_SCHEMA_PROC */
       break;

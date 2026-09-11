@@ -203,7 +203,8 @@ typedef enum
   DO_PROC,
   MERGE_PROC,
   BUILD_SCHEMA_PROC,
-  CTE_PROC
+  CTE_PROC,
+  PLCS_PROC
 } PROC_TYPE;
 
 typedef struct qproc_db_value_list *QPROC_DB_VALUE_LIST;	/* TODO */
@@ -488,6 +489,35 @@ struct cte_proc_node
 {
   XASL_NODE *non_recursive_part;	/* non recursive part of the CTE */
   XASL_NODE *recursive_part;	/* recursive part of the CTE */
+};
+
+/* A PL/CSQL statement. One node type carries every statement kind, told apart by op.
+ * Procedural payloads are small and alike, where the relational ones are not, and a
+ * type of its own costs about 85 reference sites - counted on CTE_PROC. */
+typedef enum
+{
+  PLCS_OP_BLOCK,		/* declarations and body */
+  PLCS_OP_ASSIGN,
+  PLCS_OP_IF,
+  PLCS_OP_CASE,
+  PLCS_OP_LOOP,			/* basic, while and the FOR forms, told apart by flags */
+  PLCS_OP_JUMP,			/* EXIT, CONTINUE, RETURN */
+  PLCS_OP_RAISE,		/* RAISE, RAISE_APPLICATION_ERROR */
+  PLCS_OP_CURSOR,		/* OPEN, FETCH, CLOSE, OPEN FOR */
+  PLCS_OP_CALL			/* procedure call */
+} PLCS_OP;
+
+typedef struct plcs_proc_node PLCS_PROC_NODE;
+struct plcs_proc_node
+{
+  PLCS_OP op;
+  int flags;			/* op-specific: which loop form, which jump */
+  REGU_VARIABLE *expr;		/* condition, assigned value, RAISE argument */
+  int target_slot;		/* frame slot an assignment writes, -1 when there is none */
+  /* An SQL statement inside a procedure is a plain XASL node, not a kind of its own, and
+   * hangs here as a child. */
+  XASL_NODE **children;
+  int children_cnt;
 };
 
 /*
@@ -1201,6 +1231,7 @@ struct xasl_node
     CONNECTBY_PROC_NODE connect_by;	/* CONNECTBY_PROC */
     MERGE_PROC_NODE merge;	/* MERGE_PROC */
     CTE_PROC_NODE cte;		/* CTE_PROC */
+    PLCS_PROC_NODE plcs;	/* PLCS_PROC */
   } proc;
 
   /* XASL cache related information */
