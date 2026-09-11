@@ -78,6 +78,7 @@ static PT_NODE *sp_make_data_type (PT_TYPE_ENUM type, int precision, int scale);
 
 %type <node> block decl_list decl_list_opt decl stmt_list stmt if_stmt else_part_opt loop_stmt
 %type <node> assign_stmt block_stmt null_stmt expr expr_list_opt type_spec
+%type <node> call_stmt sp_name arg_list_opt arg_list
 %type <number> constant_opt reverse_opt
 
 %left OR_
@@ -206,10 +207,78 @@ stmt_list
 
 stmt
 	: assign_stmt
+	| call_stmt
 	| if_stmt
 	| loop_stmt
 	| block_stmt
 	| null_stmt
+	;
+
+/* The node under it is a PT_METHOD_CALL, the same one the SQL grammar builds for CALL, so
+ * that pt_stored_procedure_to_regu () can lower it without knowing where it came from. */
+call_stmt
+	: sp_name '(' arg_list_opt ')' ';'
+		{
+		  PT_NODE *node = sp_make_stmt (PT_SP_CALL);
+		  PT_NODE *call = parser_new_node (sp_Parser, PT_METHOD_CALL);
+
+		  if (node != NULL && call != NULL)
+		    {
+		      call->info.method_call.method_name = $1;
+		      call->info.method_call.arg_list = $3;
+		      call->info.method_call.call_or_expr = PT_IS_CALL_STMT;
+		      node->info.sp_stmt.expr = call;
+		    }
+		  $$ = node;
+		}
+	;
+
+sp_name
+	: IDENT
+		{
+		  PT_NODE *name = pt_name (sp_Parser, $1);
+
+		  if (name != NULL)
+		    {
+		      PT_NAME_INFO_SET_FLAG (name, PT_NAME_INFO_USER_SPECIFIED);
+		    }
+		  $$ = name;
+		}
+	| IDENT '.' IDENT
+		{
+		  /* the qualifier goes to resolved and the routine to original, which is how the
+		   * SQL grammar writes a dotted name (object_name) */
+		  PT_NODE *name = pt_name (sp_Parser, $3);
+
+		  if (name != NULL)
+		    {
+		      name->info.name.resolved = pt_append_string (sp_Parser, NULL, $1);
+		      PT_NAME_INFO_SET_FLAG (name, PT_NAME_INFO_USER_SPECIFIED);
+		    }
+		  $$ = name;
+		}
+	;
+
+arg_list_opt
+	: /* empty */
+		{
+		  $$ = NULL;
+		}
+	| arg_list
+		{
+		  $$ = $1;
+		}
+	;
+
+arg_list
+	: expr
+		{
+		  $$ = $1;
+		}
+	| arg_list ',' expr
+		{
+		  $$ = parser_append_node ($3, $1);
+		}
 	;
 
 assign_stmt

@@ -3394,6 +3394,7 @@ typedef enum
   PT_SP_ASSIGN,
   PT_SP_IF,			/* ELSIF is a nested IF in the else branch */
   PT_SP_LOOP,
+  PT_SP_CALL,			/* a call to a procedure, qualified or not */
   PT_SP_NULL_STMT		/* the NULL statement */
 } PT_SP_STMT_OP;
 
@@ -3411,7 +3412,9 @@ struct pt_sp_stmt_info
   PT_SP_STMT_OP op;
   int flags;
   PT_NODE *name;		/* PT_NAME - assignment target, declared name, loop variable */
-  PT_NODE *expr;		/* condition, assigned value, declaration default, lower bound */
+  PT_NODE *expr;		/* condition, assigned value, declaration default, lower bound.
+				 * CALL: the PT_METHOD_CALL, so that the SQL side's own lowering
+				 * of a stored procedure call can be reused whole */
   PT_NODE *expr2;		/* upper bound of a FOR range */
   PT_NODE *decl_list;		/* BLOCK: the declarations */
   PT_NODE *body;		/* BLOCK, LOOP: statements. IF: the then branch */

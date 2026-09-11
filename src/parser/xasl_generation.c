@@ -30329,6 +30329,15 @@ pt_plcs_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCS_SCOP
 	    }
 	  break;
 
+	case PT_SP_CALL:
+	  /* only the arguments carry names; the routine's own name is resolved against the
+	   * catalog when the call is lowered, not against the frame */
+	  if (pt_plcs_resolve_expr (parser, stmt->info.sp_stmt.expr->info.method_call.arg_list, scope) != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
+	  break;
+
 	case PT_SP_NULL_STMT:
 	  break;
 
@@ -30416,6 +30425,7 @@ pt_plcs_resolve_locals (PARSER_CONTEXT * parser, PT_NODE * block)
  */
 
 static REGU_VARIABLE *pt_plcs_expr_to_regu (PARSER_CONTEXT * parser, PT_NODE ** expr);
+static bool pt_plcs_callee_is_builtin (const REGU_VARIABLE * regu);
 static XASL_NODE *pt_to_plcs_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt);
 static XASL_NODE *pt_to_plcs_block (PARSER_CONTEXT * parser, PT_NODE * block);
 static XASL_NODE *pt_to_plcs_stmt_list_block (PARSER_CONTEXT * parser, PT_NODE * list);
@@ -30446,6 +30456,32 @@ pt_plcs_expr_to_regu (PARSER_CONTEXT * parser, PT_NODE ** expr)
   *expr = typed;
 
   return pt_to_regu_variable (parser, typed, UNBOX_AS_VALUE);
+}
+
+/*
+ * pt_plcs_callee_is_builtin () - is the call one of the routines the engine ships?
+ *   return: true for a builtin, false for anything the user wrote
+ *   regu(in) : the TYPE_SP regu variable of the call
+ *
+ * note: a builtin is told by where its code lives. The engine registers DBMS_OUTPUT and the
+ *       rest with a target class under com.cubrid.plcsql.builtin (sp_catalog.cpp), and no
+ *       user-written routine can claim that name - CREATE PROCEDURE names a Java class only
+ *       through LANGUAGE JAVA, and those are not PL/CSQL.
+ */
+static bool
+pt_plcs_callee_is_builtin (const REGU_VARIABLE * regu)
+{
+  static const char PREFIX[] = "com.cubrid.plcsql.builtin.";
+  const char *target;
+
+  if (regu == NULL || regu->type != TYPE_SP || regu->value.sp_ptr == NULL || regu->value.sp_ptr->sig == NULL)
+    {
+      return false;
+    }
+
+  target = regu->value.sp_ptr->sig->ext.sp.target_class_name;
+
+  return target != NULL && strncmp (target, PREFIX, sizeof (PREFIX) - 1) == 0;
 }
 
 /*
@@ -30722,6 +30758,29 @@ pt_to_plcs_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt)
 
     case PT_SP_ASSIGN:
       return pt_to_plcs_assign (parser, stmt->info.sp_stmt.name->info.name.plcs_slot, &stmt->info.sp_stmt.expr);
+
+    case PT_SP_CALL:
+      xasl = pt_plcs_new_node (PLCS_OP_CALL);
+      if (xasl == NULL)
+	{
+	  return NULL;
+	}
+
+      /* a TYPE_SP regu variable is already "call this routine with these arguments", and
+       * fetching one is already how the server runs a stored procedure, so the executor has
+       * nothing of its own to do for a call */
+      xasl->proc.plcs.expr = pt_stored_procedure_to_regu (parser, stmt->info.sp_stmt.expr);
+      if (xasl->proc.plcs.expr == NULL)
+	{
+	  return NULL;
+	}
+      if (!pt_plcs_callee_is_builtin (xasl->proc.plcs.expr))
+	{
+	  /* a call to something else needs a frame of its own and a depth to count, which is
+	   * 50005's remaining half. Refusing here sends the whole procedure to the PL engine. */
+	  return NULL;
+	}
+      return xasl;
 
     case PT_SP_IF:
       xasl = pt_plcs_new_node (PLCS_OP_IF);
