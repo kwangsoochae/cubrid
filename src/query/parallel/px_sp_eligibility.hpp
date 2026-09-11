@@ -30,11 +30,21 @@
 #define _PX_SP_ELIGIBILITY_HPP_
 
 #include "pl_signature.hpp"
+#include "xasl_sp.hpp"
 
 inline bool
 px_sp_is_parallel_eligible (const cubpl::pl_signature *sig)
 {
   return sig != nullptr && sig->is_parallel_enabled;
+}
+
+inline bool
+px_sp_is_parallel_eligible (const cubxasl::sp_node *sp)
+{
+  /* A procedure the server runs itself reads its locals through the frame on XASL_STATE, and a
+   * px worker has no frame of its own. What PARALLEL_ENABLE declares is about the procedure's
+   * body, so it says nothing about that. */
+  return sp != nullptr && sp->plcs == nullptr && px_sp_is_parallel_eligible (sp->sig);
 }
 
 #endif /* _PX_SP_ELIGIBILITY_HPP_ */

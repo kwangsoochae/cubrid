@@ -5891,6 +5891,13 @@ xts_process_sp_type (char *ptr, const SP_TYPE * sp)
     }
   ptr = or_pack_int (ptr, offset);
 
+  offset = xts_save_xasl_node (sp->plcs);
+  if (offset == ER_FAILED)
+    {
+      return NULL;
+    }
+  ptr = or_pack_int (ptr, offset);
+
   return ptr;
 }
 
@@ -7653,7 +7660,8 @@ xts_sizeof_sp_type (const SP_TYPE * sp)
 
   size += (PTR_SIZE		/* value */
 	   + PTR_SIZE		/* sig */
-	   + PTR_SIZE);		/* args */
+	   + PTR_SIZE		/* args */
+	   + PTR_SIZE);		/* plcs */
 
   return size;
 }

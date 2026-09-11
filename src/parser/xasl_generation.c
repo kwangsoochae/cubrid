@@ -72,6 +72,8 @@
 #include "sp_catalog.hpp"
 #include "px_scan_checker.hpp"
 #include "px_query_checker.hpp"
+#include "sp_parse.h"
+#include "sp_constants.hpp"
 #if defined(WINDOWS)
 #include "wintcp.h"
 #endif /* WINDOWS */
@@ -6939,6 +6941,8 @@ pt_make_function (PARSER_CONTEXT * parser, int function_code, const REGU_VARIABL
  *   function(in/out):
  *
  */
+static XASL_NODE *pt_plcs_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig);
+
 static REGU_VARIABLE *
 pt_stored_procedure_to_regu (PARSER_CONTEXT * parser, PT_NODE * node)
 {
@@ -6980,6 +6984,7 @@ pt_stored_procedure_to_regu (PARSER_CONTEXT * parser, PT_NODE * node)
 
       regu_dbval_type_init (sp->value, result_type);
       sp->args = pt_to_regu_variable_list (parser, node->info.method_call.arg_list, UNBOX_AS_VALUE, NULL, NULL);
+      sp->plcs = pt_plcs_compile_body (parser, sp->sig);
     }
 
   regu->type = TYPE_SP;
@@ -30838,6 +30843,85 @@ pt_to_plcs_xasl (PARSER_CONTEXT * parser, PT_NODE * block)
     }
 
   xasl->proc.plcs.locals_cnt = locals_cnt;
+
+  return xasl;
+}
+
+/*
+ * pt_plcs_compile_body () - build the procedure's own plan, if this build can
+ *   return: the plan, NULL when the call stays with the PL engine
+ *   parser(in) :
+ *   sig(in)    : the signature of the call being lowered
+ *
+ * note: a NULL return is not an error and leaves nothing on the parser. Most procedures still
+ *       have to go to the PL engine - the grammar takes only part of the language yet - and a
+ *       call that cannot be built here simply goes the way it went before.
+ */
+static XASL_NODE *
+pt_plcs_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig)
+{
+  PARSER_CONTEXT *body_parser;
+  PT_NODE *block;
+  XASL_NODE *xasl = NULL;
+  MOP code_mop;
+  DB_VALUE scode;
+  const char *text;
+  int save;
+
+  if (!prm_get_bool_value (PRM_ID_PL_NATIVE_EXECUTION) || sig == NULL || sig->type != PL_TYPE_PLCSQL)
+    {
+      return NULL;
+    }
+
+  /* arguments live in the frame's slots and nothing numbers them yet, and a result comes back
+   * through RETURN, which the grammar does not take yet - so only a procedure called with
+   * neither can run here */
+  if (sig->arg.arg_size > 0 || (DB_TYPE) sig->result_type != DB_TYPE_NULL || OID_ISNULL (&sig->ext.sp.code_oid))
+    {
+      return NULL;
+    }
+
+  db_make_null (&scode);
+  AU_SAVE_AND_DISABLE (save);
+  code_mop = ws_mop (&sig->ext.sp.code_oid, NULL);
+  if (code_mop == NULL || db_get (code_mop, SP_CODE_ATTR_SCODE, &scode) != NO_ERROR)
+    {
+      AU_RESTORE (save);
+      er_clear ();
+      return NULL;
+    }
+  AU_RESTORE (save);
+
+  text = db_get_string (&scode);
+  if (text == NULL)
+    {
+      pr_clear_value (&scode);
+      return NULL;
+    }
+
+  /* a parser of its own: a body the grammar refuses leaves errors behind, and those must not
+   * reach the statement being compiled */
+  body_parser = parser_create_parser ();
+  if (body_parser == NULL)
+    {
+      pr_clear_value (&scode);
+      return NULL;
+    }
+
+  block = sp_parse_body (body_parser, text);
+  pr_clear_value (&scode);
+
+  if (block != NULL && !pt_has_error (body_parser))
+    {
+      xasl = pt_to_plcs_xasl (body_parser, block);
+      if (pt_has_error (body_parser))
+	{
+	  xasl = NULL;
+	}
+    }
+
+  er_clear ();
+  parser_free_parser (body_parser);
 
   return xasl;
 }

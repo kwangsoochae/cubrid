@@ -30,6 +30,7 @@
 // forward definitions
 struct regu_variable_list_node;
 class regu_variable_node;
+struct xasl_node;
 
 namespace cubxasl
 {
@@ -38,6 +39,9 @@ namespace cubxasl
     cubpl::pl_signature *sig;
     regu_variable_list_node *args;
     DB_VALUE *value; // return value
+    /* The procedure's own plan, when the client could build one. NULL means this call goes to
+     * the PL engine, which is still the only way to run everything the grammar does not take. */
+    xasl_node *plcs;
   };
 };
 
