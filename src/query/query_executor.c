@@ -28931,6 +28931,7 @@ qexec_plcs_assign (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_
 {
   PLCS_FRAME *frame = xasl_state->plcs_frame;
   DB_VALUE *value = NULL;
+  DB_VALUE copy;
   int slot = xasl->proc.plcs.target_slot;
 
   assert (frame != NULL && slot >= 0 && slot < frame->locals_cnt);
@@ -28941,12 +28942,17 @@ qexec_plcs_assign (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_
     }
 
   /* the peeked value points into the expression's own storage, which the next evaluation
-   * overwrites, so the slot takes a copy of its own */
-  pr_clear_value (&frame->locals[slot]);
-  if (pr_clone_value (value, &frame->locals[slot]) != NO_ERROR)
+   * overwrites, so the slot takes a copy of its own. The copy is made before the slot is
+   * cleared because the two can be the same place - a := a, and the assignment a parameter
+   * turns into - and clearing first would leave nothing to copy. */
+  db_make_null (&copy);
+  if (pr_clone_value (value, &copy) != NO_ERROR)
     {
       return ER_FAILED;
     }
+
+  pr_clear_value (&frame->locals[slot]);
+  frame->locals[slot] = copy;
 
   return NO_ERROR;
 }

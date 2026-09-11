@@ -70,6 +70,7 @@ static PT_NODE *sp_make_data_type (PT_TYPE_ENUM type, int precision, int scale);
 }
 
 %token BEGIN_ CONSTANT_ DECLARE_ ELSE_ ELSIF_ END_ FOR_ IF_ IN_ LOOP_ NOT_ NULL_ REVERSE_ THEN_ WHILE_
+%token AS_ AUTHID_ CREATE_ FUNCTION_ OUT_ PROCEDURE_ REPLACE_ RETURN_
 %token AND_ IS_ MOD_ OR_
 %token ASSIGN DOTDOT CONCAT NE GE LE
 
@@ -79,6 +80,7 @@ static PT_NODE *sp_make_data_type (PT_TYPE_ENUM type, int precision, int scale);
 %type <node> block decl_list decl_list_opt decl stmt_list stmt if_stmt else_part_opt loop_stmt
 %type <node> assign_stmt block_stmt null_stmt expr expr_list_opt type_spec
 %type <node> call_stmt sp_name arg_list_opt arg_list
+%type <node> routine param_list_opt param_list param
 %type <number> constant_opt reverse_opt
 
 %left OR_
@@ -94,10 +96,120 @@ static PT_NODE *sp_make_data_type (PT_TYPE_ENUM type, int precision, int scale);
 
 %%
 
+/* Either a bare body - the text after AS, which is what the catalog used to be cut down to -
+ * or the whole routine as the catalog holds it. The first token tells them apart. Reading the
+ * header is what gives a parameter its declared type, precision and all; the signature carries
+ * only a DB_TYPE and the catalog's argument row no more than that. */
 sp_unit
 	: block
 		{
 		  sp_Result = $1;
+		}
+	| routine
+		{
+		  sp_Result = $1;
+		}
+	;
+
+routine
+	: CREATE_ or_replace_opt routine_kind sp_name param_list_opt return_opt authid_opt as_or_is block
+		{
+		  PT_NODE *node = $9;
+
+		  if (node != NULL)
+		    {
+		      node->info.sp_stmt.params = $5;
+		    }
+		  $$ = node;
+		}
+	;
+
+or_replace_opt
+	: /* empty */
+	| OR_ REPLACE_
+	;
+
+routine_kind
+	: PROCEDURE_
+	| FUNCTION_
+	;
+
+/* The return type is read and dropped: what a function gives back is 50005's business, and
+ * nothing here is built for one yet. */
+return_opt
+	: /* empty */
+	| RETURN_ type_spec
+		{
+		  parser_free_tree (sp_Parser, $2);
+		}
+	;
+
+/* OWNER and CALLER are taken as identifiers rather than made keywords - they are ordinary
+ * words and a body is free to name a variable either of them. */
+authid_opt
+	: /* empty */
+	| AUTHID_ IDENT
+	;
+
+as_or_is
+	: AS_
+	| IS_
+	;
+
+param_list_opt
+	: /* empty */
+		{
+		  $$ = NULL;
+		}
+	| '(' ')'
+		{
+		  $$ = NULL;
+		}
+	| '(' param_list ')'
+		{
+		  $$ = $2;
+		}
+	;
+
+param_list
+	: param
+		{
+		  $$ = $1;
+		}
+	| param_list ',' param
+		{
+		  $$ = parser_append_node ($3, $1);
+		}
+	;
+
+/* The mode and a default are read and dropped. A parameter that is not IN, and one a call may
+ * leave out, are not run here yet - what is wanted from the header today is the declared type. */
+param
+	: IDENT param_mode_opt type_spec param_default_opt
+		{
+		  PT_NODE *name = pt_name (sp_Parser, $1);
+
+		  if (name != NULL)
+		    {
+		      name->data_type = $3;
+		      name->type_enum = ($3 != NULL) ? $3->type_enum : PT_TYPE_NONE;
+		    }
+		  $$ = name;
+		}
+	;
+
+param_mode_opt
+	: /* empty */
+	| IN_
+	| OUT_
+	| IN_ OUT_
+	;
+
+param_default_opt
+	: /* empty */
+	| ASSIGN expr
+		{
+		  parser_free_tree (sp_Parser, $2);
 		}
 	;
 
