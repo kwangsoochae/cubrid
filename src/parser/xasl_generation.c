@@ -30603,15 +30603,20 @@ pt_to_plcs_assign (PARSER_CONTEXT * parser, int slot, PT_NODE ** value, PT_NODE 
   domain = (target != NULL) ? pt_xasl_node_to_domain (parser, target) : NULL;
   if (domain != NULL && TP_DOMAIN_TYPE (domain) != DB_TYPE_VARIABLE && xasl->proc.plcs.expr->domain != domain)
     {
-      REGU_VARIABLE *cast = pt_make_regu_arith (NULL, xasl->proc.plcs.expr, NULL, T_CAST, domain);
+      /* T_CAST_WRAP with STRICT_TYPE_CAST is the pair that refuses rather than forces: it goes
+       * through tp_value_cast (), where a value the type cannot hold is an error. Plain T_CAST
+       * calls tp_value_cast_force (), which truncates a string to the declared length - and a
+       * silent truncation is not what a declaration means here. */
+      REGU_VARIABLE *cast = pt_make_regu_arith (NULL, xasl->proc.plcs.expr, NULL, T_CAST_WRAP, domain);
 
       if (cast == NULL)
 	{
 	  return NULL;
 	}
-      /* T_CAST reads the target type off the regu variable, not off the arith, and
-       * pt_make_regu_arith () only fills the latter */
+      /* the operator reads its target type off the regu variable, and pt_make_regu_arith ()
+       * fills only the arith */
       cast->domain = domain;
+      REGU_VARIABLE_SET_FLAG (cast, REGU_VARIABLE_STRICT_TYPE_CAST);
       xasl->proc.plcs.expr = cast;
     }
 
