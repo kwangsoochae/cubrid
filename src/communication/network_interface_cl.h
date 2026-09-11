@@ -400,7 +400,9 @@ extern int flashback_get_loginfo (int trid, char *user, OID * classlist, int num
 /* PL/CSQL */
 EXPORT_IMPORT extern int plcsql_transfer_file (const PLCSQL_COMPILE_REQUEST & compile_request,
 					       PLCSQL_COMPILE_RESPONSE & compile_response);
-EXPORT_IMPORT extern int pl_call (const cubpl::pl_signature & sig,
+/* plan: the procedure's own XASL stream when the client could build one, empty otherwise. The
+ * server runs it itself in that case instead of handing the call to the PL engine. */
+EXPORT_IMPORT extern int pl_call (const cubpl::pl_signature & sig, const std::string & plan,
 				  const std::vector < std::reference_wrapper < DB_VALUE >> &args,
 				  std::vector < DB_VALUE > &out_args, DB_VALUE & result);
 

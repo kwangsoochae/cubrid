@@ -75,6 +75,7 @@
 #include "sp_parse.h"
 #include "sp_constants.hpp"
 #include "object_accessor.h"
+#include "xasl_to_stream.h"
 #if defined(WINDOWS)
 #include "wintcp.h"
 #endif /* WINDOWS */
@@ -30573,11 +30574,19 @@ pt_plcs_new_node (PLCS_OP op)
  *   parser(in) :
  *   slot(in)   : the frame slot written
  *   value(in/out) : the expression assigned; typing can replace the node
+ *   target(in) : the declared name of what is written, NULL when there is nothing to coerce to
+ *
+ * note: the value is cast to the declared type rather than stored as it came out. That is where
+ *       the language's checks live - a number past the type's range and a string past its length
+ *       are errors, not truncations - and where the type that later prints the value is settled.
+ *       T_CAST is the operator the SQL side coerces with, so the checks and the messages are the
+ *       ones already in use.
  */
 static XASL_NODE *
-pt_to_plcs_assign (PARSER_CONTEXT * parser, int slot, PT_NODE ** value)
+pt_to_plcs_assign (PARSER_CONTEXT * parser, int slot, PT_NODE ** value, PT_NODE * target)
 {
   XASL_NODE *xasl = pt_plcs_new_node (PLCS_OP_ASSIGN);
+  TP_DOMAIN *domain;
 
   if (xasl == NULL)
     {
@@ -30589,6 +30598,21 @@ pt_to_plcs_assign (PARSER_CONTEXT * parser, int slot, PT_NODE ** value)
   if (xasl->proc.plcs.expr == NULL)
     {
       return NULL;
+    }
+
+  domain = (target != NULL) ? pt_xasl_node_to_domain (parser, target) : NULL;
+  if (domain != NULL && TP_DOMAIN_TYPE (domain) != DB_TYPE_VARIABLE && xasl->proc.plcs.expr->domain != domain)
+    {
+      REGU_VARIABLE *cast = pt_make_regu_arith (NULL, xasl->proc.plcs.expr, NULL, T_CAST, domain);
+
+      if (cast == NULL)
+	{
+	  return NULL;
+	}
+      /* T_CAST reads the target type off the regu variable, not off the arith, and
+       * pt_make_regu_arith () only fills the latter */
+      cast->domain = domain;
+      xasl->proc.plcs.expr = cast;
     }
 
   return xasl;
@@ -30610,7 +30634,7 @@ pt_to_plcs_open_local (PARSER_CONTEXT * parser, PT_NODE * decl)
 
   if (decl->info.sp_stmt.expr != NULL)
     {
-      return pt_to_plcs_assign (parser, name->info.name.plcs_slot, &decl->info.sp_stmt.expr);
+      return pt_to_plcs_assign (parser, name->info.name.plcs_slot, &decl->info.sp_stmt.expr, name);
     }
 
   /* no default: the slot opens as NULL of the declared type, not as the untyped NULL
@@ -30772,6 +30796,7 @@ static XASL_NODE *
 pt_to_plcs_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt)
 {
   XASL_NODE *xasl, *buf[2];
+  PT_NODE *call;
   int form;
 
   switch (stmt->info.sp_stmt.op)
@@ -30780,7 +30805,8 @@ pt_to_plcs_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt)
       return pt_to_plcs_block (parser, stmt);
 
     case PT_SP_ASSIGN:
-      return pt_to_plcs_assign (parser, stmt->info.sp_stmt.name->info.name.plcs_slot, &stmt->info.sp_stmt.expr);
+      return pt_to_plcs_assign (parser, stmt->info.sp_stmt.name->info.name.plcs_slot, &stmt->info.sp_stmt.expr,
+				stmt->info.sp_stmt.name);
 
     case PT_SP_CALL:
       xasl = pt_plcs_new_node (PLCS_OP_CALL);
@@ -30789,10 +30815,24 @@ pt_to_plcs_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt)
 	  return NULL;
 	}
 
+      /* the arguments are typed here for the same reason an assignment's value is: nothing
+       * settles a type for these trees, and an untyped concatenation or arithmetic yields NULL.
+       * That is invisible at a call - DBMS_OUTPUT.PUT_LINE drops a null line rather than
+       * complaining - so it has to be done before the call is lowered, not noticed after. */
+      call = stmt->info.sp_stmt.expr;
+      if (call->info.method_call.arg_list != NULL)
+	{
+	  call->info.method_call.arg_list = pt_semantic_type (parser, call->info.method_call.arg_list, NULL);
+	  if (call->info.method_call.arg_list == NULL)
+	    {
+	      return NULL;
+	    }
+	}
+
       /* a TYPE_SP regu variable is already "call this routine with these arguments", and
        * fetching one is already how the server runs a stored procedure, so the executor has
        * nothing of its own to do for a call */
-      xasl->proc.plcs.expr = pt_stored_procedure_to_regu (parser, stmt->info.sp_stmt.expr);
+      xasl->proc.plcs.expr = pt_stored_procedure_to_regu (parser, call);
       if (xasl->proc.plcs.expr == NULL)
 	{
 	  return NULL;
@@ -30931,6 +30971,79 @@ pt_to_plcs_xasl (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params)
 }
 
 /*
+ * pt_plcs_body_of () - where the body starts inside a stored routine's source
+ *   return: the first character after the header's AS or IS, NULL when there is none
+ *   scode(in) : what the catalog holds, which is the whole CREATE statement
+ *
+ * note: sp_parse_body () starts at the declarations, so the header has to be stepped over, and
+ *       the header is longer than the name and the parameters - AUTHID sits there too. It ends
+ *       at the AS or IS that no parenthesis encloses. A string or a comment can hold either
+ *       word, so those are stepped over rather than searched through.
+ */
+static const char *
+pt_plcs_body_of (const char *scode)
+{
+  const char *p = scode;
+  int depth = 0;
+
+  while (*p != '\0')
+    {
+      if (*p == '\'')
+	{
+	  for (p++; *p != '\0'; p++)
+	    {
+	      if (*p == '\'')
+		{
+		  if (p[1] != '\'')
+		    {
+		      break;
+		    }
+		  p++;
+		}
+	    }
+	}
+      else if (p[0] == '-' && p[1] == '-')
+	{
+	  while (*p != '\0' && *p != '\n')
+	    {
+	      p++;
+	    }
+	  continue;
+	}
+      else if (p[0] == '/' && p[1] == '*')
+	{
+	  for (p += 2; *p != '\0' && !(p[0] == '*' && p[1] == '/'); p++)
+	    ;
+	  if (*p != '\0')
+	    {
+	      p++;
+	    }
+	}
+      else if (*p == '(')
+	{
+	  depth++;
+	}
+      else if (*p == ')')
+	{
+	  depth--;
+	}
+      else if (depth == 0 && (p == scode || !char_isalnum (p[-1])) && p[-1] != '_'
+	       && (char_tolower (p[0]) == 'a' || char_tolower (p[0]) == 'i') && char_tolower (p[1]) == 's'
+	       && !char_isalnum (p[2]) && p[2] != '_')
+	{
+	  return p + 2;
+	}
+
+      if (*p != '\0')
+	{
+	  p++;
+	}
+    }
+
+  return NULL;
+}
+
+/*
  * pt_plcs_parameters () - the procedure's parameters, as names the resolution pass can bind
  *   return: a PT_NAME list in declared order, NULL when the routine takes none or on error
  *   parser(in) :
@@ -31016,6 +31129,59 @@ give_up:
  *       have to go to the PL engine - the grammar takes only part of the language yet - and a
  *       call that cannot be built here simply goes the way it went before.
  */
+/*
+ * pt_plcs_plan_stream () - the procedure's plan as a stream, for a CALL to carry to the server
+ *   return: NO_ERROR; the stream is empty when this build cannot run the procedure natively
+ *   sig(in)    : the signature of the call
+ *   plan(out)  : the packed plan, empty when the call stays with the PL engine
+ *
+ * note: a CALL does not go through query compilation, so there is no plan for the procedure to
+ *       ride along on and nothing has opened the packing buffer. Both are done here.
+ */
+int
+pt_plcs_plan_stream (const cubpl::pl_signature * sig, std::string & plan)
+{
+  PARSER_CONTEXT *parser;
+  XASL_NODE *xasl;
+  XASL_STREAM stream;
+
+  plan.clear ();
+
+  parser = parser_create_parser ();
+  if (parser == NULL)
+    {
+      return ER_FAILED;
+    }
+
+  pt_enter_packing_buf ();
+
+  xasl = pt_plcs_compile_body (parser, sig);
+  if (xasl != NULL)
+    {
+      memset (&stream, 0, sizeof (stream));
+      if (xts_map_xasl_to_stream (xasl, &stream) == NO_ERROR && stream.buffer != NULL)
+	{
+	  plan.assign (stream.buffer, (size_t) stream.buffer_size);
+	}
+      if (stream.buffer != NULL)
+	{
+	  free_and_init (stream.buffer);
+	}
+    }
+
+  pt_exit_packing_buf ();
+  er_clear ();
+  parser_free_parser (parser);
+
+  return NO_ERROR;
+}
+
+/* Depth of pt_plcs_compile_body (). A call inside a body being compiled gets no plan of its
+ * own: only builtins may be called natively and those have no PL/CSQL body, and without this a
+ * procedure that calls itself would compile forever - pt_stored_procedure_to_regu () lowers the
+ * call, which compiles the callee, which lowers the call again. */
+static int pt_Plcs_compile_depth = 0;
+
 static XASL_NODE *
 pt_plcs_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig)
 {
@@ -31028,6 +31194,11 @@ pt_plcs_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig)
   int save;
 
   if (!prm_get_bool_value (PRM_ID_PL_NATIVE_EXECUTION) || sig == NULL || sig->type != PL_TYPE_PLCSQL)
+    {
+      return NULL;
+    }
+
+  if (pt_Plcs_compile_depth > 0)
     {
       return NULL;
     }
@@ -31066,7 +31237,7 @@ pt_plcs_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig)
     }
   AU_RESTORE (save);
 
-  text = db_get_string (&scode);
+  text = (db_get_string (&scode) != NULL) ? pt_plcs_body_of (db_get_string (&scode)) : NULL;
   if (text == NULL)
     {
       pr_clear_value (&scode);
@@ -31083,11 +31254,13 @@ pt_plcs_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig)
     }
 
   block = sp_parse_body (body_parser, text);
-  pr_clear_value (&scode);
+  pr_clear_value (&scode);	/* text pointed into it and sp_parse_body () has copied what it needs */
 
   if (block != NULL && !pt_has_error (body_parser))
     {
+      pt_Plcs_compile_depth++;
       xasl = pt_to_plcs_xasl (body_parser, block, params);
+      pt_Plcs_compile_depth--;
       if (pt_has_error (body_parser))
 	{
 	  xasl = NULL;

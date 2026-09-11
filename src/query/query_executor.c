@@ -2786,6 +2786,18 @@ qexec_clear_xasl (THREAD_ENTRY * thread_p, xasl_node * xasl, bool is_final, bool
 	}
       break;
 
+    case PLCS_PROC:
+      /* the children are not on any of the lists the walk below follows, and what they hold has
+       * to be reached: a call carries a pl_signature whose strings are private allocations that
+       * only a final clear disposes of (see TYPE_SP in qexec_clear_regu_var ()). */
+      pg_cnt += qexec_clear_regu_var (thread_p, xasl, xasl->proc.plcs.expr, is_final, for_parallel_aptr);
+      pg_cnt += qexec_clear_regu_var (thread_p, xasl, xasl->proc.plcs.expr2, is_final, for_parallel_aptr);
+      for (int child = 0; child < xasl->proc.plcs.children_cnt; child++)
+	{
+	  pg_cnt += qexec_clear_xasl (thread_p, xasl->proc.plcs.children[child], is_final, for_parallel_aptr);
+	}
+      break;
+
     case HASHJOIN_PROC:
       pg_cnt += qexec_clear_regu_list (thread_p, xasl, xasl->proc.hashjoin.outer.regu_list_pred, is_final, false);
       pg_cnt += qexec_clear_regu_list (thread_p, xasl, xasl->proc.hashjoin.inner.regu_list_pred, is_final, false);
@@ -29225,6 +29237,86 @@ qexec_clear_plcs_turn (THREAD_ENTRY * thread_p, XASL_NODE * body)
     {
       qexec_clear_plcs_turn (thread_p, body->proc.plcs.children[i]);
     }
+}
+
+/*
+ * qexec_call_plcs () - run a procedure the client sent a plan for, from a CALL statement
+ *   return: NO_ERROR or ER_FAILED
+ *   thread_p(in) :
+ *   xasl(in)   : the procedure's outermost PLCS_PROC block
+ *   args(in)   : the call's arguments, in declared order
+ *   args_cnt(in) : how many
+ *
+ * note: a CALL does not arrive as a query, so there is no XASL_STATE to borrow and one is
+ *       raised here. What it needs is the value descriptor's clock and randomness, which the
+ *       expressions in the body may read, and the frame.
+ */
+int
+qexec_call_plcs (THREAD_ENTRY * thread_p, XASL_NODE * xasl, DB_VALUE * args, int args_cnt)
+{
+  XASL_STATE xasl_state;
+  PLCS_FRAME *frame;
+  struct drand48_data *rand_buf_p;
+  struct tm *c_time_struct, tm_val;
+  time_t sec;
+  int millisec;
+  int error, i;
+
+  if (xasl == NULL || xasl->type != PLCS_PROC || args_cnt > xasl->proc.plcs.locals_cnt)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_XASLNODE, 0);
+      return ER_FAILED;
+    }
+
+  memset (&xasl_state, 0, sizeof (xasl_state));
+  xasl_state.qp_xasl_line = 0;
+
+  util_get_second_and_ms_since_epoch (&sec, &millisec);
+  c_time_struct = localtime_r (&sec, &tm_val);
+  if (c_time_struct == NULL)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DATE_CONVERSION, 0);
+      return ER_FAILED;
+    }
+  xasl_state.vd.sys_epochtime = (DB_TIMESTAMP) sec;
+  if (db_datetime_encode (&xasl_state.vd.sys_datetime, c_time_struct->tm_mon + 1, c_time_struct->tm_mday,
+			  c_time_struct->tm_year + 1900, c_time_struct->tm_hour, c_time_struct->tm_min,
+			  c_time_struct->tm_sec, millisec) != NO_ERROR)
+    {
+      return ER_FAILED;
+    }
+
+  rand_buf_p = qmgr_get_rand_buf (thread_p);
+  lrand48_r (rand_buf_p, &xasl_state.vd.lrand);
+  drand48_r (rand_buf_p, &xasl_state.vd.drand);
+  xasl_state.vd.xasl_state = &xasl_state;
+
+  frame = qexec_alloc_plcs_frame (thread_p, xasl->proc.plcs.locals_cnt, NULL);
+  if (frame == NULL)
+    {
+      return ER_FAILED;
+    }
+
+  /* the parameters hold the first slots, in declared order */
+  for (i = 0; i < args_cnt; i++)
+    {
+      if (pr_clone_value (&args[i], &frame->locals[i]) != NO_ERROR)
+	{
+	  qexec_free_plcs_frame (thread_p, frame);
+	  return ER_FAILED;
+	}
+    }
+
+  xasl_state.plcs_frame = frame;
+  error = qexec_execute_plcs (thread_p, xasl, &xasl_state);
+  qexec_free_plcs_frame (thread_p, frame);
+
+  /* the plan came in on this request and goes out with it, so the clear is a final one. Without
+   * it the pl_signature of a call inside the body outlives the request and the resource tracker
+   * stops the server at its end. */
+  (void) qexec_clear_xasl (thread_p, xasl, true, false);
+
+  return error;
 }
 
 /*
