@@ -273,6 +273,7 @@ static PT_NODE *pt_apply_sort_spec (PARSER_CONTEXT * parser, PT_NODE * p, void *
 static PT_NODE *pt_apply_spec (PARSER_CONTEXT * parser, PT_NODE * p, void *arg);
 static PT_NODE *pt_apply_table_option (PARSER_CONTEXT * parser, PT_NODE * p, void *arg);
 static PT_NODE *pt_apply_truncate (PARSER_CONTEXT * parser, PT_NODE * p, void *arg);
+static PT_NODE *pt_apply_sp_stmt (PARSER_CONTEXT * parser, PT_NODE * p, void *arg);
 static PT_NODE *pt_apply_do (PARSER_CONTEXT * parser, PT_NODE * p, void *arg);
 static PT_NODE *pt_apply_union_stmt (PARSER_CONTEXT * parser, PT_NODE * p, void *arg);
 static PT_NODE *pt_apply_update (PARSER_CONTEXT * parser, PT_NODE * p, void *arg);
@@ -429,6 +430,8 @@ static PARSER_VARCHAR *pt_print_timeout (PARSER_CONTEXT * parser, PT_NODE * p);
 static PARSER_VARCHAR *pt_print_trigger_action (PARSER_CONTEXT * parser, PT_NODE * p);
 static PARSER_VARCHAR *pt_print_trigger_spec_list (PARSER_CONTEXT * parser, PT_NODE * p);
 static PARSER_VARCHAR *pt_print_truncate (PARSER_CONTEXT * parser, PT_NODE * p);
+static PARSER_VARCHAR *pt_print_sp_stmt (PARSER_CONTEXT * parser, PT_NODE * p);
+static PARSER_VARCHAR *pt_print_sp_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list);
 static PARSER_VARCHAR *pt_print_do (PARSER_CONTEXT * parser, PT_NODE * p);
 static PARSER_VARCHAR *pt_print_union_stmt (PARSER_CONTEXT * parser, PT_NODE * p);
 static PARSER_VARCHAR *pt_print_update (PARSER_CONTEXT * parser, PT_NODE * p);
@@ -3532,6 +3535,8 @@ pt_show_node_type (PT_NODE * node)
       return "TRIGGER_SPEC_LIST";
     case PT_TRUNCATE:
       return "TRUNCATE";
+    case PT_SP_STMT:
+      return "SP_STMT";
     case PT_DO:
       return "DO";
     case PT_UNION:
@@ -5468,6 +5473,7 @@ pt_init_apply_f (void)
   pt_apply_func_array[PT_EXECUTE_PREPARE] = pt_apply_prepare;
   pt_apply_func_array[PT_DEALLOCATE_PREPARE] = pt_apply_prepare;
   pt_apply_func_array[PT_TRUNCATE] = pt_apply_truncate;
+  pt_apply_func_array[PT_SP_STMT] = pt_apply_sp_stmt;
   pt_apply_func_array[PT_DO] = pt_apply_do;
   pt_apply_func_array[PT_SP_PARAMETERS] = pt_apply_sp_parameter;
   pt_apply_func_array[PT_PARTITION] = pt_apply_partition;
@@ -5603,6 +5609,7 @@ pt_init_init_f (void)
   pt_init_func_array[PT_EXECUTE_PREPARE] = pt_init_func_null_function;
   pt_init_func_array[PT_DEALLOCATE_PREPARE] = pt_init_func_null_function;
   pt_init_func_array[PT_TRUNCATE] = pt_init_func_null_function;
+  pt_init_func_array[PT_SP_STMT] = pt_init_func_null_function;
   pt_init_func_array[PT_DO] = pt_init_func_null_function;
   pt_init_func_array[PT_SP_PARAMETERS] = pt_init_func_null_function;
   pt_init_func_array[PT_PARTITION] = pt_init_func_null_function;
@@ -5732,6 +5739,7 @@ pt_init_print_f (void)
   pt_print_func_array[PT_EXECUTE_PREPARE] = NULL;
   pt_print_func_array[PT_DEALLOCATE_PREPARE] = NULL;
   pt_print_func_array[PT_TRUNCATE] = pt_print_truncate;
+  pt_print_func_array[PT_SP_STMT] = pt_print_sp_stmt;
   pt_print_func_array[PT_DO] = pt_print_do;
   pt_print_func_array[PT_SP_PARAMETERS] = pt_print_sp_parameter;
   pt_print_func_array[PT_PARTITION] = pt_print_partition;
@@ -8259,6 +8267,171 @@ pt_print_truncate (PARSER_CONTEXT * parser, PT_NODE * p)
   if (p->info.truncate.is_cascade)
     {
       q = pt_append_nulstring (parser, q, " cascade");
+    }
+
+  return q;
+}
+
+/*
+ * pt_apply_sp_stmt () -
+ *   return:
+ *   parser(in):
+ *   p(in):
+ *   arg(in):
+ */
+static PT_NODE *
+pt_apply_sp_stmt (PARSER_CONTEXT * parser, PT_NODE * p, void *arg)
+{
+  PT_APPLY_WALK (parser, p->info.sp_stmt.name, arg);
+  PT_APPLY_WALK (parser, p->info.sp_stmt.expr, arg);
+  PT_APPLY_WALK (parser, p->info.sp_stmt.expr2, arg);
+  PT_APPLY_WALK (parser, p->info.sp_stmt.decl_list, arg);
+  PT_APPLY_WALK (parser, p->info.sp_stmt.body, arg);
+  PT_APPLY_WALK (parser, p->info.sp_stmt.else_body, arg);
+  return p;
+}
+
+/*
+ * pt_print_sp_stmt_list () - print a statement or declaration list
+ *   return:
+ *   parser(in):
+ *   list(in):
+ *
+ * note: not pt_print_bytes_l (), which separates with a comma. Statements carry their
+ *       own semicolon and follow one another.
+ */
+static PARSER_VARCHAR *
+pt_print_sp_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list)
+{
+  PARSER_VARCHAR *q = 0, *r1;
+  PT_NODE *p;
+
+  for (p = list; p != NULL; p = p->next)
+    {
+      r1 = pt_print_bytes (parser, p);
+      q = pt_append_varchar (parser, q, r1);
+      q = pt_append_nulstring (parser, q, " ");
+    }
+
+  return q;
+}
+
+/*
+ * pt_print_sp_stmt () - print one PL/CSQL statement back as PL/CSQL
+ *   return:
+ *   parser(in):
+ *   p(in):
+ */
+static PARSER_VARCHAR *
+pt_print_sp_stmt (PARSER_CONTEXT * parser, PT_NODE * p)
+{
+  PARSER_VARCHAR *q = 0, *r1;
+  int form;
+
+  switch (p->info.sp_stmt.op)
+    {
+    case PT_SP_BLOCK:
+      if (p->info.sp_stmt.decl_list != NULL)
+	{
+	  if (p->info.sp_stmt.flags & PT_SP_BLOCK_NESTED)
+	    {
+	      q = pt_append_nulstring (parser, q, "declare ");
+	    }
+	  r1 = pt_print_sp_stmt_list (parser, p->info.sp_stmt.decl_list);
+	  q = pt_append_varchar (parser, q, r1);
+	}
+      q = pt_append_nulstring (parser, q, "begin ");
+      r1 = pt_print_sp_stmt_list (parser, p->info.sp_stmt.body);
+      q = pt_append_varchar (parser, q, r1);
+      q = pt_append_nulstring (parser, q, "end;");
+      break;
+
+    case PT_SP_DECL:
+      r1 = pt_print_bytes (parser, p->info.sp_stmt.name);
+      q = pt_append_varchar (parser, q, r1);
+      if (p->info.sp_stmt.flags & PT_SP_DECL_CONSTANT)
+	{
+	  q = pt_append_nulstring (parser, q, " constant");
+	}
+      q = pt_append_nulstring (parser, q, " ");
+      if (p->data_type != NULL)
+	{
+	  r1 = pt_print_bytes (parser, p->data_type);
+	  q = pt_append_varchar (parser, q, r1);
+	}
+      else
+	{
+	  q = pt_append_nulstring (parser, q, pt_show_type_enum (p->type_enum));
+	}
+      if (p->info.sp_stmt.expr != NULL)
+	{
+	  r1 = pt_print_bytes (parser, p->info.sp_stmt.expr);
+	  q = pt_append_nulstring (parser, q, " := ");
+	  q = pt_append_varchar (parser, q, r1);
+	}
+      q = pt_append_nulstring (parser, q, ";");
+      break;
+
+    case PT_SP_ASSIGN:
+      r1 = pt_print_bytes (parser, p->info.sp_stmt.name);
+      q = pt_append_varchar (parser, q, r1);
+      q = pt_append_nulstring (parser, q, " := ");
+      r1 = pt_print_bytes (parser, p->info.sp_stmt.expr);
+      q = pt_append_varchar (parser, q, r1);
+      q = pt_append_nulstring (parser, q, ";");
+      break;
+
+    case PT_SP_IF:
+      q = pt_append_nulstring (parser, q, "if ");
+      r1 = pt_print_bytes (parser, p->info.sp_stmt.expr);
+      q = pt_append_varchar (parser, q, r1);
+      q = pt_append_nulstring (parser, q, " then ");
+      r1 = pt_print_sp_stmt_list (parser, p->info.sp_stmt.body);
+      q = pt_append_varchar (parser, q, r1);
+      if (p->info.sp_stmt.else_body != NULL)
+	{
+	  q = pt_append_nulstring (parser, q, "else ");
+	  r1 = pt_print_sp_stmt_list (parser, p->info.sp_stmt.else_body);
+	  q = pt_append_varchar (parser, q, r1);
+	}
+      q = pt_append_nulstring (parser, q, "end if;");
+      break;
+
+    case PT_SP_LOOP:
+      form = p->info.sp_stmt.flags & PT_SP_LOOP_FORM_MASK;
+      if (form == PT_SP_LOOP_WHILE)
+	{
+	  q = pt_append_nulstring (parser, q, "while ");
+	  r1 = pt_print_bytes (parser, p->info.sp_stmt.expr);
+	  q = pt_append_varchar (parser, q, r1);
+	  q = pt_append_nulstring (parser, q, " ");
+	}
+      else if (form == PT_SP_LOOP_FOR)
+	{
+	  q = pt_append_nulstring (parser, q, "for ");
+	  r1 = pt_print_bytes (parser, p->info.sp_stmt.name);
+	  q = pt_append_varchar (parser, q, r1);
+	  q = pt_append_nulstring (parser, q, " in ");
+	  if (p->info.sp_stmt.flags & PT_SP_LOOP_REVERSE)
+	    {
+	      q = pt_append_nulstring (parser, q, "reverse ");
+	    }
+	  r1 = pt_print_bytes (parser, p->info.sp_stmt.expr);
+	  q = pt_append_varchar (parser, q, r1);
+	  q = pt_append_nulstring (parser, q, " .. ");
+	  r1 = pt_print_bytes (parser, p->info.sp_stmt.expr2);
+	  q = pt_append_varchar (parser, q, r1);
+	  q = pt_append_nulstring (parser, q, " ");
+	}
+      q = pt_append_nulstring (parser, q, "loop ");
+      r1 = pt_print_sp_stmt_list (parser, p->info.sp_stmt.body);
+      q = pt_append_varchar (parser, q, r1);
+      q = pt_append_nulstring (parser, q, "end loop;");
+      break;
+
+    case PT_SP_NULL_STMT:
+      q = pt_append_nulstring (parser, q, "null;");
+      break;
     }
 
   return q;
