@@ -52,6 +52,7 @@ static SP_KEYWORD sp_Keywords[] = {
   {"begin", BEGIN_, PT_TYPE_NONE},
   {"bigint", TYPE_KEYWORD, PT_TYPE_BIGINT},
   {"char", TYPE_KEYWORD, PT_TYPE_CHAR},
+  {"character", TYPE_KEYWORD, PT_TYPE_CHAR},
   {"constant", CONSTANT_, PT_TYPE_NONE},
   {"create", CREATE_, PT_TYPE_NONE},
   {"date", TYPE_KEYWORD, PT_TYPE_DATE},
@@ -128,6 +129,14 @@ real		{digit}+"."{digit}+([eE][+-]?{digit}+)?|"."{digit}+([eE][+-]?{digit}+)?|{d
 {real}			{ sp_yylval.cptr = sp_copy_token (yytext); return UNSIGNED_REAL; }
 
 '([^']|'')*'		{ sp_yylval.cptr = sp_unquote_string (yytext); return CHAR_STRING; }
+
+	/* The one type name that is two words, which is why it is here and not in the keyword
+	 * table - that table looks a single word up. The letters are spelled out because the
+	 * table's lookup is case-insensitive while these patterns are not. */
+[cC][hH][aA][rR][aA][cC][tT][eE][rR][ \t\r\n]+[vV][aA][rR][yY][iI][nN][gG]	{
+			  sp_yylval.number = (int) PT_TYPE_VARCHAR;
+			  return TYPE_KEYWORD;
+			}
 
 {ident}			{
 			  PT_TYPE_ENUM type = PT_TYPE_NONE;

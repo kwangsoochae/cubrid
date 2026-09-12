@@ -55,6 +55,7 @@ extern SP_YY_BUFFER_STATE sp_yy_scan_string (const char *str);
 extern void sp_yy_delete_buffer (SP_YY_BUFFER_STATE buf);
 
 static PT_NODE *sp_make_stmt (PT_SP_STMT_OP op);
+static void sp_unbound_char (PT_NODE * dt);
 static PT_NODE *sp_make_loop (int form, PT_NODE * name, PT_NODE * lower, PT_NODE * upper, PT_NODE * body);
 static PT_NODE *sp_make_integer_literal (const char *text);
 static PT_NODE *sp_make_real_literal (const char *text);
@@ -145,6 +146,7 @@ return_opt
 		}
 	| RETURN_ type_spec
 		{
+		  sp_unbound_char ($2);
 		  $$ = $2;
 		}
 	;
@@ -197,6 +199,9 @@ param
 		  if (name != NULL)
 		    {
 		      name->data_type = $3;
+		      name->type_enum = ($3 != NULL) ? $3->type_enum : PT_TYPE_NONE;
+
+		      sp_unbound_char (name->data_type);
 		      name->type_enum = ($3 != NULL) ? $3->type_enum : PT_TYPE_NONE;
 		    }
 		  $$ = name;
@@ -638,6 +643,32 @@ expr
 	;
 
 %%
+
+/*
+ * sp_unbound_char () - read a routine's declared CHAR as a string
+ *   return: nothing; the node is adjusted in place
+ *   dt(in/out) : the PT_DATA_TYPE of a parameter or of what a function gives back, NULL when
+ *                there is none
+ *
+ * note: a routine's types cannot be written with a length - CREATE refuses one - so there is no
+ *       length for a value to fail to fit, and none to pad out to either. Measured against the
+ *       PL engine: a DATETIME passed to a CHAR parameter arrives as its full text, a 7 arrives
+ *       as "7", and a function declared to give back CHAR gives back 'char'. A CHAR domain
+ *       would cut all three to one character, so it is read as VARCHAR at its full width. A
+ *       variable declared CHAR is a different thing and keeps the one character the engine and
+ *       the PL engine both give it.
+ */
+static void
+sp_unbound_char (PT_NODE * dt)
+{
+  if (dt == NULL || dt->type_enum != PT_TYPE_CHAR)
+    {
+      return;
+    }
+
+  dt->type_enum = PT_TYPE_VARCHAR;
+  dt->info.data_type.precision = DB_MAX_VARCHAR_PRECISION;
+}
 
 /*
  * sp_make_stmt () - one procedural statement node on the parser in hand
