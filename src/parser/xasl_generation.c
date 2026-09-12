@@ -30871,10 +30871,11 @@ pt_to_plcs_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt)
 	{
 	  return NULL;
 	}
-      if (!pt_plcs_callee_is_builtin (xasl->proc.plcs.expr))
+      if (!pt_plcs_callee_is_builtin (xasl->proc.plcs.expr) && xasl->proc.plcs.expr->value.sp_ptr->plcs == NULL)
 	{
-	  /* a call to something else needs a frame of its own and a depth to count, which is
-	   * 50005's remaining half. Refusing here sends the whole procedure to the PL engine. */
+	  /* the callee got no plan of its own - it is a function, it has an OUT parameter, or it
+	   * is already being compiled - so it can only run on the PL engine, and a procedure that
+	   * calls it goes there whole. */
 	  return NULL;
 	}
       return xasl;
@@ -31061,11 +31062,34 @@ pt_plcs_plan_stream (const cubpl::pl_signature * sig, std::string & plan)
   return NO_ERROR;
 }
 
-/* Depth of pt_plcs_compile_body (). A call inside a body being compiled gets no plan of its
- * own: only builtins may be called natively and those have no PL/CSQL body, and without this a
- * procedure that calls itself would compile forever - pt_stored_procedure_to_regu () lowers the
- * call, which compiles the callee, which lowers the call again. */
+/* The routines pt_plcs_compile_body () is inside, outermost first. Lowering a call compiles the
+ * callee, so a routine already on this stack would compile forever; it is refused instead, and
+ * the procedure that called it goes to the PL engine whole. The stack is bounded because a call
+ * site carries a copy of its callee's plan, so a chain of them multiplies what is shipped. */
+#define PT_PLCS_MAX_COMPILE_DEPTH 8
+static OID pt_Plcs_compiling[PT_PLCS_MAX_COMPILE_DEPTH];
 static int pt_Plcs_compile_depth = 0;
+
+/*
+ * pt_plcs_is_compiling () - is this routine one of the ones being compiled?
+ *   return: true when it is
+ *   code_oid(in) : the routine's code object
+ */
+static bool
+pt_plcs_is_compiling (const OID * code_oid)
+{
+  int i;
+
+  for (i = 0; i < pt_Plcs_compile_depth; i++)
+    {
+      if (OID_EQ (&pt_Plcs_compiling[i], code_oid))
+	{
+	  return true;
+	}
+    }
+
+  return false;
+}
 
 static XASL_NODE *
 pt_plcs_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig)
@@ -31083,14 +31107,14 @@ pt_plcs_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig)
       return NULL;
     }
 
-  if (pt_Plcs_compile_depth > 0)
+  /* a result comes back through RETURN, which the grammar does not take yet, so a function
+   * still goes to the PL engine */
+  if ((DB_TYPE) sig->result_type != DB_TYPE_NULL || OID_ISNULL (&sig->ext.sp.code_oid))
     {
       return NULL;
     }
 
-  /* a result comes back through RETURN, which the grammar does not take yet, so a function
-   * still goes to the PL engine */
-  if ((DB_TYPE) sig->result_type != DB_TYPE_NULL || OID_ISNULL (&sig->ext.sp.code_oid))
+  if (pt_Plcs_compile_depth >= PT_PLCS_MAX_COMPILE_DEPTH || pt_plcs_is_compiling (&sig->ext.sp.code_oid))
     {
       return NULL;
     }
@@ -31147,7 +31171,7 @@ pt_plcs_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig)
 	  return NULL;
 	}
 
-      pt_Plcs_compile_depth++;
+      pt_Plcs_compiling[pt_Plcs_compile_depth++] = sig->ext.sp.code_oid;
       xasl = pt_to_plcs_xasl (body_parser, block, params);
       pt_Plcs_compile_depth--;
       if (pt_has_error (body_parser))

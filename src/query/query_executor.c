@@ -1613,6 +1613,14 @@ qexec_clear_regu_var (THREAD_ENTRY * thread_p, XASL_NODE * xasl_p, REGU_VARIABLE
 	    }
 	}
 
+      /* the callee's own plan hangs here, and nothing else reaches it: a procedure's plan is not
+       * a child of the node that calls it. Without this pass the signatures and values inside it
+       * outlive the request, which the resource tracker catches at the end of one. */
+      if (regu_var->value.sp_ptr->plcs != NULL)
+	{
+	  pg_cnt += qexec_clear_xasl (thread_p, regu_var->value.sp_ptr->plcs, is_final, for_parallel_aptr);
+	}
+
       break;
     case TYPE_FUNC:
       pr_clear_value (regu_var->value.funcp->value);
