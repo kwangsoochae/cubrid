@@ -428,6 +428,7 @@ static int qexec_clear_regu_value_list (THREAD_ENTRY * thread_p, XASL_NODE * xas
 					bool is_final, bool for_parallel_aptr);
 static void qexec_clear_db_val_list (QPROC_DB_VALUE_LIST list);
 static int qexec_execute_plcs_stmt (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
+static int qexec_plcs_set_retval (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
 static int qexec_execute_plcs_loop (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
 static void qexec_clear_plcs_turn (THREAD_ENTRY * thread_p, XASL_NODE * body);
 static void qexec_clear_sort_list (XASL_NODE * xasl_p, SORT_LIST * list, bool is_final);
@@ -3784,6 +3785,7 @@ qexec_alloc_plcs_frame (THREAD_ENTRY * thread_p, int locals_cnt, PLCS_FRAME * ca
   frame->locals_cnt = locals_cnt;
   frame->signal = PLCS_SIGNAL_NONE;
   frame->signal_level = 0;
+  db_make_null (&frame->retval);
   frame->sqlcode = 0;
   frame->sqlerrm = NULL;
   frame->call_depth = (caller != NULL) ? caller->call_depth + 1 : 0;
@@ -3833,6 +3835,7 @@ qexec_free_plcs_frame (THREAD_ENTRY * thread_p, PLCS_FRAME * frame)
 	}
       db_private_free_and_init (thread_p, frame->locals);
     }
+  pr_clear_value (&frame->retval);
   if (frame->sqlerrm != NULL)
     {
       db_private_free_and_init (thread_p, frame->sqlerrm);
@@ -28931,6 +28934,33 @@ qexec_plcs_fetch_value (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu, XASL_STAT
 }
 
 /*
+ * qexec_plcs_set_retval () - evaluate what a RETURN gives back and keep it on the frame
+ *   return: NO_ERROR or ER_FAILED
+ *
+ * note: the value is copied for the same reason an assignment copies - what is fetched points
+ *       into the expression's own storage, which the next evaluation overwrites, and the frame
+ *       outlives this statement.
+ */
+static int
+qexec_plcs_set_retval (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state)
+{
+  PLCS_FRAME *frame = xasl_state->plcs_frame;
+  DB_VALUE *value = NULL;
+
+  assert (frame != NULL);
+
+  if (qexec_plcs_fetch_value (thread_p, xasl->proc.plcs.expr, xasl_state, &value) != NO_ERROR)
+    {
+      return ER_FAILED;
+    }
+
+  pr_clear_value (&frame->retval);
+  db_make_null (&frame->retval);
+
+  return pr_clone_value (value, &frame->retval);
+}
+
+/*
  * qexec_plcs_assign () - write one slot
  *   return: NO_ERROR or ER_FAILED
  */
@@ -29055,6 +29085,17 @@ qexec_execute_plcs_stmt (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE *
 	    }
 	}
       return NO_ERROR;
+
+    case PLCS_OP_JUMP:
+      assert (xasl->proc.plcs.flags == PLCS_JUMP_RETURN);
+      frame->signal = PLCS_SIGNAL_RETURN;
+      if (xasl->proc.plcs.expr == NULL)
+	{
+	  /* a procedure's RETURN: the frame gives nothing back and the NULL it was built with
+	   * stands */
+	  return NO_ERROR;
+	}
+      return qexec_plcs_set_retval (thread_p, xasl, xasl_state);
 
     case PLCS_OP_ASSIGN:
       return qexec_plcs_assign (thread_p, xasl, xasl_state);
@@ -29260,13 +29301,14 @@ qexec_clear_plcs_turn (THREAD_ENTRY * thread_p, XASL_NODE * body)
  *   xasl(in)   : the procedure's outermost PLCS_PROC block
  *   args(in)   : the call's arguments, in declared order
  *   args_cnt(in) : how many
+ *   result(out) : what a RETURN left, NULL where the caller wants nothing back
  *
  * note: a CALL does not arrive as a query, so there is no XASL_STATE to borrow and one is
  *       raised here. What it needs is the value descriptor's clock and randomness, which the
  *       expressions in the body may read, and the frame.
  */
 int
-qexec_call_plcs (THREAD_ENTRY * thread_p, XASL_NODE * xasl, DB_VALUE * args, int args_cnt)
+qexec_call_plcs (THREAD_ENTRY * thread_p, XASL_NODE * xasl, DB_VALUE * args, int args_cnt, DB_VALUE * result)
 {
   XASL_STATE xasl_state;
   PLCS_FRAME *frame;
@@ -29323,6 +29365,10 @@ qexec_call_plcs (THREAD_ENTRY * thread_p, XASL_NODE * xasl, DB_VALUE * args, int
 
   xasl_state.plcs_frame = frame;
   error = qexec_execute_plcs (thread_p, xasl, &xasl_state);
+  if (error == NO_ERROR && result != NULL)
+    {
+      error = pr_clone_value (&frame->retval, result);
+    }
   qexec_free_plcs_frame (thread_p, frame);
 
   /* the plan came in on this request and goes out with it, so the clear is a final one. Without

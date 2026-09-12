@@ -4666,7 +4666,13 @@ fetch_execute_plcs (THREAD_ENTRY * thread_p, SP_TYPE * sp, val_descr * vd, OID *
   error = qexec_execute_plcs (thread_p, sp->plcs, xasl_state);
   xasl_state->plcs_frame = caller;
 
-  /* a procedure has no result to give back, and the caller cleared the value before the call */
+  /* what a RETURN left, which is NULL for a procedure and for a function that reached its end
+   * without one. The caller cleared the value before the call. */
+  if (error == NO_ERROR)
+    {
+      error = pr_clone_value (&frame->retval, sp->value);
+    }
+
   qexec_free_plcs_frame (thread_p, frame);
 
   return error;
@@ -4947,6 +4953,18 @@ fetch_peek_dbval_slow (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_de
 	    error = fetch_execute_plcs (thread_p, regu_var->value.sp_ptr, vd, obj_oid, tpl);
 	    if (error != NO_ERROR)
 	      {
+		/* the wrapper the PL engine path also puts on: what a query sees when a routine
+		 * fails is ER_SP_EXECUTE_ERROR, whatever failed inside it. The message is copied
+		 * first because er_set () overwrites the area er_msg () reads from. */
+		if (er_errid () != ER_SP_EXECUTE_ERROR)
+		  {
+		    char inner[1024];
+		    const char *msg = er_msg ();
+
+		    strncpy (inner, (msg != NULL) ? msg : "", sizeof (inner) - 1);
+		    inner[sizeof (inner) - 1] = '\0';
+		    er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_SP_EXECUTE_ERROR, 1, inner);
+		  }
 		goto exit_on_error;
 	      }
 	    *peek_dbval = regu_var->value.sp_ptr->value;

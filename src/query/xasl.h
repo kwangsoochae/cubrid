@@ -507,6 +507,10 @@ typedef enum
   PLCS_OP_CALL			/* procedure call */
 } PLCS_OP;
 
+/* plcs_proc_node.flags of a PLCS_OP_JUMP. EXIT and CONTINUE get theirs when 50004 lowers them;
+ * a jump with no flag set is the RETURN that leaves the routine. */
+#define PLCS_JUMP_RETURN	0x00
+
 /* plcs_proc_node.flags of a PLCS_OP_LOOP. These mirror the parse tree's PT_SP_LOOP_*, which the
  * XASL side cannot include; pt_to_plcs_stmt () maps one onto the other rather than casting. */
 #define PLCS_LOOP_BASIC		0x00	/* LOOP ... END LOOP */

@@ -3397,6 +3397,7 @@ typedef enum
   PT_SP_IF,			/* ELSIF is a nested IF in the else branch */
   PT_SP_LOOP,
   PT_SP_CALL,			/* a call to a procedure, qualified or not */
+  PT_SP_RETURN,			/* RETURN, with a value in a function and without one in a procedure */
   PT_SP_NULL_STMT		/* the NULL statement */
 } PT_SP_STMT_OP;
 
@@ -3420,6 +3421,8 @@ struct pt_sp_stmt_info
   PT_NODE *expr2;		/* upper bound of a FOR range */
   PT_NODE *params;		/* BLOCK: the routine's parameters, when the header was parsed.
 				 * Only the outermost block of a routine has any */
+  PT_NODE *ret_type;		/* BLOCK: the PT_DATA_TYPE a function's header declares it gives back,
+				 * NULL for a procedure. A RETURN casts to it */
   PT_NODE *decl_list;		/* BLOCK: the declarations */
   PT_NODE *body;		/* BLOCK, LOOP: statements. IF: the then branch */
   PT_NODE *else_body;		/* IF: the else branch */
