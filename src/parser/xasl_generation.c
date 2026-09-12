@@ -30344,6 +30344,14 @@ pt_plcs_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCS_SCOP
 	    }
 	  break;
 
+	case PT_SP_RETURN:
+	  /* a procedure's RETURN carries no value, so there is nothing to bind */
+	  if (pt_plcs_resolve_expr (parser, stmt->info.sp_stmt.expr, scope) != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
+	  break;
+
 	case PT_SP_NULL_STMT:
 	  break;
 
@@ -30449,9 +30457,9 @@ pt_plcs_resolve_locals (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * para
 
 static REGU_VARIABLE *pt_plcs_expr_to_regu (PARSER_CONTEXT * parser, PT_NODE ** expr);
 static bool pt_plcs_callee_is_builtin (const REGU_VARIABLE * regu);
-static XASL_NODE *pt_to_plcs_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt);
-static XASL_NODE *pt_to_plcs_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params);
-static XASL_NODE *pt_to_plcs_stmt_list_block (PARSER_CONTEXT * parser, PT_NODE * list);
+static XASL_NODE *pt_to_plcs_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * ret_domain);
+static XASL_NODE *pt_to_plcs_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params, TP_DOMAIN * ret_domain);
+static XASL_NODE *pt_to_plcs_stmt_list_block (PARSER_CONTEXT * parser, PT_NODE * list, TP_DOMAIN * ret_domain);
 static int pt_plcs_set_children (PARSER_CONTEXT * parser, XASL_NODE * xasl, XASL_NODE ** buf, int cnt);
 
 /*
@@ -30700,9 +30708,10 @@ pt_to_plcs_open_local (PARSER_CONTEXT * parser, PT_NODE * decl)
  *   return: the node, NULL on error
  *   parser(in) :
  *   list(in)   : PT_SP_STMT nodes, linked; NULL gives an empty block
+ *   ret_domain(in) : what a RETURN inside it casts to, NULL in a procedure
  */
 static XASL_NODE *
-pt_to_plcs_stmt_list_block (PARSER_CONTEXT * parser, PT_NODE * list)
+pt_to_plcs_stmt_list_block (PARSER_CONTEXT * parser, PT_NODE * list, TP_DOMAIN * ret_domain)
 {
   XASL_NODE *xasl, **buf = NULL;
   PT_NODE *stmt;
@@ -30739,7 +30748,7 @@ pt_to_plcs_stmt_list_block (PARSER_CONTEXT * parser, PT_NODE * list)
 	      continue;
 	    }
 
-	  buf[i] = pt_to_plcs_stmt (parser, stmt);
+	  buf[i] = pt_to_plcs_stmt (parser, stmt, ret_domain);
 	  if (buf[i] == NULL)
 	    {
 	      return NULL;
@@ -30757,9 +30766,10 @@ pt_to_plcs_stmt_list_block (PARSER_CONTEXT * parser, PT_NODE * list)
  *   parser(in) :
  *   block(in)  : a PT_SP_BLOCK
  *   params(in) : the routine's parameters at its outermost block, NULL anywhere else
+ *   ret_domain(in) : what a RETURN inside it casts to, NULL in a procedure
  */
 static XASL_NODE *
-pt_to_plcs_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params)
+pt_to_plcs_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params, TP_DOMAIN * ret_domain)
 {
   XASL_NODE *xasl, **buf = NULL;
   PT_NODE *decl, *stmt, *param;
@@ -30833,7 +30843,7 @@ pt_to_plcs_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params)
 	      continue;
 	    }
 
-	  buf[i] = pt_to_plcs_stmt (parser, stmt);
+	  buf[i] = pt_to_plcs_stmt (parser, stmt, ret_domain);
 	  if (buf[i] == NULL)
 	    {
 	      return NULL;
@@ -30850,9 +30860,10 @@ pt_to_plcs_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params)
  *   return: the node, NULL on error
  *   parser(in) :
  *   stmt(in)   : a PT_SP_STMT other than a declaration or the NULL statement
+ *   ret_domain(in) : what a RETURN casts to, NULL in a procedure
  */
 static XASL_NODE *
-pt_to_plcs_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt)
+pt_to_plcs_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * ret_domain)
 {
   XASL_NODE *xasl, *buf[2];
   PT_NODE *call;
@@ -30861,7 +30872,7 @@ pt_to_plcs_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt)
   switch (stmt->info.sp_stmt.op)
     {
     case PT_SP_BLOCK:
-      return pt_to_plcs_block (parser, stmt, NULL);
+      return pt_to_plcs_block (parser, stmt, NULL, ret_domain);
 
     case PT_SP_ASSIGN:
       return pt_to_plcs_assign (parser, stmt->info.sp_stmt.name->info.name.plcs_slot, &stmt->info.sp_stmt.expr,
@@ -30905,6 +30916,28 @@ pt_to_plcs_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt)
 	}
       return xasl;
 
+    case PT_SP_RETURN:
+      xasl = pt_plcs_new_node (PLCS_OP_JUMP);
+      if (xasl == NULL)
+	{
+	  return NULL;
+	}
+
+      xasl->proc.plcs.flags = PLCS_JUMP_RETURN;
+      if (stmt->info.sp_stmt.expr == NULL)
+	{
+	  /* a procedure's RETURN, which leaves the frame with nothing to give back */
+	  return xasl;
+	}
+
+      xasl->proc.plcs.expr = pt_plcs_expr_to_regu (parser, &stmt->info.sp_stmt.expr);
+      xasl->proc.plcs.expr = pt_plcs_cast_to (parser, xasl->proc.plcs.expr, ret_domain, false);
+      if (xasl->proc.plcs.expr == NULL)
+	{
+	  return NULL;
+	}
+      return xasl;
+
     case PT_SP_IF:
       xasl = pt_plcs_new_node (PLCS_OP_IF);
       if (xasl == NULL)
@@ -30920,7 +30953,7 @@ pt_to_plcs_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt)
 
       /* the then branch is always there and the else branch only when it was written, so one
        * child means there is no else */
-      buf[0] = pt_to_plcs_stmt_list_block (parser, stmt->info.sp_stmt.body);
+      buf[0] = pt_to_plcs_stmt_list_block (parser, stmt->info.sp_stmt.body, ret_domain);
       if (buf[0] == NULL)
 	{
 	  return NULL;
@@ -30930,7 +30963,7 @@ pt_to_plcs_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt)
 	  return pt_plcs_set_children (parser, xasl, buf, 1) == NO_ERROR ? xasl : NULL;
 	}
 
-      buf[1] = pt_to_plcs_stmt_list_block (parser, stmt->info.sp_stmt.else_body);
+      buf[1] = pt_to_plcs_stmt_list_block (parser, stmt->info.sp_stmt.else_body, ret_domain);
       if (buf[1] == NULL)
 	{
 	  return NULL;
@@ -30982,7 +31015,7 @@ pt_to_plcs_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt)
 	  return NULL;
 	}
 
-      buf[0] = pt_to_plcs_stmt_list_block (parser, stmt->info.sp_stmt.body);
+      buf[0] = pt_to_plcs_stmt_list_block (parser, stmt->info.sp_stmt.body, ret_domain);
       if (buf[0] == NULL)
 	{
 	  return NULL;
@@ -31011,6 +31044,7 @@ XASL_NODE *
 pt_to_plcs_xasl (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params)
 {
   XASL_NODE *xasl;
+  TP_DOMAIN *ret_domain = NULL;
   int locals_cnt;
 
   locals_cnt = pt_plcs_resolve_locals (parser, block, params);
@@ -31019,7 +31053,18 @@ pt_to_plcs_xasl (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params)
       return NULL;
     }
 
-  xasl = pt_to_plcs_block (parser, block, params);
+  /* the type the header declares, which is what the body was written against. The signature
+   * names the same type, but the generator is handed the parse tree and not the signature. */
+  if (block->info.sp_stmt.ret_type != NULL)
+    {
+      ret_domain = pt_xasl_data_type_to_domain (parser, block->info.sp_stmt.ret_type);
+      if (ret_domain == NULL)
+	{
+	  return NULL;
+	}
+    }
+
+  xasl = pt_to_plcs_block (parser, block, params, ret_domain);
   if (xasl == NULL)
     {
       return NULL;
@@ -31132,9 +31177,7 @@ pt_plcs_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig)
       return NULL;
     }
 
-  /* a result comes back through RETURN, which the grammar does not take yet, so a function
-   * still goes to the PL engine */
-  if ((DB_TYPE) sig->result_type != DB_TYPE_NULL || OID_ISNULL (&sig->ext.sp.code_oid))
+  if (OID_ISNULL (&sig->ext.sp.code_oid))
     {
       return NULL;
     }

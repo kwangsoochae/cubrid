@@ -11217,8 +11217,9 @@ spl_call (THREAD_ENTRY *thread_p, unsigned int rid, char *request, int reqlen)
 
   if (!plan.empty ())
     {
-      /* the client built the procedure's own plan, so the server runs it here. A procedure has
-       * no value to give back, and the reply is packed the same way either way. */
+      /* the client built the procedure's own plan, so the server runs it here. What a function
+       * returns goes back in the same ret_value the PL engine fills, and the reply is packed
+       * the same way either way. */
       XASL_NODE *xasl = NULL;
       XASL_UNPACK_INFO *unpack_info = NULL;
 
@@ -11226,7 +11227,7 @@ spl_call (THREAD_ENTRY *thread_p, unsigned int rid, char *request, int reqlen)
 					   &unpack_info);
       if (error_code == NO_ERROR && xasl != NULL)
 	{
-	  error_code = qexec_call_plcs (thread_p, xasl, args.data (), (int) args.size ());
+	  error_code = qexec_call_plcs (thread_p, xasl, args.data (), (int) args.size (), &ret_value);
 	}
       else if (error_code == NO_ERROR)
 	{

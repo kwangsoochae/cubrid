@@ -78,7 +78,7 @@ static PT_NODE *sp_make_data_type (PT_TYPE_ENUM type, int precision, int scale);
 %token <number> TYPE_KEYWORD
 
 %type <node> block decl_list decl_list_opt decl stmt_list stmt if_stmt else_part_opt loop_stmt
-%type <node> assign_stmt block_stmt null_stmt expr expr_list_opt type_spec
+%type <node> assign_stmt block_stmt null_stmt return_stmt return_opt expr expr_list_opt type_spec
 %type <node> call_stmt sp_name arg_list_opt arg_list
 %type <node> routine param_list_opt param_list param
 %type <number> constant_opt reverse_opt
@@ -119,6 +119,7 @@ routine
 		  if (node != NULL)
 		    {
 		      node->info.sp_stmt.params = $5;
+		      node->info.sp_stmt.ret_type = $6;
 		    }
 		  $$ = node;
 		}
@@ -134,13 +135,17 @@ routine_kind
 	| FUNCTION_
 	;
 
-/* The return type is read and dropped: what a function gives back is 50005's business, and
- * nothing here is built for one yet. */
+/* A function's declared result type. It rides on the body's block because that is what the
+ * generator is handed, and a RETURN casts to it - the precision is here and nowhere else,
+ * the same reason a parameter's is. */
 return_opt
 	: /* empty */
+		{
+		  $$ = NULL;
+		}
 	| RETURN_ type_spec
 		{
-		  parser_free_tree (sp_Parser, $2);
+		  $$ = $2;
 		}
 	;
 
@@ -323,6 +328,7 @@ stmt
 	| if_stmt
 	| loop_stmt
 	| block_stmt
+	| return_stmt
 	| null_stmt
 	;
 
@@ -402,6 +408,26 @@ assign_stmt
 		    {
 		      node->info.sp_stmt.name = pt_name (sp_Parser, $1);
 		      node->info.sp_stmt.expr = $3;
+		    }
+		  $$ = node;
+		}
+	;
+
+/* A procedure returns without a value and a function with one. Which of the two was written
+ * is not judged here: the PL/CSQL compiler has already refused a routine that gets it wrong,
+ * so the body reaching this grammar is one it accepted. */
+return_stmt
+	: RETURN_ ';'
+		{
+		  $$ = sp_make_stmt (PT_SP_RETURN);
+		}
+	| RETURN_ expr ';'
+		{
+		  PT_NODE *node = sp_make_stmt (PT_SP_RETURN);
+
+		  if (node != NULL)
+		    {
+		      node->info.sp_stmt.expr = $2;
 		    }
 		  $$ = node;
 		}

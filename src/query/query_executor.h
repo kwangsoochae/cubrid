@@ -104,6 +104,9 @@ struct plcs_frame
   PLCS_SIGNAL signal;
   int signal_level;		/* how many enclosing loops a labelled EXIT or CONTINUE leaves */
 
+  DB_VALUE retval;		/* what a RETURN left for the caller to read; NULL until one runs,
+				 * which is also what a function that falls off its end gives back */
+
   int sqlcode;			/* the manual's 0 - 9, 1000 for a user-defined exception */
   char *sqlerrm;
 
@@ -149,7 +152,8 @@ extern void qexec_free_xasl_state (THREAD_ENTRY * thread_p, xasl_state * xasl_st
 extern PLCS_FRAME *qexec_alloc_plcs_frame (THREAD_ENTRY * thread_p, int locals_cnt, PLCS_FRAME * caller);
 extern void qexec_free_plcs_frame (THREAD_ENTRY * thread_p, PLCS_FRAME * frame);
 extern int qexec_execute_plcs (THREAD_ENTRY * thread_p, xasl_node * xasl, xasl_state * xstate);
-extern int qexec_call_plcs (THREAD_ENTRY * thread_p, xasl_node * xasl, DB_VALUE * args, int args_cnt);
+extern int qexec_call_plcs (THREAD_ENTRY * thread_p, xasl_node * xasl, DB_VALUE * args, int args_cnt,
+			    DB_VALUE * result);
 #if defined(CUBRID_DEBUG)
 extern void get_xasl_dumper_linked_in ();
 #endif
