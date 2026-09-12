@@ -6987,6 +6987,13 @@ pt_stored_procedure_to_regu (PARSER_CONTEXT * parser, PT_NODE * node)
       regu_dbval_type_init (sp->value, result_type);
       sp->args = pt_to_regu_variable_list (parser, node->info.method_call.arg_list, UNBOX_AS_VALUE, NULL, NULL);
       sp->plcs = pt_plcs_compile_body (parser, sp->sig);
+      if (sp->plcs == NULL && er_errid () == ER_SP_COMPILE_ERROR)
+	{
+	  /* strict mode, and pt_plcs_refuse () has named what it could not take. The refusal is
+	   * carried out to the statement so that a sweep counts it instead of the call quietly
+	   * going to the PL engine. */
+	  return NULL;
+	}
     }
 
   regu->type = TYPE_SP;
@@ -30457,6 +30464,7 @@ pt_plcs_resolve_locals (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * para
 
 static REGU_VARIABLE *pt_plcs_expr_to_regu (PARSER_CONTEXT * parser, PT_NODE ** expr);
 static bool pt_plcs_callee_is_builtin (const REGU_VARIABLE * regu);
+static XASL_NODE *pt_plcs_refuse (PARSER_CONTEXT * parser, const char *reason);
 static XASL_NODE *pt_to_plcs_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * ret_domain);
 static XASL_NODE *pt_to_plcs_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params, TP_DOMAIN * ret_domain);
 static XASL_NODE *pt_to_plcs_stmt_list_block (PARSER_CONTEXT * parser, PT_NODE * list, TP_DOMAIN * ret_domain);
@@ -30909,10 +30917,14 @@ pt_to_plcs_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * ret_domain
 	}
       if (!pt_plcs_callee_is_builtin (xasl->proc.plcs.expr) && xasl->proc.plcs.expr->value.sp_ptr->plcs == NULL)
 	{
-	  /* the callee got no plan of its own - it is a function, it has an OUT parameter, or it
-	   * is already being compiled - so it can only run on the PL engine, and a procedure that
-	   * calls it goes there whole. */
-	  return NULL;
+	  /* the callee got no plan of its own, so it can only run on the PL engine and a
+	   * procedure that calls it goes there whole. Compiling the callee has already named
+	   * why it was refused, and that reason is the better one to keep. */
+	  if (er_errid () == ER_SP_COMPILE_ERROR)
+	    {
+	      return NULL;
+	    }
+	  return pt_plcs_refuse (parser, "the routine this calls has no plan of its own");
 	}
       return xasl;
 
@@ -31081,8 +31093,9 @@ pt_to_plcs_xasl (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params)
  *   parser(in) :
  *   sig(in)    : the signature of the call being lowered
  *
- * note: a NULL return is not an error and leaves nothing on the parser. Most procedures still
- *       have to go to the PL engine - the grammar takes only part of the language yet - and a
+ * note: a NULL return is not an error and leaves nothing on the parser, unless
+ *       pl_native_execution_strict is on. Most procedures still have to go to the PL engine -
+ *       the grammar takes only part of the language yet - and a
  *       call that cannot be built here simply goes the way it went before.
  */
 /*
@@ -31100,6 +31113,7 @@ pt_plcs_plan_stream (const cubpl::pl_signature * sig, std::string & plan)
   PARSER_CONTEXT *parser;
   XASL_NODE *xasl;
   XASL_STREAM stream;
+  bool refused;
 
   plan.clear ();
 
@@ -31112,6 +31126,9 @@ pt_plcs_plan_stream (const cubpl::pl_signature * sig, std::string & plan)
   pt_enter_packing_buf ();
 
   xasl = pt_plcs_compile_body (parser, sig);
+  /* strict mode, and pt_plcs_refuse () has named what it could not take. The error is left
+   * standing rather than cleared, and the CALL fails on it. */
+  refused = (xasl == NULL && er_errid () == ER_SP_COMPILE_ERROR);
   if (xasl != NULL)
     {
       memset (&stream, 0, sizeof (stream));
@@ -31126,10 +31143,13 @@ pt_plcs_plan_stream (const cubpl::pl_signature * sig, std::string & plan)
     }
 
   pt_exit_packing_buf ();
-  er_clear ();
+  if (!refused)
+    {
+      er_clear ();
+    }
   parser_free_parser (parser);
 
-  return NO_ERROR;
+  return refused ? ER_FAILED : NO_ERROR;
 }
 
 /* The routines pt_plcs_compile_body () is inside, outermost first. Lowering a call compiles the
@@ -31139,6 +31159,32 @@ pt_plcs_plan_stream (const cubpl::pl_signature * sig, std::string & plan)
 #define PT_PLCS_MAX_COMPILE_DEPTH 8
 static OID pt_Plcs_compiling[PT_PLCS_MAX_COMPILE_DEPTH];
 static int pt_Plcs_compile_depth = 0;
+
+/*
+ * pt_plcs_refuse () - give up on building a plan for this routine
+ *   return: NULL, always; the caller hands it back
+ *   parser(in) :
+ *   reason(in) : what stood in the way, in the words of the thing that was met
+ *
+ * note: refusing is ordinary. A plan is optional and whatever has none runs on the PL engine,
+ *       which is what lets the switch be turned on before the grammar is whole. The silence
+ *       costs something while the work is unfinished: a suite that passes says nothing about
+ *       which of the two ran it. pl_native_execution_strict turns each refusal into an error
+ *       naming its reason, so one sweep counts what is still missing instead of hiding it.
+ */
+static XASL_NODE *
+pt_plcs_refuse (PARSER_CONTEXT * parser, const char *reason)
+{
+  char msg[512];
+
+  if (prm_get_bool_value (PRM_ID_PL_NATIVE_EXECUTION_STRICT))
+    {
+      snprintf (msg, sizeof (msg), "PL/CSQL cannot run this natively: %s", reason);
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_SP_COMPILE_ERROR, 1, msg);
+    }
+
+  return NULL;
+}
 
 /*
  * pt_plcs_is_compiling () - is this routine one of the ones being compiled?
@@ -31170,6 +31216,8 @@ pt_plcs_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig)
   MOP code_mop;
   DB_VALUE scode;
   const char *text;
+  char why[512];
+  bool refused = false;
   int save;
 
   if (!prm_get_bool_value (PRM_ID_PL_NATIVE_EXECUTION) || sig == NULL || sig->type != PL_TYPE_PLCSQL)
@@ -31179,12 +31227,16 @@ pt_plcs_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig)
 
   if (OID_ISNULL (&sig->ext.sp.code_oid))
     {
-      return NULL;
+      return pt_plcs_refuse (parser, "the routine has no stored code");
     }
 
-  if (pt_Plcs_compile_depth >= PT_PLCS_MAX_COMPILE_DEPTH || pt_plcs_is_compiling (&sig->ext.sp.code_oid))
+  if (pt_plcs_is_compiling (&sig->ext.sp.code_oid))
     {
-      return NULL;
+      return pt_plcs_refuse (parser, "the routine calls itself, directly or through another");
+    }
+  if (pt_Plcs_compile_depth >= PT_PLCS_MAX_COMPILE_DEPTH)
+    {
+      return pt_plcs_refuse (parser, "the chain of calls is deeper than a plan is carried for");
     }
 
   /* an OUT parameter has to travel back out of the frame after the call, which the call site
@@ -31193,7 +31245,7 @@ pt_plcs_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig)
     {
       if (sig->arg.arg_mode[i] != SP_MODE_IN)
 	{
-	  return NULL;
+	  return pt_plcs_refuse (parser, "a parameter is OUT or IN OUT");
 	}
     }
 
@@ -31205,7 +31257,7 @@ pt_plcs_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig)
     {
       AU_RESTORE (save);
       er_clear ();
-      return NULL;
+      return pt_plcs_refuse (parser, "the routine's stored code could not be read");
     }
   AU_RESTORE (save);
 
@@ -31236,7 +31288,7 @@ pt_plcs_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig)
       if (pt_length_of_list (params) != sig->arg.arg_size)
 	{
 	  parser_free_parser (body_parser);
-	  return NULL;
+	  return pt_plcs_refuse (parser, "the header's parameters do not agree with the signature");
 	}
 
       pt_Plcs_compiling[pt_Plcs_compile_depth++] = sig->ext.sp.code_oid;
@@ -31248,8 +31300,28 @@ pt_plcs_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig)
 	}
     }
 
+  if (xasl == NULL && prm_get_bool_value (PRM_ID_PL_NATIVE_EXECUTION_STRICT))
+    {
+      /* the parser's own first error names the token it stopped on, which is what says what the
+       * grammar is missing; it is copied out because the parser is freed just below */
+      PT_NODE *first = pt_get_errors (body_parser);
+
+      if (first != NULL && first->info.error_msg.error_message != NULL)
+	{
+	  /* the line only: sp_grammar.y tracks yylineno and does not carry locations, so the
+	   * column on the error node is always zero */
+	  snprintf (why, sizeof (why), "the grammar does not take the body - %s at line %d",
+		    first->info.error_msg.error_message, first->line_number);
+	}
+      else
+	{
+	  snprintf (why, sizeof (why), "the grammar does not take the body - nothing was recorded");
+	}
+      refused = true;
+    }
+
   er_clear ();
   parser_free_parser (body_parser);
 
-  return xasl;
+  return refused ? pt_plcs_refuse (parser, why) : xasl;
 }
