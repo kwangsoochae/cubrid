@@ -4653,8 +4653,21 @@ fetch_execute_plcs (THREAD_ENTRY * thread_p, SP_TYPE * sp, val_descr * vd, OID *
 	  qexec_free_plcs_frame (thread_p, frame);
 	  return ER_FAILED;
 	}
-      if (fetch_peek_dbval (thread_p, &arg->value, vd, NULL, obj_oid, tpl, &value) != NO_ERROR
-	  || pr_clone_value (value, &frame->locals[i]) != NO_ERROR)
+      if (fetch_peek_dbval (thread_p, &arg->value, vd, NULL, obj_oid, tpl, &value) != NO_ERROR)
+	{
+	  qexec_free_plcs_frame (thread_p, frame);
+	  return ER_FAILED;
+	}
+      /* the same question the PL engine asks of an argument. Running the routine here instead
+       * does not widen what a stored procedure may be handed. */
+      if (value != NULL && !cubpl::executor::is_supported_dbtype (*value))
+	{
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_SP_NOT_SUPPORTED_ARG_TYPE, 1,
+		  pr_type_name (DB_VALUE_TYPE (value)));
+	  qexec_free_plcs_frame (thread_p, frame);
+	  return ER_FAILED;
+	}
+      if (pr_clone_value (value, &frame->locals[i]) != NO_ERROR)
 	{
 	  qexec_free_plcs_frame (thread_p, frame);
 	  return ER_FAILED;
