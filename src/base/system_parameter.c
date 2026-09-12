@@ -820,6 +820,7 @@ static const char sysprm_ha_conf_file_name[] = "cubrid_ha.conf";
 
 #define PRM_NAME_PL_NATIVE_EXECUTION "pl_native_execution"
 #define PRM_NAME_PL_MAX_LOOP_ITERATIONS "pl_max_loop_iterations"
+#define PRM_NAME_PL_NATIVE_EXECUTION_STRICT "pl_native_execution_strict"
 
 // #endregion 
 
@@ -5566,6 +5567,18 @@ SYSPRM_PARAM prm_Def[] = {
    {false, {.i = 2000}},
    {false, {.i = 1000000}},
    {false, {.i = 2}},
+   (char *) NULL,
+   (DUP_PRM_FUNC) NULL,
+   (DUP_PRM_FUNC) NULL},
+  {PRM_ID_PL_NATIVE_EXECUTION_STRICT,
+   PRM_NAME_PL_NATIVE_EXECUTION_STRICT,
+   (PRM_FOR_CLIENT | PRM_USER_CHANGE | PRM_HIDDEN),
+   PRM_BOOLEAN,
+   PRM_CLEAR_DYNAMIC_FLAG,
+   {false, {.b = false}},
+   {false, {.b = false}},
+   NULL_SYSPRM_PARAM_VALUE,
+   NULL_SYSPRM_PARAM_VALUE,
    (char *) NULL,
    (DUP_PRM_FUNC) NULL,
    (DUP_PRM_FUNC) NULL},

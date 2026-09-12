@@ -816,9 +816,13 @@ jsp_call_stored_procedure (PARSER_CONTEXT *parser, PT_NODE *statement)
     {
       std::vector <DB_VALUE> out_args;
 
-      /* an empty plan means the PL engine takes the call, which is still the common case */
-      (void) pt_plcs_plan_stream (&sig, plan);
-      error = pl_call (sig, plan, args, out_args, ret_value);
+      /* an empty plan means the PL engine takes the call, which is still the common case. It
+       * fails only under pl_native_execution_strict, where refusing to build one is the point. */
+      error = pt_plcs_plan_stream (&sig, plan);
+      if (error == NO_ERROR)
+	{
+	  error = pl_call (sig, plan, args, out_args, ret_value);
+	}
       if (error == NO_ERROR)
 	{
 	  for (int i = 0, j = 0; i < sig.arg.arg_size; i++)

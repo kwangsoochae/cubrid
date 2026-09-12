@@ -553,9 +553,10 @@ enum param_id
 
   PRM_ID_PL_NATIVE_EXECUTION,
   PRM_ID_PL_MAX_LOOP_ITERATIONS,
+  PRM_ID_PL_NATIVE_EXECUTION_STRICT,
 
   /* change PRM_LAST_ID when adding new system parameters */
-  PRM_LAST_ID = PRM_ID_PL_MAX_LOOP_ITERATIONS
+  PRM_LAST_ID = PRM_ID_PL_NATIVE_EXECUTION_STRICT
 };
 typedef enum param_id PARAM_ID;
 
