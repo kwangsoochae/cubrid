@@ -30568,6 +30568,45 @@ pt_plcs_new_node (PLCS_OP op)
 }
 
 /*
+ * pt_plcs_cast_to () - wrap an expression in the cast a declared type asks for
+ *   return: the expression to use, unchanged when no cast is called for; NULL on error
+ *   parser(in) :
+ *   regu(in)   : what the expression lowered to
+ *   domain(in) : the declared type, NULL where there is nothing to coerce to
+ *   always(in) : cast even where the two types read the same. A value that arrived from
+ *                outside the frame needs this: the declaration says one thing and what the
+ *                caller put there may be another, and only the runtime value knows
+ *
+ * note: T_CAST_WRAP with STRICT_TYPE_CAST is the pair that refuses rather than forces. It goes
+ *       through tp_value_cast (), where a value the type cannot hold is an error; plain T_CAST
+ *       calls tp_value_cast_force (), which truncates a string to the declared length, and a
+ *       silent truncation is not what a declaration means here.
+ */
+static REGU_VARIABLE *
+pt_plcs_cast_to (PARSER_CONTEXT * parser, REGU_VARIABLE * regu, TP_DOMAIN * domain, bool always)
+{
+  REGU_VARIABLE *cast;
+
+  if (regu == NULL || domain == NULL || TP_DOMAIN_TYPE (domain) == DB_TYPE_VARIABLE
+      || (!always && regu->domain == domain))
+    {
+      return regu;
+    }
+
+  cast = pt_make_regu_arith (NULL, regu, NULL, T_CAST_WRAP, domain);
+  if (cast == NULL)
+    {
+      return NULL;
+    }
+  /* the operator reads its target type off the regu variable, and pt_make_regu_arith () fills
+   * only the arith */
+  cast->domain = domain;
+  REGU_VARIABLE_SET_FLAG (cast, REGU_VARIABLE_STRICT_TYPE_CAST);
+
+  return cast;
+}
+
+/*
  * pt_to_plcs_assign () - an assignment writing one slot
  *   return: the node, NULL on error
  *   parser(in) :
@@ -30603,24 +30642,10 @@ pt_to_plcs_assign (PARSER_CONTEXT * parser, int slot, PT_NODE ** value, PT_NODE 
     }
 
   domain = (target != NULL) ? pt_xasl_node_to_domain (parser, target) : NULL;
-  if (domain != NULL && TP_DOMAIN_TYPE (domain) != DB_TYPE_VARIABLE
-      && (always_cast || xasl->proc.plcs.expr->domain != domain))
+  xasl->proc.plcs.expr = pt_plcs_cast_to (parser, xasl->proc.plcs.expr, domain, always_cast);
+  if (xasl->proc.plcs.expr == NULL)
     {
-      /* T_CAST_WRAP with STRICT_TYPE_CAST is the pair that refuses rather than forces: it goes
-       * through tp_value_cast (), where a value the type cannot hold is an error. Plain T_CAST
-       * calls tp_value_cast_force (), which truncates a string to the declared length - and a
-       * silent truncation is not what a declaration means here. */
-      REGU_VARIABLE *cast = pt_make_regu_arith (NULL, xasl->proc.plcs.expr, NULL, T_CAST_WRAP, domain);
-
-      if (cast == NULL)
-	{
-	  return NULL;
-	}
-      /* the operator reads its target type off the regu variable, and pt_make_regu_arith ()
-       * fills only the arith */
-      cast->domain = domain;
-      REGU_VARIABLE_SET_FLAG (cast, REGU_VARIABLE_STRICT_TYPE_CAST);
-      xasl->proc.plcs.expr = cast;
+      return NULL;
     }
 
   return xasl;
