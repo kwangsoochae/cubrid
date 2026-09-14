@@ -4192,6 +4192,7 @@ stx_build_plcsql_proc (THREAD_ENTRY * thread_p, char *ptr, PLCSQL_PROC_NODE * pl
 
   ptr = or_unpack_int (ptr, &plcsql_proc->flags);
   ptr = or_unpack_int (ptr, &plcsql_proc->target_slot);
+  ptr = or_unpack_int (ptr, &plcsql_proc->jump_levels);
   ptr = or_unpack_int (ptr, &plcsql_proc->locals_cnt);
 
   ptr = or_unpack_int (ptr, &offset);

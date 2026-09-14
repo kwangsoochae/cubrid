@@ -3398,6 +3398,8 @@ typedef enum
   PT_SP_LOOP,
   PT_SP_CALL,			/* a call to a procedure, qualified or not */
   PT_SP_RETURN,			/* RETURN, with a value in a function and without one in a procedure */
+  PT_SP_EXIT,			/* EXIT, which leaves a loop */
+  PT_SP_CONTINUE,		/* CONTINUE, which starts a loop's next turn */
   PT_SP_NULL_STMT		/* the NULL statement */
 } PT_SP_STMT_OP;
 
@@ -3415,7 +3417,10 @@ struct pt_sp_stmt_info
   PT_SP_STMT_OP op;
   int flags;
   PT_NODE *name;		/* PT_NAME - assignment target, declared name, loop variable */
+  PT_NODE *label;		/* PT_NAME - LOOP: the name written before it. EXIT, CONTINUE: the loop
+				 * they name. NULL wherever none was written */
   PT_NODE *expr;		/* condition, assigned value, declaration default, lower bound.
+				 * EXIT, CONTINUE: the WHEN condition, NULL when unconditional.
 				 * CALL: the PT_METHOD_CALL, so that the SQL side's own lowering
 				 * of a stored procedure call can be reused whole */
   PT_NODE *expr2;		/* upper bound of a FOR range */

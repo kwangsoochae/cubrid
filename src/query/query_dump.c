@@ -2810,9 +2810,10 @@ qdump_print_xasl (xasl_node * xasl_p)
       break;
 
     case PLCSQL_PROC:
-      fprintf (foutput, "op:%s flags:%d target_slot:%d locals:%d children:%d\n",
+      fprintf (foutput, "op:%s flags:%d target_slot:%d jump_levels:%d locals:%d children:%d\n",
 	       qdump_plcsql_op_string (xasl_p->proc.plcsql.op), xasl_p->proc.plcsql.flags,
-	       xasl_p->proc.plcsql.target_slot, xasl_p->proc.plcsql.locals_cnt, xasl_p->proc.plcsql.children_cnt);
+	       xasl_p->proc.plcsql.target_slot, xasl_p->proc.plcsql.jump_levels, xasl_p->proc.plcsql.locals_cnt,
+	       xasl_p->proc.plcsql.children_cnt);
       break;
 
     default:

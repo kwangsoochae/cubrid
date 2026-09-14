@@ -29088,7 +29088,27 @@ qexec_execute_plcsql_stmt (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE
       return NO_ERROR;
 
     case PLCSQL_OP_JUMP:
-      assert (xasl->proc.plcsql.flags == PLCSQL_JUMP_RETURN);
+      if (xasl->proc.plcsql.flags != PLCSQL_JUMP_RETURN)
+	{
+	  /* EXIT and CONTINUE. The expression is the WHEN condition, and one written without it
+	   * always acts; the enclosing loops read the signal and count the levels down. */
+	  if (xasl->proc.plcsql.expr != NULL)
+	    {
+	      if (qexec_plcsql_test (thread_p, xasl->proc.plcsql.expr, xasl_state, &taken) != NO_ERROR)
+		{
+		  return ER_FAILED;
+		}
+	      if (!taken)
+		{
+		  return NO_ERROR;
+		}
+	    }
+
+	  frame->signal = (xasl->proc.plcsql.flags == PLCSQL_JUMP_EXIT) ? PLCSQL_SIGNAL_EXIT : PLCSQL_SIGNAL_CONTINUE;
+	  frame->signal_level = xasl->proc.plcsql.jump_levels;
+	  return NO_ERROR;
+	}
+
       frame->signal = PLCSQL_SIGNAL_RETURN;
       if (xasl->proc.plcsql.expr == NULL)
 	{
