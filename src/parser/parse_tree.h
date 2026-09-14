@@ -3400,6 +3400,7 @@ typedef enum
   PT_SP_RETURN,			/* RETURN, with a value in a function and without one in a procedure */
   PT_SP_EXIT,			/* EXIT, which leaves a loop */
   PT_SP_CONTINUE,		/* CONTINUE, which starts a loop's next turn */
+  PT_SP_SQL,			/* one SQL statement written in the body */
   PT_SP_NULL_STMT		/* the NULL statement */
 } PT_SP_STMT_OP;
 
@@ -3431,6 +3432,8 @@ struct pt_sp_stmt_info
   PT_NODE *decl_list;		/* BLOCK: the declarations */
   PT_NODE *body;		/* BLOCK, LOOP: statements. IF: the then branch */
   PT_NODE *else_body;		/* IF: the else branch */
+  const char *sql_text;		/* SQL: the statement as written, which is what the SQL parser
+				 * is given - a hint lives in a comment, so nothing is normalised */
 };
 
 /* DO ENTITY INFO */

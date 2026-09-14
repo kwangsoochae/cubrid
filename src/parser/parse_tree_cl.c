@@ -8455,6 +8455,11 @@ pt_print_sp_stmt (PARSER_CONTEXT * parser, PT_NODE * p)
       q = pt_append_nulstring (parser, q, ";");
       break;
 
+    case PT_SP_SQL:
+      q = pt_append_nulstring (parser, q, p->info.sp_stmt.sql_text);
+      q = pt_append_nulstring (parser, q, ";");
+      break;
+
     case PT_SP_NULL_STMT:
       q = pt_append_nulstring (parser, q, "null;");
       break;

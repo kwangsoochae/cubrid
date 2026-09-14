@@ -30394,6 +30394,10 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
 	    }
 	  break;
 
+	case PT_SP_SQL:
+	  /* the names inside are the SQL parser's to bind, and it has not read the text yet */
+	  break;
+
 	case PT_SP_NULL_STMT:
 	  break;
 
@@ -31261,6 +31265,9 @@ pt_to_plcsql_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * ret_doma
 	  return NULL;
 	}
       return xasl;
+
+    case PT_SP_SQL:
+      return pt_plcsql_refuse (parser, "a SQL statement in the body is not carried in the plan yet");
 
     case PT_SP_DECL:
     case PT_SP_NULL_STMT:

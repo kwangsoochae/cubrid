@@ -80,13 +80,13 @@ static PT_NODE *sp_make_data_type (PT_TYPE_ENUM type, int precision, int scale);
 %token AND_ DIV_ IS_ MOD_ OR_
 %token ASSIGN DOTDOT CONCAT NE GE LE LABEL_BEGIN LABEL_END
 
-%token <cptr> IDENT UNSIGNED_INTEGER UNSIGNED_REAL CHAR_STRING
+%token <cptr> IDENT UNSIGNED_INTEGER UNSIGNED_REAL CHAR_STRING SQL_TEXT
 %token <number> TYPE_KEYWORD
 
 %type <node> block decl_list decl_list_opt decl stmt_list stmt if_stmt else_part_opt loop_stmt
 %type <node> assign_stmt block_stmt null_stmt return_stmt return_opt expr expr_list_opt type_spec
 %type <node> call_stmt sp_name arg_list_opt arg_list
-%type <node> jump_stmt label_decl_opt label_opt when_opt
+%type <node> jump_stmt label_decl_opt label_opt when_opt sql_stmt
 %type <node> routine param_list_opt param_list param
 %type <number> constant_opt reverse_opt
 
@@ -341,6 +341,7 @@ stmt
 	| block_stmt
 	| return_stmt
 	| jump_stmt
+	| sql_stmt
 	| null_stmt
 	;
 
@@ -561,6 +562,21 @@ label_opt
 	| IDENT
 		{
 		  $$ = pt_name (sp_Parser, $1);
+		}
+	;
+
+/* The SQL is carried as the text the lexer gathered. It is not parsed here: the SQL parser is
+ * not reentrant and this one is running, so the text waits until this parse has returned. */
+sql_stmt
+	: SQL_TEXT
+		{
+		  PT_NODE *node = sp_make_stmt (PT_SP_SQL);
+
+		  if (node != NULL)
+		    {
+		      node->info.sp_stmt.sql_text = $1;
+		    }
+		  $$ = node;
 		}
 	;
 
@@ -915,6 +931,46 @@ sp_copy_token (const char *text)
     }
 
   return pt_append_string (sp_Parser, NULL, text);
+}
+
+/* The SQL text of the statement being crossed. One at a time: a statement is finished before
+ * the next begins, and the parse is not reentrant. */
+static PARSER_VARCHAR *sp_Sql_text = NULL;
+
+/*
+ * sp_sql_begin () - start gathering one SQL statement
+ *   return:
+ *   text(in) : the keyword that began it, which belongs to the statement
+ */
+void
+sp_sql_begin (const char *text)
+{
+  sp_Sql_text = pt_append_nulstring (sp_Parser, NULL, text);
+}
+
+/*
+ * sp_sql_add () - add what the scan just crossed
+ *   return:
+ *   text(in) :
+ */
+void
+sp_sql_add (const char *text)
+{
+  sp_Sql_text = pt_append_nulstring (sp_Parser, sp_Sql_text, text);
+}
+
+/*
+ * sp_sql_take () - the statement gathered so far, and start over
+ *   return: the text on the parser, NULL when nothing was gathered
+ */
+char *
+sp_sql_take (void)
+{
+  char *text = (sp_Sql_text != NULL) ? (char *) pt_get_varchar_bytes (sp_Sql_text) : NULL;
+
+  sp_Sql_text = NULL;
+
+  return text;
 }
 
 /*
