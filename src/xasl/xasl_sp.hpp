@@ -41,7 +41,7 @@ namespace cubxasl
     DB_VALUE *value; // return value
     /* The procedure's own plan, when the client could build one. NULL means this call goes to
      * the PL engine, which is still the only way to run everything the grammar does not take. */
-    xasl_node *plcs;
+    xasl_node *plcsql;
   };
 };
 

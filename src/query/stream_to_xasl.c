@@ -111,7 +111,7 @@ static char *stx_build_delete_proc (THREAD_ENTRY * thread_p, char *tmp, DELETE_P
 static char *stx_build_insert_proc (THREAD_ENTRY * thread_p, char *tmp, INSERT_PROC_NODE * ptr);
 static char *stx_build_merge_proc (THREAD_ENTRY * thread_p, char *tmp, MERGE_PROC_NODE * ptr);
 static char *stx_build_cte_proc (THREAD_ENTRY * thread_p, char *tmp, CTE_PROC_NODE * ptr);
-static char *stx_build_plcs_proc (THREAD_ENTRY * thread_p, char *tmp, PLCS_PROC_NODE * ptr);
+static char *stx_build_plcsql_proc (THREAD_ENTRY * thread_p, char *tmp, PLCSQL_PROC_NODE * ptr);
 static char *stx_build_outptr_list (THREAD_ENTRY * thread_p, char *tmp, OUTPTR_LIST * ptr);
 static char *stx_build_selupd_list (THREAD_ENTRY * thread_p, char *tmp, SELUPD_LIST * ptr);
 static char *stx_build_pred_expr (THREAD_ENTRY * thread_p, char *tmp, PRED_EXPR * ptr);
@@ -2341,8 +2341,8 @@ stx_build_xasl_node (THREAD_ENTRY * thread_p, char *ptr, XASL_NODE * xasl)
       ptr = stx_build_cte_proc (thread_p, ptr, &xasl->proc.cte);
       break;
 
-    case PLCS_PROC:
-      ptr = stx_build_plcs_proc (thread_p, ptr, &xasl->proc.plcs);
+    case PLCSQL_PROC:
+      ptr = stx_build_plcsql_proc (thread_p, ptr, &xasl->proc.plcsql);
       break;
 
     default:
@@ -4180,7 +4180,7 @@ error:
 }
 
 static char *
-stx_build_plcs_proc (THREAD_ENTRY * thread_p, char *ptr, PLCS_PROC_NODE * plcs_proc)
+stx_build_plcsql_proc (THREAD_ENTRY * thread_p, char *ptr, PLCSQL_PROC_NODE * plcsql_proc)
 {
   int offset;
   int i;
@@ -4188,60 +4188,61 @@ stx_build_plcs_proc (THREAD_ENTRY * thread_p, char *ptr, PLCS_PROC_NODE * plcs_p
   XASL_UNPACK_INFO *xasl_unpack_info = get_xasl_unpack_info_ptr (thread_p);
 
   ptr = or_unpack_int (ptr, &tmp);
-  plcs_proc->op = (PLCS_OP) tmp;
+  plcsql_proc->op = (PLCSQL_OP) tmp;
 
-  ptr = or_unpack_int (ptr, &plcs_proc->flags);
-  ptr = or_unpack_int (ptr, &plcs_proc->target_slot);
-  ptr = or_unpack_int (ptr, &plcs_proc->locals_cnt);
-
-  ptr = or_unpack_int (ptr, &offset);
-  if (offset == 0)
-    {
-      plcs_proc->expr = NULL;
-    }
-  else
-    {
-      plcs_proc->expr = stx_restore_regu_variable (thread_p, &xasl_unpack_info->packed_xasl[offset]);
-      if (plcs_proc->expr == NULL)
-	{
-	  goto error;
-	}
-    }
+  ptr = or_unpack_int (ptr, &plcsql_proc->flags);
+  ptr = or_unpack_int (ptr, &plcsql_proc->target_slot);
+  ptr = or_unpack_int (ptr, &plcsql_proc->locals_cnt);
 
   ptr = or_unpack_int (ptr, &offset);
   if (offset == 0)
     {
-      plcs_proc->expr2 = NULL;
+      plcsql_proc->expr = NULL;
     }
   else
     {
-      plcs_proc->expr2 = stx_restore_regu_variable (thread_p, &xasl_unpack_info->packed_xasl[offset]);
-      if (plcs_proc->expr2 == NULL)
+      plcsql_proc->expr = stx_restore_regu_variable (thread_p, &xasl_unpack_info->packed_xasl[offset]);
+      if (plcsql_proc->expr == NULL)
 	{
 	  goto error;
 	}
     }
 
-  ptr = or_unpack_int (ptr, &plcs_proc->children_cnt);
-  if (plcs_proc->children_cnt == 0)
+  ptr = or_unpack_int (ptr, &offset);
+  if (offset == 0)
     {
-      plcs_proc->children = NULL;
+      plcsql_proc->expr2 = NULL;
     }
   else
     {
-      assert (plcs_proc->children_cnt > 0);
+      plcsql_proc->expr2 = stx_restore_regu_variable (thread_p, &xasl_unpack_info->packed_xasl[offset]);
+      if (plcsql_proc->expr2 == NULL)
+	{
+	  goto error;
+	}
+    }
 
-      plcs_proc->children = (XASL_NODE **) stx_alloc_struct (thread_p, sizeof (XASL_NODE *) * plcs_proc->children_cnt);
-      if (plcs_proc->children == NULL)
+  ptr = or_unpack_int (ptr, &plcsql_proc->children_cnt);
+  if (plcsql_proc->children_cnt == 0)
+    {
+      plcsql_proc->children = NULL;
+    }
+  else
+    {
+      assert (plcsql_proc->children_cnt > 0);
+
+      plcsql_proc->children =
+	(XASL_NODE **) stx_alloc_struct (thread_p, sizeof (XASL_NODE *) * plcsql_proc->children_cnt);
+      if (plcsql_proc->children == NULL)
 	{
 	  goto error;
 	}
 
-      for (i = 0; i < plcs_proc->children_cnt; i++)
+      for (i = 0; i < plcsql_proc->children_cnt; i++)
 	{
 	  ptr = or_unpack_int (ptr, &offset);
-	  plcs_proc->children[i] = stx_restore_xasl_node (thread_p, &xasl_unpack_info->packed_xasl[offset]);
-	  if (plcs_proc->children[i] == NULL)
+	  plcsql_proc->children[i] = stx_restore_xasl_node (thread_p, &xasl_unpack_info->packed_xasl[offset]);
+	  if (plcsql_proc->children[i] == NULL)
 	    {
 	      goto error;
 	    }
@@ -5885,8 +5886,8 @@ stx_unpack_regu_variable_value (THREAD_ENTRY * thread_p, char *ptr, REGU_VARIABL
       ptr = or_unpack_int (ptr, &regu_var->value.val_pos);
       break;
 
-    case TYPE_PLCS_SLOT:
-      ptr = or_unpack_int (ptr, &regu_var->value.plcs_slot);
+    case TYPE_PLCSQL_SLOT:
+      ptr = or_unpack_int (ptr, &regu_var->value.plcsql_slot);
       break;
 
     case TYPE_OID:
@@ -6285,12 +6286,12 @@ stx_build_sp_type (THREAD_ENTRY * thread_p, char *ptr, SP_TYPE * sp)
   ptr = or_unpack_int (ptr, &offset);
   if (offset == 0)
     {
-      sp->plcs = NULL;
+      sp->plcsql = NULL;
     }
   else
     {
-      sp->plcs = stx_restore_xasl_node (thread_p, &xasl_unpack_info->packed_xasl[offset]);
-      if (sp->plcs == NULL)
+      sp->plcsql = stx_restore_xasl_node (thread_p, &xasl_unpack_info->packed_xasl[offset]);
+      if (sp->plcsql == NULL)
 	{
 	  stx_set_xasl_errcode (thread_p, ER_OUT_OF_VIRTUAL_MEMORY);
 	  return NULL;

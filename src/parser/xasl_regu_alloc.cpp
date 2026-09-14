@@ -121,13 +121,13 @@ regu_xasl_proc_init (xasl_node &node, PROC_TYPE type)
       node.proc.cte.non_recursive_part = NULL;
       break;
 
-    case PLCS_PROC:
-      node.proc.plcs.op = PLCS_OP_BLOCK;
-      node.proc.plcs.flags = 0;
-      node.proc.plcs.expr = NULL;
-      node.proc.plcs.target_slot = -1;
-      node.proc.plcs.children = NULL;
-      node.proc.plcs.children_cnt = 0;
+    case PLCSQL_PROC:
+      node.proc.plcsql.op = PLCSQL_OP_BLOCK;
+      node.proc.plcsql.flags = 0;
+      node.proc.plcsql.expr = NULL;
+      node.proc.plcsql.target_slot = -1;
+      node.proc.plcsql.children = NULL;
+      node.proc.plcsql.children_cnt = 0;
       break;
 
     default:

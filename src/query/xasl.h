@@ -204,7 +204,7 @@ typedef enum
   MERGE_PROC,
   BUILD_SCHEMA_PROC,
   CTE_PROC,
-  PLCS_PROC
+  PLCSQL_PROC
 } PROC_TYPE;
 
 typedef struct qproc_db_value_list *QPROC_DB_VALUE_LIST;	/* TODO */
@@ -496,33 +496,33 @@ struct cte_proc_node
  * type of its own costs about 85 reference sites - counted on CTE_PROC. */
 typedef enum
 {
-  PLCS_OP_BLOCK,		/* declarations and body */
-  PLCS_OP_ASSIGN,
-  PLCS_OP_IF,
-  PLCS_OP_CASE,
-  PLCS_OP_LOOP,			/* basic, while and the FOR forms, told apart by flags */
-  PLCS_OP_JUMP,			/* EXIT, CONTINUE, RETURN */
-  PLCS_OP_RAISE,		/* RAISE, RAISE_APPLICATION_ERROR */
-  PLCS_OP_CURSOR,		/* OPEN, FETCH, CLOSE, OPEN FOR */
-  PLCS_OP_CALL			/* procedure call */
-} PLCS_OP;
+  PLCSQL_OP_BLOCK,		/* declarations and body */
+  PLCSQL_OP_ASSIGN,
+  PLCSQL_OP_IF,
+  PLCSQL_OP_CASE,
+  PLCSQL_OP_LOOP,		/* basic, while and the FOR forms, told apart by flags */
+  PLCSQL_OP_JUMP,		/* EXIT, CONTINUE, RETURN */
+  PLCSQL_OP_RAISE,		/* RAISE, RAISE_APPLICATION_ERROR */
+  PLCSQL_OP_CURSOR,		/* OPEN, FETCH, CLOSE, OPEN FOR */
+  PLCSQL_OP_CALL		/* procedure call */
+} PLCSQL_OP;
 
-/* plcs_proc_node.flags of a PLCS_OP_JUMP. EXIT and CONTINUE get theirs when 50004 lowers them;
+/* plcsql_proc_node.flags of a PLCSQL_OP_JUMP. EXIT and CONTINUE get theirs when 50004 lowers them;
  * a jump with no flag set is the RETURN that leaves the routine. */
-#define PLCS_JUMP_RETURN	0x00
+#define PLCSQL_JUMP_RETURN	0x00
 
-/* plcs_proc_node.flags of a PLCS_OP_LOOP. These mirror the parse tree's PT_SP_LOOP_*, which the
- * XASL side cannot include; pt_to_plcs_stmt () maps one onto the other rather than casting. */
-#define PLCS_LOOP_BASIC		0x00	/* LOOP ... END LOOP */
-#define PLCS_LOOP_WHILE		0x01
-#define PLCS_LOOP_FOR		0x02
-#define PLCS_LOOP_FORM_MASK	0x03
-#define PLCS_LOOP_REVERSE	0x04	/* FOR i IN REVERSE lo .. hi */
+/* plcsql_proc_node.flags of a PLCSQL_OP_LOOP. These mirror the parse tree's PT_SP_LOOP_*, which the
+ * XASL side cannot include; pt_to_plcsql_stmt () maps one onto the other rather than casting. */
+#define PLCSQL_LOOP_BASIC		0x00	/* LOOP ... END LOOP */
+#define PLCSQL_LOOP_WHILE		0x01
+#define PLCSQL_LOOP_FOR		0x02
+#define PLCSQL_LOOP_FORM_MASK	0x03
+#define PLCSQL_LOOP_REVERSE	0x04	/* FOR i IN REVERSE lo .. hi */
 
-typedef struct plcs_proc_node PLCS_PROC_NODE;
-struct plcs_proc_node
+typedef struct plcsql_proc_node PLCSQL_PROC_NODE;
+struct plcsql_proc_node
 {
-  PLCS_OP op;
+  PLCSQL_OP op;
   int flags;			/* op-specific: which loop form, which jump */
   REGU_VARIABLE *expr;		/* condition, assigned value, RAISE argument */
   REGU_VARIABLE *expr2;		/* LOOP: the upper bound of a FOR, NULL in every other form */
@@ -1246,7 +1246,7 @@ struct xasl_node
     CONNECTBY_PROC_NODE connect_by;	/* CONNECTBY_PROC */
     MERGE_PROC_NODE merge;	/* MERGE_PROC */
     CTE_PROC_NODE cte;		/* CTE_PROC */
-    PLCS_PROC_NODE plcs;	/* PLCS_PROC */
+    PLCSQL_PROC_NODE plcsql;	/* PLCSQL_PROC */
   } proc;
 
   /* XASL cache related information */

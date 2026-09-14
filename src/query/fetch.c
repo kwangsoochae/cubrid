@@ -4610,10 +4610,10 @@ error:
 }
 
 /*
- * fetch_execute_plcs () - run a procedure the server has a plan for
+ * fetch_execute_plcsql () - run a procedure the server has a plan for
  *   return: NO_ERROR or ER_FAILED
  *   thread_p(in) :
- *   sp(in)     : the call, whose plcs is the procedure's plan
+ *   sp(in)     : the call, whose plcsql is the procedure's plan
  *   vd(in)     : the value descriptor of the statement making the call
  *   obj_oid(in), tpl(in) : what the arguments are evaluated against
  *
@@ -4621,10 +4621,10 @@ error:
  *       and because the arguments have to be in their slots before the body starts.
  */
 static int
-fetch_execute_plcs (THREAD_ENTRY * thread_p, SP_TYPE * sp, val_descr * vd, OID * obj_oid, QFILE_TUPLE tpl)
+fetch_execute_plcsql (THREAD_ENTRY * thread_p, SP_TYPE * sp, val_descr * vd, OID * obj_oid, QFILE_TUPLE tpl)
 {
   XASL_STATE *xasl_state = vd->xasl_state;
-  PLCS_FRAME *caller, *frame;
+  PLCSQL_FRAME *caller, *frame;
   REGU_VARIABLE_LIST arg;
   int error, i;
 
@@ -4634,7 +4634,7 @@ fetch_execute_plcs (THREAD_ENTRY * thread_p, SP_TYPE * sp, val_descr * vd, OID *
       return ER_FAILED;
     }
 
-  frame = qexec_alloc_plcs_frame (thread_p, sp->plcs->proc.plcs.locals_cnt, xasl_state->plcs_frame);
+  frame = qexec_alloc_plcsql_frame (thread_p, sp->plcsql->proc.plcsql.locals_cnt, xasl_state->plcsql_frame);
   if (frame == NULL)
     {
       return ER_FAILED;
@@ -4650,12 +4650,12 @@ fetch_execute_plcs (THREAD_ENTRY * thread_p, SP_TYPE * sp, val_descr * vd, OID *
       if (i >= frame->locals_cnt)
 	{
 	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_XASLNODE, 0);
-	  qexec_free_plcs_frame (thread_p, frame);
+	  qexec_free_plcsql_frame (thread_p, frame);
 	  return ER_FAILED;
 	}
       if (fetch_peek_dbval (thread_p, &arg->value, vd, NULL, obj_oid, tpl, &value) != NO_ERROR)
 	{
-	  qexec_free_plcs_frame (thread_p, frame);
+	  qexec_free_plcsql_frame (thread_p, frame);
 	  return ER_FAILED;
 	}
       /* the same question the PL engine asks of an argument. Running the routine here instead
@@ -4664,20 +4664,20 @@ fetch_execute_plcs (THREAD_ENTRY * thread_p, SP_TYPE * sp, val_descr * vd, OID *
 	{
 	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_SP_NOT_SUPPORTED_ARG_TYPE, 1,
 		  pr_type_name (DB_VALUE_TYPE (value)));
-	  qexec_free_plcs_frame (thread_p, frame);
+	  qexec_free_plcsql_frame (thread_p, frame);
 	  return ER_FAILED;
 	}
       if (pr_clone_value (value, &frame->locals[i]) != NO_ERROR)
 	{
-	  qexec_free_plcs_frame (thread_p, frame);
+	  qexec_free_plcsql_frame (thread_p, frame);
 	  return ER_FAILED;
 	}
     }
 
-  caller = xasl_state->plcs_frame;
-  xasl_state->plcs_frame = frame;
-  error = qexec_execute_plcs (thread_p, sp->plcs, xasl_state);
-  xasl_state->plcs_frame = caller;
+  caller = xasl_state->plcsql_frame;
+  xasl_state->plcsql_frame = frame;
+  error = qexec_execute_plcsql (thread_p, sp->plcsql, xasl_state);
+  xasl_state->plcsql_frame = caller;
 
   /* what a RETURN left, which is NULL for a procedure and for a function that reached its end
    * without one. The caller cleared the value before the call. */
@@ -4686,7 +4686,7 @@ fetch_execute_plcs (THREAD_ENTRY * thread_p, SP_TYPE * sp, val_descr * vd, OID *
       error = pr_clone_value (&frame->retval, sp->value);
     }
 
-  qexec_free_plcs_frame (thread_p, frame);
+  qexec_free_plcsql_frame (thread_p, frame);
 
   return error;
 }
@@ -4838,21 +4838,21 @@ fetch_peek_dbval_slow (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_de
       *peek_dbval = (DB_VALUE *) vd->dbval_ptr + regu_var->value.val_pos;
       break;
 
-    case TYPE_PLCS_SLOT:	/* fetch a PL/CSQL local out of the frame */
+    case TYPE_PLCSQL_SLOT:	/* fetch a PL/CSQL local out of the frame */
       /* NOT_CONST where the TYPE_POS_VALUE sibling above is ALL_CONST: a host variable holds
        * still while the statement runs, but an assignment in the procedure body rewrites a
        * local, and fetch_peek_arith () would go on serving the value it cached on first pass. */
       REGU_VARIABLE_SET_FLAG (regu_var, REGU_VARIABLE_FETCH_NOT_CONST);
       assert (!REGU_VARIABLE_IS_FLAGED (regu_var, REGU_VARIABLE_FETCH_ALL_CONST));
-      assert (regu_var->value.plcs_slot >= 0);
+      assert (regu_var->value.plcsql_slot >= 0);
 
-      if (vd->xasl_state == NULL || vd->xasl_state->plcs_frame == NULL
-	  || regu_var->value.plcs_slot >= vd->xasl_state->plcs_frame->locals_cnt)
+      if (vd->xasl_state == NULL || vd->xasl_state->plcsql_frame == NULL
+	  || regu_var->value.plcsql_slot >= vd->xasl_state->plcsql_frame->locals_cnt)
 	{
 	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_XASLNODE, 0);
 	  goto exit_on_error;
 	}
-      *peek_dbval = &vd->xasl_state->plcs_frame->locals[regu_var->value.plcs_slot];
+      *peek_dbval = &vd->xasl_state->plcsql_frame->locals[regu_var->value.plcsql_slot];
       break;
 
     case TYPE_CONSTANT:	/* fetch constant-column value */
@@ -4958,12 +4958,12 @@ fetch_peek_dbval_slow (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_de
 	pr_clear_value (regu_var->value.sp_ptr->value);
 	fetch_force_not_const_recursive (*regu_var);
 
-	if (regu_var->value.sp_ptr->plcs != NULL)
+	if (regu_var->value.sp_ptr->plcsql != NULL)
 	  {
 	    /* the client could build the procedure's own plan, so the server runs it here instead
 	     * of handing the call to the PL engine. Everything the grammar does not take still
 	     * arrives with a NULL plan and goes the way below. */
-	    error = fetch_execute_plcs (thread_p, regu_var->value.sp_ptr, vd, obj_oid, tpl);
+	    error = fetch_execute_plcsql (thread_p, regu_var->value.sp_ptr, vd, obj_oid, tpl);
 	    if (error != NO_ERROR)
 	      {
 		/* the wrapper the PL engine path also puts on: what a query sees when a routine
