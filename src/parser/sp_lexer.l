@@ -54,6 +54,7 @@ static SP_KEYWORD sp_Keywords[] = {
   {"char", TYPE_KEYWORD, PT_TYPE_CHAR},
   {"character", TYPE_KEYWORD, PT_TYPE_CHAR},
   {"constant", CONSTANT_, PT_TYPE_NONE},
+  {"continue", CONTINUE_, PT_TYPE_NONE},
   {"create", CREATE_, PT_TYPE_NONE},
   {"date", TYPE_KEYWORD, PT_TYPE_DATE},
   {"datetime", TYPE_KEYWORD, PT_TYPE_DATETIME},
@@ -63,6 +64,7 @@ static SP_KEYWORD sp_Keywords[] = {
   {"else", ELSE_, PT_TYPE_NONE},
   {"elsif", ELSIF_, PT_TYPE_NONE},
   {"end", END_, PT_TYPE_NONE},
+  {"exit", EXIT_, PT_TYPE_NONE},
   {"float", TYPE_KEYWORD, PT_TYPE_FLOAT},
   {"for", FOR_, PT_TYPE_NONE},
   {"function", FUNCTION_, PT_TYPE_NONE},
@@ -88,6 +90,7 @@ static SP_KEYWORD sp_Keywords[] = {
   {"time", TYPE_KEYWORD, PT_TYPE_TIME},
   {"timestamp", TYPE_KEYWORD, PT_TYPE_TIMESTAMP},
   {"varchar", TYPE_KEYWORD, PT_TYPE_VARCHAR},
+  {"when", WHEN_, PT_TYPE_NONE},
   {"while", WHILE_, PT_TYPE_NONE}
 };
 
@@ -118,6 +121,8 @@ real		{digit}+"."{digit}+([eE][+-]?{digit}+)?|"."{digit}+([eE][+-]?{digit}+)?|{d
 <COMMENT>.|\n		{ }
 
 ":="			{ return ASSIGN; }
+"<<"			{ return LABEL_BEGIN; }
+">>"			{ return LABEL_END; }
 ".."			{ return DOTDOT; }
 "||"			{ return CONCAT; }
 "<>"			{ return NE; }

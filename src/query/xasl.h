@@ -507,9 +507,11 @@ typedef enum
   PLCSQL_OP_CALL		/* procedure call */
 } PLCSQL_OP;
 
-/* plcsql_proc_node.flags of a PLCSQL_OP_JUMP. EXIT and CONTINUE get theirs when 50004 lowers them;
- * a jump with no flag set is the RETURN that leaves the routine. */
+/* plcsql_proc_node.flags of a PLCSQL_OP_JUMP. A jump with no flag set is the RETURN that leaves
+ * the routine; the other two leave loops, as many as plcsql_proc_node.jump_levels says. */
 #define PLCSQL_JUMP_RETURN	0x00
+#define PLCSQL_JUMP_EXIT	0x01
+#define PLCSQL_JUMP_CONTINUE	0x02
 
 /* plcsql_proc_node.flags of a PLCSQL_OP_LOOP. These mirror the parse tree's PT_SP_LOOP_*, which the
  * XASL side cannot include; pt_to_plcsql_stmt () maps one onto the other rather than casting. */
@@ -527,6 +529,8 @@ struct plcsql_proc_node
   REGU_VARIABLE *expr;		/* condition, assigned value, RAISE argument */
   REGU_VARIABLE *expr2;		/* LOOP: the upper bound of a FOR, NULL in every other form */
   int target_slot;		/* frame slot an assignment writes, -1 when there is none */
+  int jump_levels;		/* JUMP: how many enclosing loops an EXIT or CONTINUE acts on - 1 for one
+				 * written without a label, and the depth of the labelled loop otherwise */
   int locals_cnt;		/* BLOCK: how many slots the frame needs. Numbering is flat over the
 				 * procedure, so only its outermost block carries the count */
   /* An SQL statement inside a procedure is a plain XASL node, not a kind of its own, and

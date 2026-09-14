@@ -8283,6 +8283,7 @@ static PT_NODE *
 pt_apply_sp_stmt (PARSER_CONTEXT * parser, PT_NODE * p, void *arg)
 {
   PT_APPLY_WALK (parser, p->info.sp_stmt.name, arg);
+  PT_APPLY_WALK (parser, p->info.sp_stmt.label, arg);
   PT_APPLY_WALK (parser, p->info.sp_stmt.expr, arg);
   PT_APPLY_WALK (parser, p->info.sp_stmt.expr2, arg);
   PT_APPLY_WALK (parser, p->info.sp_stmt.decl_list, arg);
@@ -8398,6 +8399,13 @@ pt_print_sp_stmt (PARSER_CONTEXT * parser, PT_NODE * p)
       break;
 
     case PT_SP_LOOP:
+      if (p->info.sp_stmt.label != NULL)
+	{
+	  r1 = pt_print_bytes (parser, p->info.sp_stmt.label);
+	  q = pt_append_nulstring (parser, q, "<<");
+	  q = pt_append_varchar (parser, q, r1);
+	  q = pt_append_nulstring (parser, q, ">> ");
+	}
       form = p->info.sp_stmt.flags & PT_SP_LOOP_FORM_MASK;
       if (form == PT_SP_LOOP_WHILE)
 	{
@@ -8427,6 +8435,24 @@ pt_print_sp_stmt (PARSER_CONTEXT * parser, PT_NODE * p)
       r1 = pt_print_sp_stmt_list (parser, p->info.sp_stmt.body);
       q = pt_append_varchar (parser, q, r1);
       q = pt_append_nulstring (parser, q, "end loop;");
+      break;
+
+    case PT_SP_EXIT:
+    case PT_SP_CONTINUE:
+      q = pt_append_nulstring (parser, q, p->info.sp_stmt.op == PT_SP_EXIT ? "exit" : "continue");
+      if (p->info.sp_stmt.label != NULL)
+	{
+	  r1 = pt_print_bytes (parser, p->info.sp_stmt.label);
+	  q = pt_append_nulstring (parser, q, " ");
+	  q = pt_append_varchar (parser, q, r1);
+	}
+      if (p->info.sp_stmt.expr != NULL)
+	{
+	  r1 = pt_print_bytes (parser, p->info.sp_stmt.expr);
+	  q = pt_append_nulstring (parser, q, " when ");
+	  q = pt_append_varchar (parser, q, r1);
+	}
+      q = pt_append_nulstring (parser, q, ";");
       break;
 
     case PT_SP_NULL_STMT:

@@ -56,7 +56,9 @@ extern void sp_yy_delete_buffer (SP_YY_BUFFER_STATE buf);
 
 static PT_NODE *sp_make_stmt (PT_SP_STMT_OP op);
 static void sp_unbound_char (PT_NODE * dt);
-static PT_NODE *sp_make_loop (int form, PT_NODE * name, PT_NODE * lower, PT_NODE * upper, PT_NODE * body);
+static PT_NODE *sp_make_loop (int form, PT_NODE * label, PT_NODE * name, PT_NODE * lower, PT_NODE * upper,
+			      PT_NODE * body);
+static PT_NODE *sp_make_jump (PT_SP_STMT_OP op, PT_NODE * label, PT_NODE * cond);
 static PT_NODE *sp_make_integer_literal (const char *text);
 static PT_NODE *sp_make_real_literal (const char *text);
 static PT_NODE *sp_make_null_literal (void);
@@ -70,10 +72,11 @@ static PT_NODE *sp_make_data_type (PT_TYPE_ENUM type, int precision, int scale);
   int number;
 }
 
-%token BEGIN_ CONSTANT_ DECLARE_ ELSE_ ELSIF_ END_ FOR_ IF_ IN_ LOOP_ NOT_ NULL_ REVERSE_ THEN_ WHILE_
+%token BEGIN_ CONSTANT_ CONTINUE_ DECLARE_ ELSE_ ELSIF_ END_ EXIT_ FOR_ IF_ IN_ LOOP_ NOT_ NULL_ REVERSE_
+%token THEN_ WHEN_ WHILE_
 %token AS_ AUTHID_ CREATE_ FUNCTION_ OUT_ PROCEDURE_ REPLACE_ RETURN_
 %token AND_ IS_ MOD_ OR_
-%token ASSIGN DOTDOT CONCAT NE GE LE
+%token ASSIGN DOTDOT CONCAT NE GE LE LABEL_BEGIN LABEL_END
 
 %token <cptr> IDENT UNSIGNED_INTEGER UNSIGNED_REAL CHAR_STRING
 %token <number> TYPE_KEYWORD
@@ -81,6 +84,7 @@ static PT_NODE *sp_make_data_type (PT_TYPE_ENUM type, int precision, int scale);
 %type <node> block decl_list decl_list_opt decl stmt_list stmt if_stmt else_part_opt loop_stmt
 %type <node> assign_stmt block_stmt null_stmt return_stmt return_opt expr expr_list_opt type_spec
 %type <node> call_stmt sp_name arg_list_opt arg_list
+%type <node> jump_stmt label_decl_opt label_opt when_opt
 %type <node> routine param_list_opt param_list param
 %type <number> constant_opt reverse_opt
 
@@ -334,6 +338,7 @@ stmt
 	| loop_stmt
 	| block_stmt
 	| return_stmt
+	| jump_stmt
 	| null_stmt
 	;
 
@@ -517,18 +522,68 @@ else_part_opt
 		}
 	;
 
+/* The name after END LOOP is read and dropped. PL/CSQL does not require it to be the one the
+ * loop opened with - a body naming a different one there is stored, so refusing it here would
+ * refuse a body the engine already holds. */
 loop_stmt
-	: LOOP_ stmt_list END_ LOOP_ ';'
+	: label_decl_opt LOOP_ stmt_list END_ LOOP_ label_opt ';'
 		{
-		  $$ = sp_make_loop (PT_SP_LOOP_BASIC, NULL, NULL, NULL, $2);
+		  $$ = sp_make_loop (PT_SP_LOOP_BASIC, $1, NULL, NULL, NULL, $3);
 		}
-	| WHILE_ expr LOOP_ stmt_list END_ LOOP_ ';'
+	| label_decl_opt WHILE_ expr LOOP_ stmt_list END_ LOOP_ label_opt ';'
 		{
-		  $$ = sp_make_loop (PT_SP_LOOP_WHILE, NULL, $2, NULL, $4);
+		  $$ = sp_make_loop (PT_SP_LOOP_WHILE, $1, NULL, $3, NULL, $5);
 		}
-	| FOR_ IDENT IN_ reverse_opt expr DOTDOT expr LOOP_ stmt_list END_ LOOP_ ';'
+	| label_decl_opt FOR_ IDENT IN_ reverse_opt expr DOTDOT expr LOOP_ stmt_list END_ LOOP_ label_opt ';'
 		{
-		  $$ = sp_make_loop (PT_SP_LOOP_FOR | $4, pt_name (sp_Parser, $2), $5, $7, $9);
+		  $$ = sp_make_loop (PT_SP_LOOP_FOR | $5, $1, pt_name (sp_Parser, $3), $6, $8, $10);
+		}
+	;
+
+label_decl_opt
+	: /* empty */
+		{
+		  $$ = NULL;
+		}
+	| LABEL_BEGIN IDENT LABEL_END
+		{
+		  $$ = pt_name (sp_Parser, $2);
+		}
+	;
+
+label_opt
+	: /* empty */
+		{
+		  $$ = NULL;
+		}
+	| IDENT
+		{
+		  $$ = pt_name (sp_Parser, $1);
+		}
+	;
+
+/* EXIT and CONTINUE name the loop they act on, and a bare one acts on the innermost. The
+ * condition is part of the statement rather than an IF around it because CONTINUE has no
+ * branch to fall into: the loop goes on either way. */
+jump_stmt
+	: EXIT_ label_opt when_opt ';'
+		{
+		  $$ = sp_make_jump (PT_SP_EXIT, $2, $3);
+		}
+	| CONTINUE_ label_opt when_opt ';'
+		{
+		  $$ = sp_make_jump (PT_SP_CONTINUE, $2, $3);
+		}
+	;
+
+when_opt
+	: /* empty */
+		{
+		  $$ = NULL;
+		}
+	| WHEN_ expr
+		{
+		  $$ = $2;
 		}
 	;
 
@@ -715,17 +770,39 @@ sp_make_stmt (PT_SP_STMT_OP op)
  *   body(in)  : the statements
  */
 static PT_NODE *
-sp_make_loop (int form, PT_NODE * name, PT_NODE * lower, PT_NODE * upper, PT_NODE * body)
+sp_make_loop (int form, PT_NODE * label, PT_NODE * name, PT_NODE * lower, PT_NODE * upper, PT_NODE * body)
 {
   PT_NODE *node = sp_make_stmt (PT_SP_LOOP);
 
   if (node != NULL)
     {
       node->info.sp_stmt.flags = form;
+      node->info.sp_stmt.label = label;
       node->info.sp_stmt.name = name;
       node->info.sp_stmt.expr = lower;
       node->info.sp_stmt.expr2 = upper;
       node->info.sp_stmt.body = body;
+    }
+
+  return node;
+}
+
+/*
+ * sp_make_jump () - one EXIT or CONTINUE node
+ *   return: the node, NULL when the parser could not allocate one
+ *   op(in)   : PT_SP_EXIT or PT_SP_CONTINUE
+ *   label(in): the loop it names, NULL when it names none and acts on the innermost
+ *   cond(in) : the WHEN condition, NULL when it was written without one
+ */
+static PT_NODE *
+sp_make_jump (PT_SP_STMT_OP op, PT_NODE * label, PT_NODE * cond)
+{
+  PT_NODE *node = sp_make_stmt (op);
+
+  if (node != NULL)
+    {
+      node->info.sp_stmt.label = label;
+      node->info.sp_stmt.expr = cond;
     }
 
   return node;

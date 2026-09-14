@@ -30383,7 +30383,11 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
 	  break;
 
 	case PT_SP_RETURN:
-	  /* a procedure's RETURN carries no value, so there is nothing to bind */
+	case PT_SP_EXIT:
+	case PT_SP_CONTINUE:
+	  /* a procedure's RETURN carries no value and a jump written without WHEN no condition,
+	   * so there may be nothing to bind. The label is not a name the frame holds - it is
+	   * matched against the loops around it when the jump is lowered. */
 	  if (pt_plcsql_resolve_expr (parser, stmt->info.sp_stmt.expr, scope) != NO_ERROR)
 	    {
 	      return ER_FAILED;
@@ -30493,13 +30497,26 @@ pt_plcsql_resolve_locals (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * pa
  * of a loop must not see what the previous turn left behind.
  */
 
+/* The loops a statement being lowered stands inside, innermost first. EXIT and CONTINUE name
+ * one of them, and what the plan carries is how many to leave, so the chain is walked here
+ * rather than the label being sent to the server. It is built on the stack as the lowering
+ * descends, the same way PT_PLCSQL_SCOPE is. */
+typedef struct pt_plcsql_loop PT_PLCSQL_LOOP;
+struct pt_plcsql_loop
+{
+  PT_NODE *label;		/* the name written before the loop, NULL when it has none */
+  PT_PLCSQL_LOOP *outer;
+};
+
 static PT_NODE *pt_plcsql_type_expr (PARSER_CONTEXT * parser, PT_NODE * expr);
 static REGU_VARIABLE *pt_plcsql_expr_to_regu (PARSER_CONTEXT * parser, PT_NODE ** expr);
 static XASL_NODE *pt_plcsql_refuse (PARSER_CONTEXT * parser, const char *reason);
-static XASL_NODE *pt_to_plcsql_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * ret_domain);
+static XASL_NODE *pt_to_plcsql_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * ret_domain,
+				     PT_PLCSQL_LOOP * loops);
 static XASL_NODE *pt_to_plcsql_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params,
-				      TP_DOMAIN * ret_domain);
-static XASL_NODE *pt_to_plcsql_stmt_list_block (PARSER_CONTEXT * parser, PT_NODE * list, TP_DOMAIN * ret_domain);
+				      TP_DOMAIN * ret_domain, PT_PLCSQL_LOOP * loops);
+static XASL_NODE *pt_to_plcsql_stmt_list_block (PARSER_CONTEXT * parser, PT_NODE * list, TP_DOMAIN * ret_domain,
+						PT_PLCSQL_LOOP * loops);
 static int pt_plcsql_set_children (PARSER_CONTEXT * parser, XASL_NODE * xasl, XASL_NODE ** buf, int cnt);
 
 /*
@@ -30720,6 +30737,7 @@ pt_plcsql_new_node (PLCSQL_OP op)
       xasl->proc.plcsql.expr = NULL;
       xasl->proc.plcsql.expr2 = NULL;
       xasl->proc.plcsql.target_slot = -1;
+      xasl->proc.plcsql.jump_levels = 0;
       xasl->proc.plcsql.locals_cnt = 0;
       xasl->proc.plcsql.children = NULL;
       xasl->proc.plcsql.children_cnt = 0;
@@ -30862,9 +30880,10 @@ pt_to_plcsql_open_local (PARSER_CONTEXT * parser, PT_NODE * decl)
  *   parser(in) :
  *   list(in)   : PT_SP_STMT nodes, linked; NULL gives an empty block
  *   ret_domain(in) : what a RETURN inside it casts to, NULL in a procedure
+ *   loops(in)  : the loops this list stands inside, innermost first
  */
 static XASL_NODE *
-pt_to_plcsql_stmt_list_block (PARSER_CONTEXT * parser, PT_NODE * list, TP_DOMAIN * ret_domain)
+pt_to_plcsql_stmt_list_block (PARSER_CONTEXT * parser, PT_NODE * list, TP_DOMAIN * ret_domain, PT_PLCSQL_LOOP * loops)
 {
   XASL_NODE *xasl, **buf = NULL;
   PT_NODE *stmt;
@@ -30901,7 +30920,7 @@ pt_to_plcsql_stmt_list_block (PARSER_CONTEXT * parser, PT_NODE * list, TP_DOMAIN
 	      continue;
 	    }
 
-	  buf[i] = pt_to_plcsql_stmt (parser, stmt, ret_domain);
+	  buf[i] = pt_to_plcsql_stmt (parser, stmt, ret_domain, loops);
 	  if (buf[i] == NULL)
 	    {
 	      return NULL;
@@ -30920,9 +30939,11 @@ pt_to_plcsql_stmt_list_block (PARSER_CONTEXT * parser, PT_NODE * list, TP_DOMAIN
  *   block(in)  : a PT_SP_BLOCK
  *   params(in) : the routine's parameters at its outermost block, NULL anywhere else
  *   ret_domain(in) : what a RETURN inside it casts to, NULL in a procedure
+ *   loops(in)  : the loops this block stands inside, innermost first
  */
 static XASL_NODE *
-pt_to_plcsql_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params, TP_DOMAIN * ret_domain)
+pt_to_plcsql_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params, TP_DOMAIN * ret_domain,
+		    PT_PLCSQL_LOOP * loops)
 {
   XASL_NODE *xasl, **buf = NULL;
   PT_NODE *decl, *stmt, *param;
@@ -30996,7 +31017,7 @@ pt_to_plcsql_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params, 
 	      continue;
 	    }
 
-	  buf[i] = pt_to_plcsql_stmt (parser, stmt, ret_domain);
+	  buf[i] = pt_to_plcsql_stmt (parser, stmt, ret_domain, loops);
 	  if (buf[i] == NULL)
 	    {
 	      return NULL;
@@ -31009,23 +31030,61 @@ pt_to_plcsql_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params, 
 }
 
 /*
+ * pt_plcsql_loop_levels () - how many loops an EXIT or CONTINUE leaves
+ *   return: the count, 0 when it names none it stands inside
+ *   loops(in)  : the loops around it, innermost first
+ *   label(in)  : the loop it names, NULL when it names none
+ *
+ * note: a bare EXIT acts on the innermost loop, which is one level. A labelled one acts on the
+ *       loop of that name, and what it leaves is every loop from the innermost up to and
+ *       including that one - which is also how far in the chain the name is found.
+ */
+static int
+pt_plcsql_loop_levels (PT_PLCSQL_LOOP * loops, PT_NODE * label)
+{
+  int levels = 1;
+
+  if (loops == NULL)
+    {
+      return 0;
+    }
+  if (label == NULL)
+    {
+      return levels;
+    }
+
+  for (; loops != NULL; loops = loops->outer, levels++)
+    {
+      if (loops->label != NULL
+	  && intl_identifier_casecmp (loops->label->info.name.original, label->info.name.original) == 0)
+	{
+	  return levels;
+	}
+    }
+
+  return 0;
+}
+
+/*
  * pt_to_plcsql_stmt () - one procedural statement
  *   return: the node, NULL on error
  *   parser(in) :
  *   stmt(in)   : a PT_SP_STMT other than a declaration or the NULL statement
  *   ret_domain(in) : what a RETURN casts to, NULL in a procedure
+ *   loops(in)  : the loops this statement stands inside, innermost first
  */
 static XASL_NODE *
-pt_to_plcsql_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * ret_domain)
+pt_to_plcsql_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * ret_domain, PT_PLCSQL_LOOP * loops)
 {
   XASL_NODE *xasl, *buf[2];
+  PT_PLCSQL_LOOP inner;
   PT_NODE *call;
-  int form;
+  int form, levels;
 
   switch (stmt->info.sp_stmt.op)
     {
     case PT_SP_BLOCK:
-      return pt_to_plcsql_block (parser, stmt, NULL, ret_domain);
+      return pt_to_plcsql_block (parser, stmt, NULL, ret_domain, loops);
 
     case PT_SP_ASSIGN:
       return pt_to_plcsql_assign (parser, stmt->info.sp_stmt.name->info.name.plcsql_slot, &stmt->info.sp_stmt.expr,
@@ -31099,7 +31158,7 @@ pt_to_plcsql_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * ret_doma
 
       /* the then branch is always there and the else branch only when it was written, so one
        * child means there is no else */
-      buf[0] = pt_to_plcsql_stmt_list_block (parser, stmt->info.sp_stmt.body, ret_domain);
+      buf[0] = pt_to_plcsql_stmt_list_block (parser, stmt->info.sp_stmt.body, ret_domain, loops);
       if (buf[0] == NULL)
 	{
 	  return NULL;
@@ -31109,7 +31168,7 @@ pt_to_plcsql_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * ret_doma
 	  return pt_plcsql_set_children (parser, xasl, buf, 1) == NO_ERROR ? xasl : NULL;
 	}
 
-      buf[1] = pt_to_plcsql_stmt_list_block (parser, stmt->info.sp_stmt.else_body, ret_domain);
+      buf[1] = pt_to_plcsql_stmt_list_block (parser, stmt->info.sp_stmt.else_body, ret_domain, loops);
       if (buf[1] == NULL)
 	{
 	  return NULL;
@@ -31161,12 +31220,47 @@ pt_to_plcsql_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * ret_doma
 	  return NULL;
 	}
 
-      buf[0] = pt_to_plcsql_stmt_list_block (parser, stmt->info.sp_stmt.body, ret_domain);
+      inner.label = stmt->info.sp_stmt.label;
+      inner.outer = loops;
+
+      buf[0] = pt_to_plcsql_stmt_list_block (parser, stmt->info.sp_stmt.body, ret_domain, &inner);
       if (buf[0] == NULL)
 	{
 	  return NULL;
 	}
       return pt_plcsql_set_children (parser, xasl, buf, 1) == NO_ERROR ? xasl : NULL;
+
+    case PT_SP_EXIT:
+    case PT_SP_CONTINUE:
+      levels = pt_plcsql_loop_levels (loops, stmt->info.sp_stmt.label);
+      if (levels == 0)
+	{
+	  /* CREATE has already refused both of the ways this happens - "exit statements must be
+	   * in a loop" and "undeclared label" - so it is refused rather than asserted on: a
+	   * signal no loop consumes would leave the routine the way a RETURN does. */
+	  return pt_plcsql_refuse (parser, "an EXIT or CONTINUE names no loop it stands inside");
+	}
+
+      xasl = pt_plcsql_new_node (PLCSQL_OP_JUMP);
+      if (xasl == NULL)
+	{
+	  return NULL;
+	}
+
+      xasl->proc.plcsql.flags = (stmt->info.sp_stmt.op == PT_SP_EXIT) ? PLCSQL_JUMP_EXIT : PLCSQL_JUMP_CONTINUE;
+      xasl->proc.plcsql.jump_levels = levels;
+      if (stmt->info.sp_stmt.expr == NULL)
+	{
+	  /* written without WHEN, so it always acts */
+	  return xasl;
+	}
+
+      xasl->proc.plcsql.expr = pt_plcsql_expr_to_regu (parser, &stmt->info.sp_stmt.expr);
+      if (xasl->proc.plcsql.expr == NULL)
+	{
+	  return NULL;
+	}
+      return xasl;
 
     case PT_SP_DECL:
     case PT_SP_NULL_STMT:
@@ -31210,7 +31304,7 @@ pt_to_plcsql_xasl (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params)
 	}
     }
 
-  xasl = pt_to_plcsql_block (parser, block, params, ret_domain);
+  xasl = pt_to_plcsql_block (parser, block, params, ret_domain, NULL);
   if (xasl == NULL)
     {
       return NULL;
