@@ -96,6 +96,7 @@
 #include "px_query_executor.hpp"
 #include <vector>
 #include "dblink_scan.h"
+#include "pl_executor.hpp"	/* cubpl::executor::is_supported_dbtype */
 // XXX: SHOULD BE THE LAST INCLUDE HEADER
 #include "memory_wrapper.hpp"
 
@@ -29316,7 +29317,7 @@ qexec_call_plcs (THREAD_ENTRY * thread_p, XASL_NODE * xasl, DB_VALUE * args, int
   struct tm *c_time_struct, tm_val;
   time_t sec;
   int millisec;
-  int error, i;
+  int error = NO_ERROR, i;
 
   if (xasl == NULL || xasl->type != PLCS_PROC || args_cnt > xasl->proc.plcs.locals_cnt)
     {
@@ -29356,18 +29357,32 @@ qexec_call_plcs (THREAD_ENTRY * thread_p, XASL_NODE * xasl, DB_VALUE * args, int
   /* the parameters hold the first slots, in declared order */
   for (i = 0; i < args_cnt; i++)
     {
+      /* the same question the PL engine asks of an argument. Running the routine here instead
+       * does not widen what a stored procedure may be handed. */
+      if (!cubpl::executor::is_supported_dbtype (args[i]))
+	{
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_SP_NOT_SUPPORTED_ARG_TYPE, 1,
+		  pr_type_name (DB_VALUE_TYPE (&args[i])));
+	  error = ER_SP_NOT_SUPPORTED_ARG_TYPE;
+	  break;
+	}
       if (pr_clone_value (&args[i], &frame->locals[i]) != NO_ERROR)
 	{
-	  qexec_free_plcs_frame (thread_p, frame);
-	  return ER_FAILED;
+	  error = ER_FAILED;
+	  break;
 	}
     }
 
-  xasl_state.plcs_frame = frame;
-  error = qexec_execute_plcs (thread_p, xasl, &xasl_state);
-  if (error == NO_ERROR && result != NULL)
+  /* every way out goes through the clear below, so giving up on an argument leaves by the same
+   * door as a procedure that ran */
+  if (error == NO_ERROR)
     {
-      error = pr_clone_value (&frame->retval, result);
+      xasl_state.plcs_frame = frame;
+      error = qexec_execute_plcs (thread_p, xasl, &xasl_state);
+      if (error == NO_ERROR && result != NULL)
+	{
+	  error = pr_clone_value (&frame->retval, result);
+	}
     }
   qexec_free_plcs_frame (thread_p, frame);
 

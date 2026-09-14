@@ -219,7 +219,7 @@ namespace cubpl
   }
 
   bool
-  executor::is_supported_dbtype (const DB_VALUE &value)
+  executor::is_supported_dbtype (const DB_VALUE &value)   /* static */
   {
     bool res = false;
     switch (DB_VALUE_TYPE (&value))

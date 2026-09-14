@@ -77,6 +77,11 @@ namespace cubpl
 
       ~executor ();
 
+      /* Whether a stored procedure may be given a value of this type. The manual settles it -
+       * the time zone types and the collections among others are outside PL/CSQL - so both ways
+       * of running a routine ask the same question, and the list lives here once. */
+      static bool is_supported_dbtype (const DB_VALUE &val);
+
       // args
       int fetch_args_peek (regu_variable_list_node *val_list_p, VAL_DESCR *val_desc_p, OID *obj_oid_p,
 			   QFILE_TUPLE tuple); // QUERY
@@ -98,7 +103,6 @@ namespace cubpl
 
       // check
       int check_unsupported_dbtype ();
-      bool is_supported_dbtype (const DB_VALUE &val);
 
       int change_exec_rights (const char *auth_name);
 
