@@ -29305,8 +29305,10 @@ qexec_clear_plcsql_turn (THREAD_ENTRY * thread_p, XASL_NODE * body)
 
   if (body->type != PLCSQL_PROC)
     {
-      /* an SQL statement in the body: its list file and single-tuple state are this turn's */
-      (void) qexec_clear_xasl (thread_p, body, false, false);
+      /* an SQL statement's own plan, which is left alone. qexec_clear_xasl () is what a plan
+       * being decached is put through, and it clears a constant's value along with the rest,
+       * so a literal in the statement would be gone from the second turn on. A prepared plan
+       * is made to be run again, and qexec_execute_mainblock () sets up what one run needs. */
       return;
     }
 
