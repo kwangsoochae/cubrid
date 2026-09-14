@@ -6944,6 +6944,8 @@ pt_make_function (PARSER_CONTEXT * parser, int function_code, const REGU_VARIABL
  *
  */
 static XASL_NODE *pt_plcs_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig);
+static bool pt_plcs_compiling_body (void);
+static bool pt_plcs_callee_is_builtin (const REGU_VARIABLE * regu);
 
 static REGU_VARIABLE *
 pt_stored_procedure_to_regu (PARSER_CONTEXT * parser, PT_NODE * node)
@@ -7007,6 +7009,16 @@ pt_stored_procedure_to_regu (PARSER_CONTEXT * parser, PT_NODE * node)
       regu->domain = pt_node_to_db_domain (parser, node, NULL);
       regu->domain->precision = DB_DEFAULT_NUMERIC_PRECISION;
       regu->domain->scale = DB_DEFAULT_NUMERIC_SCALE;
+    }
+
+  if (pt_plcs_compiling_body () && sp != NULL && sp->plcs == NULL && !pt_plcs_callee_is_builtin (regu))
+    {
+      /* the callee got no plan of its own, so it can only run on the PL engine, and a routine
+       * that calls it goes there whole. Strict mode has already left above with the reason the
+       * callee itself named, which is the better one to keep. The refusal belongs here rather
+       * than at the two call sites because a call reached as part of an expression is lowered
+       * from inside pt_to_regu_variable (), where neither of them can see it. */
+      return NULL;
     }
 
   return regu;
@@ -30239,6 +30251,24 @@ pt_plcs_bind_name_pre (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int *
 {
   PT_PLCS_RESOLVE_ARG *resolve = (PT_PLCS_RESOLVE_ARG *) arg;
 
+  if (node->node_type == PT_METHOD_CALL)
+    {
+      /* only the arguments carry names the body declared; the routine's own name is resolved
+       * against the catalog when the call is lowered. Binding it here would look for a local
+       * of that name and refuse the body. */
+      if (pt_plcs_resolve_expr (parser, node->info.method_call.arg_list, resolve->scope) != NO_ERROR)
+	{
+	  resolve->error = ER_FAILED;
+	  *continue_walk = PT_STOP_WALK;
+	}
+      else
+	{
+	  *continue_walk = PT_LIST_WALK;
+	}
+
+      return node;
+    }
+
   if (node->node_type == PT_NAME && pt_plcs_bind_name (parser, node, resolve->scope) != NO_ERROR)
     {
       resolve->error = ER_FAILED;
@@ -30462,8 +30492,8 @@ pt_plcs_resolve_locals (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * para
  * of a loop must not see what the previous turn left behind.
  */
 
+static PT_NODE *pt_plcs_type_expr (PARSER_CONTEXT * parser, PT_NODE * expr);
 static REGU_VARIABLE *pt_plcs_expr_to_regu (PARSER_CONTEXT * parser, PT_NODE ** expr);
-static bool pt_plcs_callee_is_builtin (const REGU_VARIABLE * regu);
 static XASL_NODE *pt_plcs_refuse (PARSER_CONTEXT * parser, const char *reason);
 static XASL_NODE *pt_to_plcs_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * ret_domain);
 static XASL_NODE *pt_to_plcs_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params, TP_DOMAIN * ret_domain);
@@ -30471,23 +30501,136 @@ static XASL_NODE *pt_to_plcs_stmt_list_block (PARSER_CONTEXT * parser, PT_NODE *
 static int pt_plcs_set_children (PARSER_CONTEXT * parser, XASL_NODE * xasl, XASL_NODE ** buf, int cnt);
 
 /*
- * pt_plcs_expr_to_regu () - type one procedural expression, then lower it
- *   return: the regu variable, NULL on error
+ * pt_plcs_routine_name () - the name a call names, spelled as the catalog is asked it
+ *   return: the name, on the parser
  *   parser(in) :
- *   expr(in/out) : the expression; constant folding can replace the node, so the caller's
- *                  pointer is written back
+ *   name(in)   : the PT_NAME under a PT_METHOD_CALL
+ *
+ * note: a dotted name keeps its owner in resolved and the routine in original, so the two are
+ *       printed back together; jsp_make_pl_signature () asks the catalog the same question the
+ *       same way when the call is lowered.
+ */
+static const char *
+pt_plcs_routine_name (PARSER_CONTEXT * parser, PT_NODE * name)
+{
+  const char *printed;
+  int saved;
+
+  if (!PT_NAME_RESOLVED (name))
+    {
+      return PT_NAME_ORIGINAL (name);
+    }
+
+  saved = parser->custom_print;
+  parser->custom_print |= PT_SUPPRESS_QUOTES;
+  parser->custom_print &= ~PT_PRINT_QUOTES;
+  printed = parser_print_tree (parser, name);
+  parser->custom_print = saved;
+
+  return printed;
+}
+
+/*
+ * pt_plcs_type_call () - give a call standing in an expression the type of what it gives back
+ *   return: NO_ERROR, or ER_FAILED with the refusal named
+ *   parser(in) :
+ *   call(in/out) : the PT_METHOD_CALL
+ *
+ * note: nothing else types it. pt_eval_type () hands a PT_METHOD_CALL to
+ *       pt_eval_method_call_type (), which leaves one with no call target alone, and the SQL
+ *       grammar gets its type from pt_resolve_stored_procedure () - the route that rewrites a
+ *       function into a call, which a procedural body does not take. An untyped operand makes
+ *       the expression around it NULL, so the type is read here from the catalog column the
+ *       call is lowered against.
+ */
+static int
+pt_plcs_type_call (PARSER_CONTEXT * parser, PT_NODE * call)
+{
+  const char *name;
+  int sp_type, ret_type;
+
+  name = pt_plcs_routine_name (parser, call->info.method_call.method_name);
+
+  sp_type = jsp_get_sp_type (name);
+  ret_type = jsp_get_return_type (name);
+  if (sp_type < 0 || ret_type < 0)
+    {
+      /* a name the catalog has no routine under. A body may still declare its own (50014), so
+       * this is a refusal rather than an error - the PL engine is the one that knows. */
+      er_clear ();
+      (void) pt_plcs_refuse (parser, "the expression calls a name the catalog has no routine under");
+      return ER_FAILED;
+    }
+
+  if (sp_type != PT_SP_FUNCTION)
+    {
+      (void) pt_plcs_refuse (parser, "a procedure is called where a value is wanted");
+      return ER_FAILED;
+    }
+
+  call->type_enum = pt_db_to_type_enum ((DB_TYPE) ret_type);
+  call->data_type = pt_domain_to_data_type (parser, tp_domain_cache (pt_type_enum_to_db_domain (call->type_enum)));
+
+  return NO_ERROR;
+}
+
+/*
+ * pt_plcs_type_call_pre () - parser_walk_tree () hook typing every call in an expression
+ *   return: node
+ */
+static PT_NODE *
+pt_plcs_type_call_pre (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int *continue_walk)
+{
+  int *error = (int *) arg;
+
+  if (node->node_type == PT_METHOD_CALL && pt_plcs_type_call (parser, node) != NO_ERROR)
+    {
+      *error = ER_FAILED;
+      *continue_walk = PT_STOP_WALK;
+    }
+
+  return node;
+}
+
+/*
+ * pt_plcs_type_expr () - settle the types in one procedural expression
+ *   return: the expression, NULL on error; folding can replace the node, so the answer is what
+ *           the caller keeps
+ *   parser(in) :
+ *   expr(in)   : the expression, or a list of them
  *
  * note: the type check runs here and not in the resolution pass because folding rewrites the
  *       tree, and a tree that has been folded is no longer the one a later pass would resolve
  *       names in. What settles the remaining differences from the Java engine's typing is
  *       50011; this is what an arithmetic operator needs to have a result domain at all.
  */
+static PT_NODE *
+pt_plcs_type_expr (PARSER_CONTEXT * parser, PT_NODE * expr)
+{
+  int error = NO_ERROR;
+
+  (void) parser_walk_tree (parser, expr, pt_plcs_type_call_pre, &error, NULL, NULL);
+  if (error != NO_ERROR)
+    {
+      return NULL;
+    }
+
+  return pt_semantic_type (parser, expr, NULL);
+}
+
+/*
+ * pt_plcs_expr_to_regu () - type one procedural expression, then lower it
+ *   return: the regu variable, NULL on error
+ *   parser(in) :
+ *   expr(in/out) : the expression; constant folding can replace the node, so the caller's
+ *                  pointer is written back
+ */
 static REGU_VARIABLE *
 pt_plcs_expr_to_regu (PARSER_CONTEXT * parser, PT_NODE ** expr)
 {
   PT_NODE *typed;
 
-  typed = pt_semantic_type (parser, *expr, NULL);
+  typed = pt_plcs_type_expr (parser, *expr);
   if (typed == NULL)
     {
       return NULL;
@@ -30900,7 +31043,7 @@ pt_to_plcs_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * ret_domain
       call = stmt->info.sp_stmt.expr;
       if (call->info.method_call.arg_list != NULL)
 	{
-	  call->info.method_call.arg_list = pt_semantic_type (parser, call->info.method_call.arg_list, NULL);
+	  call->info.method_call.arg_list = pt_plcs_type_expr (parser, call->info.method_call.arg_list);
 	  if (call->info.method_call.arg_list == NULL)
 	    {
 	      return NULL;
@@ -30914,17 +31057,6 @@ pt_to_plcs_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * ret_domain
       if (xasl->proc.plcs.expr == NULL)
 	{
 	  return NULL;
-	}
-      if (!pt_plcs_callee_is_builtin (xasl->proc.plcs.expr) && xasl->proc.plcs.expr->value.sp_ptr->plcs == NULL)
-	{
-	  /* the callee got no plan of its own, so it can only run on the PL engine and a
-	   * procedure that calls it goes there whole. Compiling the callee has already named
-	   * why it was refused, and that reason is the better one to keep. */
-	  if (er_errid () == ER_SP_COMPILE_ERROR)
-	    {
-	      return NULL;
-	    }
-	  return pt_plcs_refuse (parser, "the routine this calls has no plan of its own");
 	}
       return xasl;
 
@@ -31161,6 +31293,21 @@ static OID pt_Plcs_compiling[PT_PLCS_MAX_COMPILE_DEPTH];
 static int pt_Plcs_compile_depth = 0;
 
 /*
+ * pt_plcs_compiling_body () - is a PL/CSQL body being lowered right now?
+ *   return: true from the start of a body's own lowering to its end
+ *
+ * note: what this separates is a call written in a procedural body from the same call written
+ *       in a query. The first carries its callee's plan to the server, so a callee with none
+ *       takes its caller to the PL engine; the second is run by the query's own path, which
+ *       asks for no plan.
+ */
+static bool
+pt_plcs_compiling_body (void)
+{
+  return pt_Plcs_compile_depth > 0;
+}
+
+/*
  * pt_plcs_refuse () - give up on building a plan for this routine
  *   return: NULL, always; the caller hands it back
  *   parser(in) :
@@ -31298,6 +31445,15 @@ pt_plcs_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig)
 	{
 	  xasl = NULL;
 	}
+    }
+
+  if (xasl == NULL && er_errid () == ER_SP_COMPILE_ERROR)
+    {
+      /* something met inside the body has already named why it was refused, and that names the
+       * missing piece where the sentence below only says the body was not taken. It is left
+       * standing rather than replaced, and not cleared. */
+      parser_free_parser (body_parser);
+      return NULL;
     }
 
   if (xasl == NULL && prm_get_bool_value (PRM_ID_PL_NATIVE_EXECUTION_STRICT))
