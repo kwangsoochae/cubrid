@@ -31447,6 +31447,15 @@ pt_plcs_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig)
 	}
     }
 
+  if (xasl == NULL && er_errid () == ER_SP_COMPILE_ERROR)
+    {
+      /* something met inside the body has already named why it was refused, and that names the
+       * missing piece where the sentence below only says the body was not taken. It is left
+       * standing rather than replaced, and not cleared. */
+      parser_free_parser (body_parser);
+      return NULL;
+    }
+
   if (xasl == NULL && prm_get_bool_value (PRM_ID_PL_NATIVE_EXECUTION_STRICT))
     {
       /* the parser's own first error names the token it stopped on, which is what says what the
