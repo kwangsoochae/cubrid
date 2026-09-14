@@ -624,6 +624,22 @@ expr
 		{
 		  $$ = pt_name (sp_Parser, $1);
 		}
+	/* A function call reads as an expression. The node is the same PT_METHOD_CALL the SQL
+	 * grammar builds, so pt_stored_procedure_to_regu () lowers it without knowing where it
+	 * came from - the difference from the statement form is only that this one gives a value
+	 * back, which call_or_expr says. */
+	| sp_name '(' arg_list_opt ')'
+		{
+		  PT_NODE *call = parser_new_node (sp_Parser, PT_METHOD_CALL);
+
+		  if (call != NULL)
+		    {
+		      call->info.method_call.method_name = $1;
+		      call->info.method_call.arg_list = $3;
+		      call->info.method_call.call_or_expr = PT_IS_MTHD_EXPR;
+		    }
+		  $$ = call;
+		}
 	| UNSIGNED_INTEGER
 		{
 		  $$ = sp_make_integer_literal ($1);
