@@ -62,6 +62,8 @@ static PT_NODE *sp_make_jump (PT_SP_STMT_OP op, PT_NODE * label, PT_NODE * cond)
 static PT_NODE *sp_make_integer_literal (const char *text);
 static PT_NODE *sp_make_real_literal (const char *text);
 static PT_NODE *sp_make_null_literal (void);
+static PT_NODE *sp_make_boolean_literal (bool value);
+static PT_NODE *sp_make_typed_literal (PT_TYPE_ENUM type, const char *text);
 static PT_NODE *sp_make_data_type (PT_TYPE_ENUM type, int precision, int scale);
 %}
 
@@ -73,9 +75,9 @@ static PT_NODE *sp_make_data_type (PT_TYPE_ENUM type, int precision, int scale);
 }
 
 %token BEGIN_ CONSTANT_ CONTINUE_ DECLARE_ ELSE_ ELSIF_ END_ EXIT_ FOR_ IF_ IN_ LOOP_ NOT_ NULL_ REVERSE_
-%token THEN_ WHEN_ WHILE_
+%token FALSE_ THEN_ TRUE_ WHEN_ WHILE_
 %token AS_ AUTHID_ CREATE_ FUNCTION_ OUT_ PROCEDURE_ REPLACE_ RETURN_
-%token AND_ IS_ MOD_ OR_
+%token AND_ DIV_ IS_ MOD_ OR_
 %token ASSIGN DOTDOT CONCAT NE GE LE LABEL_BEGIN LABEL_END
 
 %token <cptr> IDENT UNSIGNED_INTEGER UNSIGNED_REAL CHAR_STRING
@@ -94,7 +96,7 @@ static PT_NODE *sp_make_data_type (PT_TYPE_ENUM type, int precision, int scale);
 %nonassoc '=' NE '<' '>' LE GE IS_
 %left CONCAT
 %left '+' '-'
-%left '*' '/' MOD_
+%left '*' '/' DIV_ MOD_
 %right UMINUS
 
 %start sp_unit
@@ -667,6 +669,10 @@ expr
 		{
 		  $$ = parser_make_expression (sp_Parser, PT_MODULUS, $1, $3, NULL);
 		}
+	| expr DIV_ expr
+		{
+		  $$ = parser_make_expression (sp_Parser, PT_DIV, $1, $3, NULL);
+		}
 	| '-' expr %prec UMINUS
 		{
 		  $$ = parser_make_expression (sp_Parser, PT_UNARY_MINUS, $2, NULL, NULL);
@@ -710,6 +716,18 @@ expr
 	| NULL_
 		{
 		  $$ = sp_make_null_literal ();
+		}
+	| TRUE_
+		{
+		  $$ = sp_make_boolean_literal (true);
+		}
+	| FALSE_
+		{
+		  $$ = sp_make_boolean_literal (false);
+		}
+	| TYPE_KEYWORD CHAR_STRING
+		{
+		  $$ = sp_make_typed_literal ((PT_TYPE_ENUM) $1, $2);
 		}
 	;
 
@@ -978,6 +996,59 @@ sp_make_null_literal (void)
     }
 
   return val;
+}
+
+/*
+ * sp_make_boolean_literal () - a TRUE or FALSE literal
+ *   return: the PT_VALUE, NULL when the parser could not allocate one
+ *   value(in) : which of the two was written
+ */
+static PT_NODE *
+sp_make_boolean_literal (bool value)
+{
+  PT_NODE *node = parser_new_node (sp_Parser, PT_VALUE);
+
+  if (node != NULL)
+    {
+      node->type_enum = PT_TYPE_LOGICAL;
+      node->info.value.text = value ? "true" : "false";
+      node->info.value.data_value.i = value ? 1 : 0;
+    }
+
+  return node;
+}
+
+/*
+ * sp_make_typed_literal () - a DATE, TIME, TIMESTAMP or DATETIME literal
+ *   return: the PT_VALUE, NULL when the type named cannot carry one
+ *   type(in) : the type the keyword named
+ *   text(in) : the text between the quotes, already folded by the lexer
+ *
+ * note: the node keeps the text and the type and nothing else, which is what the SQL grammar's
+ *       own date_or_time_literal builds; what turns the one into the other is constant folding.
+ *       PL/CSQL writes a literal of these four types only, so int'1' is a syntax error there
+ *       and is refused here rather than built into a value of a type that cannot hold it.
+ */
+static PT_NODE *
+sp_make_typed_literal (PT_TYPE_ENUM type, const char *text)
+{
+  PT_NODE *node;
+
+  if (type != PT_TYPE_DATE && type != PT_TYPE_TIME && type != PT_TYPE_TIMESTAMP && type != PT_TYPE_DATETIME)
+    {
+      sp_yyerror ("a literal cannot be written with this type name");
+      return NULL;
+    }
+
+  node = parser_new_node (sp_Parser, PT_VALUE);
+  if (node != NULL)
+    {
+      node->type_enum = type;
+      node->info.value.data_value.str = pt_append_bytes (sp_Parser, NULL, text, strlen (text));
+      PT_NODE_PRINT_VALUE_TO_TEXT (sp_Parser, node);
+    }
+
+  return node;
 }
 
 /*
