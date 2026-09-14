@@ -29142,6 +29142,12 @@ qexec_execute_plcsql_stmt (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE
     case PLCSQL_OP_LOOP:
       return qexec_execute_plcsql_loop (thread_p, xasl, xasl_state);
 
+    case PLCSQL_OP_SQL:
+      /* the child is a plain plan, not a procedural node, and running it is what running the
+       * statement is. It is the same call the server makes for a query of its own, which is
+       * the point of carrying the statement here rather than asking the client for it. */
+      return qexec_execute_mainblock (thread_p, xasl->proc.plcsql.children[0], xasl_state, NULL);
+
     case PLCSQL_OP_CALL:
       {
 	DB_VALUE *ignored = NULL;

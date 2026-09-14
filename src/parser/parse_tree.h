@@ -3432,6 +3432,7 @@ struct pt_sp_stmt_info
   PT_NODE *decl_list;		/* BLOCK: the declarations */
   PT_NODE *body;		/* BLOCK, LOOP: statements. IF: the then branch */
   PT_NODE *else_body;		/* IF: the else branch */
+  PT_NODE *sql;			/* SQL: the statement the SQL parser read out of sql_text */
   const char *sql_text;		/* SQL: the statement as written, which is what the SQL parser
 				 * is given - a hint lives in a comment, so nothing is normalised */
 };

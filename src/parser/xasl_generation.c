@@ -30512,6 +30512,7 @@ struct pt_plcsql_loop
   PT_PLCSQL_LOOP *outer;
 };
 
+static int pt_plcsql_read_static_sql (PARSER_CONTEXT * parser, PT_NODE * list);
 static PT_NODE *pt_plcsql_type_expr (PARSER_CONTEXT * parser, PT_NODE * expr);
 static REGU_VARIABLE *pt_plcsql_expr_to_regu (PARSER_CONTEXT * parser, PT_NODE ** expr);
 static XASL_NODE *pt_plcsql_refuse (PARSER_CONTEXT * parser, const char *reason);
@@ -30521,7 +30522,86 @@ static XASL_NODE *pt_to_plcsql_block (PARSER_CONTEXT * parser, PT_NODE * block, 
 				      TP_DOMAIN * ret_domain, PT_PLCSQL_LOOP * loops);
 static XASL_NODE *pt_to_plcsql_stmt_list_block (PARSER_CONTEXT * parser, PT_NODE * list, TP_DOMAIN * ret_domain,
 						PT_PLCSQL_LOOP * loops);
+static XASL_NODE *pt_plcsql_sql_to_xasl (PARSER_CONTEXT * parser, PT_NODE * sql);
 static int pt_plcsql_set_children (PARSER_CONTEXT * parser, XASL_NODE * xasl, XASL_NODE ** buf, int cnt);
+
+/*
+ * pt_plcsql_read_static_sql () - have the SQL parser read the statements the body wrote
+ *   return: NO_ERROR, or ER_FAILED with the reason on the parser
+ *   parser(in) :
+ *   list(in/out) : a statement list; the blocks and branches under it are walked too
+ *
+ * note: this runs after the PL/CSQL parse has returned and never inside it - the SQL parser is
+ *       not reentrant, and the design calls that out. The text is read with
+ *       is_parsing_static_sql set, which is what makes a name the statement cannot resolve as a
+ *       column into a host variable instead of an error; the body's own variables are exactly
+ *       those names. All of a body's statements are read onto one parser so that the host
+ *       variables of the whole body share one numbering, and therefore one array at run time.
+ */
+static int
+pt_plcsql_read_static_sql (PARSER_CONTEXT * parser, PT_NODE * list)
+{
+  PT_NODE *stmt, **parsed;
+  int saved_static;
+
+  for (stmt = list; stmt != NULL; stmt = stmt->next)
+    {
+      switch (stmt->info.sp_stmt.op)
+	{
+	case PT_SP_SQL:
+	  saved_static = parser->flag.is_parsing_static_sql;
+	  parser->flag.is_parsing_static_sql = 1;
+	  parsed = parser_parse_string_with_escapes (parser, stmt->info.sp_stmt.sql_text, false);
+	  parser->flag.is_parsing_static_sql = saved_static;
+
+	  if (parsed == NULL || *parsed == NULL || pt_has_error (parser))
+	    {
+	      return ER_FAILED;
+	    }
+	  if ((*parsed)->next != NULL)
+	    {
+	      /* the text was gathered up to one semicolon, so a second statement can only mean
+	       * the gathering and the SQL parser disagree about where the first one ended */
+	      PT_INTERNAL_ERROR (parser, "static sql");
+	      return ER_FAILED;
+	    }
+
+	  stmt->info.sp_stmt.sql = pt_compile (parser, *parsed);
+	  if (stmt->info.sp_stmt.sql == NULL || pt_has_error (parser))
+	    {
+	      return ER_FAILED;
+	    }
+	  break;
+
+	case PT_SP_BLOCK:
+	  if (pt_plcsql_read_static_sql (parser, stmt->info.sp_stmt.body) != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
+	  break;
+
+	case PT_SP_IF:
+	  if (pt_plcsql_read_static_sql (parser, stmt->info.sp_stmt.body) != NO_ERROR
+	      || pt_plcsql_read_static_sql (parser, stmt->info.sp_stmt.else_body) != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
+	  break;
+
+	case PT_SP_LOOP:
+	  if (pt_plcsql_read_static_sql (parser, stmt->info.sp_stmt.body) != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
+	  break;
+
+	default:
+	  break;
+	}
+    }
+
+  return NO_ERROR;
+}
 
 /*
  * pt_plcsql_routine_name () - the name a call names, spelled as the catalog is asked it
@@ -31034,6 +31114,35 @@ pt_to_plcsql_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params, 
 }
 
 /*
+ * pt_plcsql_sql_to_xasl () - the plan of one SQL statement written in a body
+ *   return: the XASL node, NULL on error
+ *   parser(in) :
+ *   sql(in)    : the statement pt_compile () settled
+ *
+ * note: what the prepare path does around these calls is the XASL cache - hashing the text,
+ *       asking the server whether it already holds a plan, packing the answer into a stream.
+ *       None of that applies here: this plan is not looked up by text and is packed with the
+ *       procedure that holds it, so only the plan itself is wanted.
+ */
+static XASL_NODE *
+pt_plcsql_sql_to_xasl (PARSER_CONTEXT * parser, PT_NODE * sql)
+{
+  switch (sql->node_type)
+    {
+    case PT_INSERT:
+      return pt_to_insert_xasl (parser, sql);
+
+    default:
+      /* UPDATE and DELETE are not a matter of calling the other two builders. Each is prepared
+       * first - the statement is split, the classes are asked whether a trigger watches them,
+       * and the answer decides whether the server may do the work at all - and a plan built
+       * without that has no classes in it, which the executor asserts on rather than reports.
+       * A query is its own piece too: SELECT INTO is what reads rows back into a body. */
+      return pt_plcsql_refuse (parser, "only INSERT is carried in the plan so far");
+    }
+}
+
+/*
  * pt_plcsql_loop_levels () - how many loops an EXIT or CONTINUE leaves
  *   return: the count, 0 when it names none it stands inside
  *   loops(in)  : the loops around it, innermost first
@@ -31267,7 +31376,18 @@ pt_to_plcsql_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * ret_doma
       return xasl;
 
     case PT_SP_SQL:
-      return pt_plcsql_refuse (parser, "a SQL statement in the body is not carried in the plan yet");
+      xasl = pt_plcsql_new_node (PLCSQL_OP_SQL);
+      if (xasl == NULL)
+	{
+	  return NULL;
+	}
+
+      buf[0] = pt_plcsql_sql_to_xasl (parser, stmt->info.sp_stmt.sql);
+      if (buf[0] == NULL)
+	{
+	  return NULL;
+	}
+      return pt_plcsql_set_children (parser, xasl, buf, 1) == NO_ERROR ? xasl : NULL;
 
     case PT_SP_DECL:
     case PT_SP_NULL_STMT:
@@ -31542,7 +31662,10 @@ pt_plcsql_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig
 	}
 
       pt_Plcsql_compiling[pt_Plcsql_compile_depth++] = sig->ext.sp.code_oid;
-      xasl = pt_to_plcsql_xasl (body_parser, block, params);
+      if (pt_plcsql_read_static_sql (body_parser, block->info.sp_stmt.body) == NO_ERROR)
+	{
+	  xasl = pt_to_plcsql_xasl (body_parser, block, params);
+	}
       pt_Plcsql_compile_depth--;
       if (pt_has_error (body_parser))
 	{
