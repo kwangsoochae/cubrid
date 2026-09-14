@@ -51,6 +51,7 @@ static SP_KEYWORD sp_Keywords[] = {
   {"authid", AUTHID_, PT_TYPE_NONE},
   {"begin", BEGIN_, PT_TYPE_NONE},
   {"bigint", TYPE_KEYWORD, PT_TYPE_BIGINT},
+  {"boolean", TYPE_KEYWORD, PT_TYPE_LOGICAL},
   {"char", TYPE_KEYWORD, PT_TYPE_CHAR},
   {"character", TYPE_KEYWORD, PT_TYPE_CHAR},
   {"constant", CONSTANT_, PT_TYPE_NONE},
@@ -58,13 +59,16 @@ static SP_KEYWORD sp_Keywords[] = {
   {"create", CREATE_, PT_TYPE_NONE},
   {"date", TYPE_KEYWORD, PT_TYPE_DATE},
   {"datetime", TYPE_KEYWORD, PT_TYPE_DATETIME},
+  {"dec", TYPE_KEYWORD, PT_TYPE_NUMERIC},
   {"decimal", TYPE_KEYWORD, PT_TYPE_NUMERIC},
   {"declare", DECLARE_, PT_TYPE_NONE},
+  {"div", DIV_, PT_TYPE_NONE},
   {"double", TYPE_KEYWORD, PT_TYPE_DOUBLE},
   {"else", ELSE_, PT_TYPE_NONE},
   {"elsif", ELSIF_, PT_TYPE_NONE},
   {"end", END_, PT_TYPE_NONE},
   {"exit", EXIT_, PT_TYPE_NONE},
+  {"false", FALSE_, PT_TYPE_NONE},
   {"float", TYPE_KEYWORD, PT_TYPE_FLOAT},
   {"for", FOR_, PT_TYPE_NONE},
   {"function", FUNCTION_, PT_TYPE_NONE},
@@ -81,14 +85,17 @@ static SP_KEYWORD sp_Keywords[] = {
   {"or", OR_, PT_TYPE_NONE},
   {"out", OUT_, PT_TYPE_NONE},
   {"procedure", PROCEDURE_, PT_TYPE_NONE},
+  {"real", TYPE_KEYWORD, PT_TYPE_FLOAT},
   {"replace", REPLACE_, PT_TYPE_NONE},
   {"return", RETURN_, PT_TYPE_NONE},
   {"reverse", REVERSE_, PT_TYPE_NONE},
+  {"short", TYPE_KEYWORD, PT_TYPE_SMALLINT},
   {"smallint", TYPE_KEYWORD, PT_TYPE_SMALLINT},
   {"string", TYPE_KEYWORD, PT_TYPE_VARCHAR},
   {"then", THEN_, PT_TYPE_NONE},
   {"time", TYPE_KEYWORD, PT_TYPE_TIME},
   {"timestamp", TYPE_KEYWORD, PT_TYPE_TIMESTAMP},
+  {"true", TRUE_, PT_TYPE_NONE},
   {"varchar", TYPE_KEYWORD, PT_TYPE_VARCHAR},
   {"when", WHEN_, PT_TYPE_NONE},
   {"while", WHILE_, PT_TYPE_NONE}
@@ -135,11 +142,17 @@ real		{digit}+"."{digit}+([eE][+-]?{digit}+)?|"."{digit}+([eE][+-]?{digit}+)?|{d
 
 '([^']|'')*'		{ sp_yylval.cptr = sp_unquote_string (yytext); return CHAR_STRING; }
 
-	/* The one type name that is two words, which is why it is here and not in the keyword
+	/* The type names that are two words, which is why they are here and not in the keyword
 	 * table - that table looks a single word up. The letters are spelled out because the
-	 * table's lookup is case-insensitive while these patterns are not. */
-[cC][hH][aA][rR][aA][cC][tT][eE][rR][ \t\r\n]+[vV][aA][rR][yY][iI][nN][gG]	{
+	 * table's lookup is case-insensitive while these patterns are not, and these stand ahead
+	 * of {ident} so that the longer match wins over the first word alone. */
+[cC][hH][aA][rR]([aA][cC][tT][eE][rR])?[ \t\r\n]+[vV][aA][rR][yY][iI][nN][gG]	{
 			  sp_yylval.number = (int) PT_TYPE_VARCHAR;
+			  return TYPE_KEYWORD;
+			}
+
+[dD][oO][uU][bB][lL][eE][ \t\r\n]+[pP][rR][eE][cC][iI][sS][iI][oO][nN]	{
+			  sp_yylval.number = (int) PT_TYPE_DOUBLE;
 			  return TYPE_KEYWORD;
 			}
 

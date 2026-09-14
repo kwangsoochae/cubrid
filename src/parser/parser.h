@@ -637,6 +637,7 @@ extern "C"
   extern PT_NODE *parser_make_expression (PARSER_CONTEXT * parser, PT_OP_TYPE OP, PT_NODE * arg1, PT_NODE * arg2,
 					  PT_NODE * arg3);
   extern PT_NODE *parser_keyword_func (const char *name, PT_NODE * args);
+  extern PT_NODE *parser_plcsql_builtin_func (PARSER_CONTEXT * parser, const char *name, PT_NODE * args);
 
   extern bool pt_check_not_null_constraint (PARSER_CONTEXT * parser, PT_NODE * from, PT_NODE * node);
   extern PT_NODE *pt_convert_to_logical_expr (PARSER_CONTEXT * parser, PT_NODE * node, bool use_parens_inside,
