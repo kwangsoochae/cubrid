@@ -30542,20 +30542,33 @@ static int
 pt_plcsql_read_static_sql (PARSER_CONTEXT * parser, PT_NODE * list)
 {
   PT_NODE *stmt, **parsed;
-  int saved_static;
+  char why[512];
+  int saved_static, host_vars;
 
   for (stmt = list; stmt != NULL; stmt = stmt->next)
     {
       switch (stmt->info.sp_stmt.op)
 	{
 	case PT_SP_SQL:
+	  /* the flag has to stand over the name binding too, not only the parse: what it settles
+	   * is what an unresolved name becomes, and that is decided in pt_compile (). The path the
+	   * PL engine's compiler takes sets it on the session and leaves it there for the same
+	   * reason (db_open_buffer_local ()). */
 	  saved_static = parser->flag.is_parsing_static_sql;
 	  parser->flag.is_parsing_static_sql = 1;
+	  host_vars = parser->host_var_count;
+
 	  parsed = parser_parse_string_with_escapes (parser, stmt->info.sp_stmt.sql_text, false);
-	  parser->flag.is_parsing_static_sql = saved_static;
 
 	  if (parsed == NULL || *parsed == NULL || pt_has_error (parser))
 	    {
+	      /* the reason the SQL parser gives names a place in the statement, and the statement
+	       * it names is not the one the user called - it is one written inside a routine - so
+	       * the text has to come along for the reason to be of any use */
+	      parser->flag.is_parsing_static_sql = saved_static;
+	      snprintf (why, sizeof (why), "the SQL was not read - %s", stmt->info.sp_stmt.sql_text);
+	      pt_reset_error (parser);
+	      PT_ERRORc (parser, stmt, why);
 	      return ER_FAILED;
 	    }
 	  if ((*parsed)->next != NULL)
@@ -30567,8 +30580,25 @@ pt_plcsql_read_static_sql (PARSER_CONTEXT * parser, PT_NODE * list)
 	    }
 
 	  stmt->info.sp_stmt.sql = pt_compile (parser, *parsed);
+	  parser->flag.is_parsing_static_sql = saved_static;
+
 	  if (stmt->info.sp_stmt.sql == NULL || pt_has_error (parser))
 	    {
+	      snprintf (why, sizeof (why), "the SQL was refused - %s", stmt->info.sp_stmt.sql_text);
+	      pt_reset_error (parser);
+	      PT_ERRORc (parser, stmt, why);
+	      return ER_FAILED;
+	    }
+
+	  if (parser->host_var_count > host_vars)
+	    {
+	      /* a name the statement could not resolve as a column became a host variable, and
+	       * those are the body's own variables. Nothing fills them yet: the plan does not say
+	       * which frame slot feeds which, and the executor reads whatever the value descriptor
+	       * happens to hold - which is how an INSERT took the server down here. */
+	      snprintf (why, sizeof (why), "the SQL reads a variable of the body - %s", stmt->info.sp_stmt.sql_text);
+	      pt_reset_error (parser);
+	      PT_ERRORc (parser, stmt, why);
 	      return ER_FAILED;
 	    }
 	  break;
