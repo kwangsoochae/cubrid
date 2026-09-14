@@ -685,19 +685,30 @@ expr
 		{
 		  $$ = pt_name (sp_Parser, $1);
 		}
-	/* A function call reads as an expression. The node is the same PT_METHOD_CALL the SQL
-	 * grammar builds, so pt_stored_procedure_to_regu () lowers it without knowing where it
-	 * came from - the difference from the statement form is only that this one gives a value
-	 * back, which call_or_expr says. */
+	/* A name with an argument list is the engine's own function where there is one of that
+	 * name, and a call to a routine where there is not - which is the order the SQL grammar's
+	 * generic_function reads it in, and the order that lets a body use SUBSTR without the
+	 * catalog being asked about it. A qualified name is never a builtin: those have no owner.
+	 * The call node is the same PT_METHOD_CALL the statement form builds, so
+	 * pt_stored_procedure_to_regu () lowers it without knowing where it came from. */
 	| sp_name '(' arg_list_opt ')'
 		{
-		  PT_NODE *call = parser_new_node (sp_Parser, PT_METHOD_CALL);
+		  PT_NODE *call = NULL;
 
-		  if (call != NULL)
+		  if (!PT_NAME_RESOLVED ($1))
 		    {
-		      call->info.method_call.method_name = $1;
-		      call->info.method_call.arg_list = $3;
-		      call->info.method_call.call_or_expr = PT_IS_MTHD_EXPR;
+		      call = parser_plcsql_builtin_func (sp_Parser, PT_NAME_ORIGINAL ($1), $3);
+		    }
+
+		  if (call == NULL)
+		    {
+		      call = parser_new_node (sp_Parser, PT_METHOD_CALL);
+		      if (call != NULL)
+			{
+			  call->info.method_call.method_name = $1;
+			  call->info.method_call.arg_list = $3;
+			  call->info.method_call.call_or_expr = PT_IS_MTHD_EXPR;
+			}
 		    }
 		  $$ = call;
 		}
