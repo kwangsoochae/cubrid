@@ -30148,6 +30148,7 @@ static PT_NODE *pt_plcsql_find_decl (PT_PLCSQL_SCOPE * scope, const char *name);
 static int pt_plcsql_bind_name (PARSER_CONTEXT * parser, PT_NODE * name, PT_PLCSQL_SCOPE * scope);
 static PT_NODE *pt_plcsql_bind_name_pre (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int *continue_walk);
 static int pt_plcsql_resolve_expr (PARSER_CONTEXT * parser, PT_NODE * expr, PT_PLCSQL_SCOPE * scope);
+static int pt_plcsql_bind_host_vars (PARSER_CONTEXT * parser, PT_NODE * sql, PT_PLCSQL_SCOPE * scope);
 static int pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_SCOPE * scope,
 					int *next_slot);
 static int pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCOPE * outer, int *next_slot);
@@ -30304,6 +30305,74 @@ pt_plcsql_resolve_expr (PARSER_CONTEXT * parser, PT_NODE * expr, PT_PLCSQL_SCOPE
 }
 
 /*
+ * pt_plcsql_bind_host_vars_pre () - parser_walk_tree () hook over one SQL statement
+ *   return: the node, or the name that replaces it
+ */
+static PT_NODE *
+pt_plcsql_bind_host_vars_pre (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int *continue_walk)
+{
+  PT_PLCSQL_RESOLVE_ARG *resolve = (PT_PLCSQL_RESOLVE_ARG *) arg;
+  PT_NODE *name;
+
+  if (node->node_type != PT_HOST_VAR || node->info.host_var.label == NULL)
+    {
+      return node;
+    }
+
+  name = pt_name (parser, node->info.host_var.label);
+  if (name == NULL)
+    {
+      resolve->error = ER_FAILED;
+      *continue_walk = PT_STOP_WALK;
+      return node;
+    }
+
+  if (pt_plcsql_bind_name (parser, name, resolve->scope) != NO_ERROR)
+    {
+      resolve->error = ER_FAILED;
+      *continue_walk = PT_STOP_WALK;
+      return node;
+    }
+
+  /* the statement keeps the node's place in the tree, so what follows it comes along */
+  name->next = node->next;
+  node->next = NULL;
+
+  return name;
+}
+
+/*
+ * pt_plcsql_bind_host_vars () - make each host variable of one statement read a frame slot
+ *   return: NO_ERROR or ER_FAILED
+ *   parser(in) :
+ *   sql(in/out): the statement the SQL parser read
+ *   scope(in)  : the innermost scope at the statement
+ *
+ * note: the SQL parser turned a name it could not resolve as a column into a host variable and
+ *       kept the name on it. Those names are the body's own variables, and here each becomes
+ *       the same PT_NAME a procedural expression uses, which is lowered to a TYPE_PLCSQL_SLOT
+ *       regu variable. Leaving them as host variables would be wrong twice over: nothing fills
+ *       the value descriptor for them, and a host variable is taken to hold still while the
+ *       statement runs, so fetch_peek_arith () caches an expression over one - which a loop
+ *       turning over a local makes stale.
+ *
+ *       A column of the statement's own table never reaches this. It resolved, so no host
+ *       variable was made, and the column is what the statement reads - which is the rule the
+ *       PL engine follows too.
+ */
+static int
+pt_plcsql_bind_host_vars (PARSER_CONTEXT * parser, PT_NODE * sql, PT_PLCSQL_SCOPE * scope)
+{
+  PT_PLCSQL_RESOLVE_ARG resolve;
+
+  resolve.scope = scope;
+  resolve.error = NO_ERROR;
+  (void) parser_walk_tree (parser, sql, pt_plcsql_bind_host_vars_pre, &resolve, NULL, NULL);
+
+  return resolve.error;
+}
+
+/*
  * pt_plcsql_resolve_stmt_list () - resolve a statement list in one scope
  *   return: NO_ERROR or ER_FAILED
  *   parser(in) :
@@ -30395,7 +30464,10 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
 	  break;
 
 	case PT_SP_SQL:
-	  /* the names inside are the SQL parser's to bind, and it has not read the text yet */
+	  if (pt_plcsql_bind_host_vars (parser, stmt->info.sp_stmt.sql, scope) != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
 	  break;
 
 	case PT_SP_NULL_STMT:
@@ -30543,7 +30615,7 @@ pt_plcsql_read_static_sql (PARSER_CONTEXT * parser, PT_NODE * list)
 {
   PT_NODE *stmt, **parsed;
   char why[512];
-  int saved_static, host_vars;
+  int saved_static;
 
   for (stmt = list; stmt != NULL; stmt = stmt->next)
     {
@@ -30556,7 +30628,6 @@ pt_plcsql_read_static_sql (PARSER_CONTEXT * parser, PT_NODE * list)
 	   * reason (db_open_buffer_local ()). */
 	  saved_static = parser->flag.is_parsing_static_sql;
 	  parser->flag.is_parsing_static_sql = 1;
-	  host_vars = parser->host_var_count;
 
 	  parsed = parser_parse_string_with_escapes (parser, stmt->info.sp_stmt.sql_text, false);
 
@@ -30590,17 +30661,6 @@ pt_plcsql_read_static_sql (PARSER_CONTEXT * parser, PT_NODE * list)
 	      return ER_FAILED;
 	    }
 
-	  if (parser->host_var_count > host_vars)
-	    {
-	      /* a name the statement could not resolve as a column became a host variable, and
-	       * those are the body's own variables. Nothing fills them yet: the plan does not say
-	       * which frame slot feeds which, and the executor reads whatever the value descriptor
-	       * happens to hold - which is how an INSERT took the server down here. */
-	      snprintf (why, sizeof (why), "the SQL reads a variable of the body - %s", stmt->info.sp_stmt.sql_text);
-	      pt_reset_error (parser);
-	      PT_ERRORc (parser, stmt, why);
-	      return ER_FAILED;
-	    }
 	  break;
 
 	case PT_SP_BLOCK:
