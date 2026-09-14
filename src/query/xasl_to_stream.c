@@ -152,7 +152,7 @@ static char *xts_process_delete_proc (char *ptr, const DELETE_PROC_NODE * delete
 static char *xts_process_insert_proc (char *ptr, const INSERT_PROC_NODE * insert_proc);
 static char *xts_process_merge_proc (char *ptr, const MERGE_PROC_NODE * merge_info);
 static char *xts_process_cte_proc (char *ptr, const CTE_PROC_NODE * cte_proc);
-static char *xts_process_plcs_proc (char *ptr, const PLCS_PROC_NODE * plcs_proc);
+static char *xts_process_plcsql_proc (char *ptr, const PLCSQL_PROC_NODE * plcsql_proc);
 
 static char *xts_process_outptr_list (char *ptr, const OUTPTR_LIST * outptr_list);
 static char *xts_process_selupd_list (char *ptr, const SELUPD_LIST * selupd_list);
@@ -251,7 +251,7 @@ static int xts_sizeof_sort_list (const SORT_LIST * ptr);
 static int xts_sizeof_connectby_proc (const CONNECTBY_PROC_NODE * ptr);
 static int xts_sizeof_regu_value_list (const REGU_VALUE_LIST * regu_value_list);
 static int xts_sizeof_cte_proc (const CTE_PROC_NODE * ptr);
-static int xts_sizeof_plcs_proc (const PLCS_PROC_NODE * ptr);
+static int xts_sizeof_plcsql_proc (const PLCSQL_PROC_NODE * ptr);
 static int xts_sizeof_sp_type (const SP_TYPE * sp);
 
 static int xts_mark_ptr_visited (const void *ptr, int offset);
@@ -3193,8 +3193,8 @@ xts_process_xasl_node (char *ptr, const XASL_NODE * xasl)
       ptr = xts_process_cte_proc (ptr, &xasl->proc.cte);
       break;
 
-    case PLCS_PROC:
-      ptr = xts_process_plcs_proc (ptr, &xasl->proc.plcs);
+    case PLCSQL_PROC:
+      ptr = xts_process_plcsql_proc (ptr, &xasl->proc.plcsql);
       break;
 
     default:
@@ -3696,34 +3696,34 @@ xts_process_cte_proc (char *ptr, const CTE_PROC_NODE * cte_proc)
 }
 
 static char *
-xts_process_plcs_proc (char *ptr, const PLCS_PROC_NODE * plcs_proc)
+xts_process_plcsql_proc (char *ptr, const PLCSQL_PROC_NODE * plcsql_proc)
 {
   int offset;
   int i;
 
-  ptr = or_pack_int (ptr, plcs_proc->op);
-  ptr = or_pack_int (ptr, plcs_proc->flags);
-  ptr = or_pack_int (ptr, plcs_proc->target_slot);
-  ptr = or_pack_int (ptr, plcs_proc->locals_cnt);
+  ptr = or_pack_int (ptr, plcsql_proc->op);
+  ptr = or_pack_int (ptr, plcsql_proc->flags);
+  ptr = or_pack_int (ptr, plcsql_proc->target_slot);
+  ptr = or_pack_int (ptr, plcsql_proc->locals_cnt);
 
-  offset = xts_save_regu_variable (plcs_proc->expr);
+  offset = xts_save_regu_variable (plcsql_proc->expr);
   if (offset == ER_FAILED)
     {
       return NULL;
     }
   ptr = or_pack_int (ptr, offset);
 
-  offset = xts_save_regu_variable (plcs_proc->expr2);
+  offset = xts_save_regu_variable (plcsql_proc->expr2);
   if (offset == ER_FAILED)
     {
       return NULL;
     }
   ptr = or_pack_int (ptr, offset);
 
-  ptr = or_pack_int (ptr, plcs_proc->children_cnt);
-  for (i = 0; i < plcs_proc->children_cnt; i++)
+  ptr = or_pack_int (ptr, plcsql_proc->children_cnt);
+  for (i = 0; i < plcsql_proc->children_cnt; i++)
     {
-      offset = xts_save_xasl_node (plcs_proc->children[i]);
+      offset = xts_save_xasl_node (plcsql_proc->children[i]);
       if (offset == ER_FAILED)
 	{
 	  return NULL;
@@ -5553,8 +5553,8 @@ xts_pack_regu_variable_value (char *ptr, const REGU_VARIABLE * regu_var)
       ptr = or_pack_int (ptr, regu_var->value.val_pos);
       break;
 
-    case TYPE_PLCS_SLOT:
-      ptr = or_pack_int (ptr, regu_var->value.plcs_slot);
+    case TYPE_PLCSQL_SLOT:
+      ptr = or_pack_int (ptr, regu_var->value.plcsql_slot);
       break;
 
     case TYPE_OID:
@@ -5891,7 +5891,7 @@ xts_process_sp_type (char *ptr, const SP_TYPE * sp)
     }
   ptr = or_pack_int (ptr, offset);
 
-  offset = xts_save_xasl_node (sp->plcs);
+  offset = xts_save_xasl_node (sp->plcsql);
   if (offset == ER_FAILED)
     {
       return NULL;
@@ -6293,8 +6293,8 @@ xts_sizeof_xasl_node (const XASL_NODE * xasl)
       size += xts_sizeof_cte_proc (&xasl->proc.cte);
       break;
 
-    case PLCS_PROC:
-      size += xts_sizeof_plcs_proc (&xasl->proc.plcs);
+    case PLCSQL_PROC:
+      size += xts_sizeof_plcsql_proc (&xasl->proc.plcsql);
       break;
 
     default:
@@ -6727,12 +6727,12 @@ xts_sizeof_cte_proc (const CTE_PROC_NODE * cte_info)
 }
 
 /*
- * xts_sizeof_plcs_proc () -
+ * xts_sizeof_plcsql_proc () -
  *   return:
  *   ptr(in)    :
  */
 static int
-xts_sizeof_plcs_proc (const PLCS_PROC_NODE * plcs_proc)
+xts_sizeof_plcsql_proc (const PLCSQL_PROC_NODE * plcsql_proc)
 {
   int size = 0;
 
@@ -6743,7 +6743,7 @@ xts_sizeof_plcs_proc (const PLCS_PROC_NODE * plcs_proc)
 	   + PTR_SIZE		/* expr */
 	   + PTR_SIZE		/* expr2 */
 	   + OR_INT_SIZE	/* children_cnt */
-	   + (plcs_proc->children_cnt * PTR_SIZE));	/* children */
+	   + (plcsql_proc->children_cnt * PTR_SIZE));	/* children */
 
   return size;
 }
@@ -7508,8 +7508,8 @@ xts_get_regu_variable_value_size (const REGU_VARIABLE * regu_var)
       size = OR_INT_SIZE;	/* val_pos */
       break;
 
-    case TYPE_PLCS_SLOT:
-      size = OR_INT_SIZE;	/* plcs_slot */
+    case TYPE_PLCSQL_SLOT:
+      size = OR_INT_SIZE;	/* plcsql_slot */
       break;
 
     case TYPE_OID:
@@ -7661,7 +7661,7 @@ xts_sizeof_sp_type (const SP_TYPE * sp)
   size += (PTR_SIZE		/* value */
 	   + PTR_SIZE		/* sig */
 	   + PTR_SIZE		/* args */
-	   + PTR_SIZE);		/* plcs */
+	   + PTR_SIZE);		/* plcsql */
 
   return size;
 }

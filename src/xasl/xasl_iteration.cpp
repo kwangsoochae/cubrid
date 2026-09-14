@@ -66,7 +66,7 @@ extern "C" {
       "MERGE_PROC",
       "BUILD_SCHEMA_PROC",
       "CTE_PROC",
-      "PLCS_PROC"
+      "PLCSQL_PROC"
     };
 
     std::ostringstream oss;

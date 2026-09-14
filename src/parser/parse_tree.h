@@ -2697,8 +2697,8 @@ struct pt_name_info
   SM_PARTITION *partition;	/* partition info reference */
   PT_NODE *path_correlation;	/* as in a.b.c [path_correlation].d.e.f */
   PT_TYPE_ENUM virt_type_enum;	/* type of oid's in ldb for proxies. */
-  PT_MISC_TYPE meta_class;	/* 0 or PT_META or PT_PARAMETER or PT_CLASS or PT_PLCS_LOCAL */
-  int plcs_slot;		/* the frame slot, read only where meta_class is PT_PLCS_LOCAL */
+  PT_MISC_TYPE meta_class;	/* 0 or PT_META or PT_PARAMETER or PT_CLASS or PT_PLCSQL_LOCAL */
+  int plcsql_slot;		/* the frame slot, read only where meta_class is PT_PLCSQL_LOCAL */
   PT_NODE *default_value;	/* PT_VALUE the default value of the attribute */
   PT_NODE *constant_value;	/* constant value derived from qo_reduce_equality_terms () */
   unsigned int custom_print;
@@ -3387,7 +3387,7 @@ struct pt_truncate_info
 /* PL/CSQL STATEMENT INFO */
 
 /* One node kind carries every procedural statement, told apart by op - the parse tree
- * mirrors the XASL node here (see PLCS_OP). Their payloads are small and alike, and a
+ * mirrors the XASL node here (see PLCSQL_OP). Their payloads are small and alike, and a
  * PT_NODE kind of its own costs a set of apply, init and print functions each. */
 typedef enum
 {

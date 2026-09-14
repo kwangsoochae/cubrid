@@ -428,10 +428,10 @@ static int qexec_clear_regu_list (THREAD_ENTRY * thread_p, XASL_NODE * xasl_p, R
 static int qexec_clear_regu_value_list (THREAD_ENTRY * thread_p, XASL_NODE * xasl_p, REGU_VALUE_LIST * list,
 					bool is_final, bool for_parallel_aptr);
 static void qexec_clear_db_val_list (QPROC_DB_VALUE_LIST list);
-static int qexec_execute_plcs_stmt (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
-static int qexec_plcs_set_retval (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
-static int qexec_execute_plcs_loop (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
-static void qexec_clear_plcs_turn (THREAD_ENTRY * thread_p, XASL_NODE * body);
+static int qexec_execute_plcsql_stmt (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
+static int qexec_plcsql_set_retval (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
+static int qexec_execute_plcsql_loop (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
+static void qexec_clear_plcsql_turn (THREAD_ENTRY * thread_p, XASL_NODE * body);
 static void qexec_clear_sort_list (XASL_NODE * xasl_p, SORT_LIST * list, bool is_final);
 static void qexec_clear_pos_desc (XASL_NODE * xasl_p, QFILE_TUPLE_VALUE_POSITION * position_descr, bool is_final);
 static int qexec_clear_pred (THREAD_ENTRY * thread_p, XASL_NODE * xasl_p, PRED_EXPR * pr, bool is_final,
@@ -1618,9 +1618,9 @@ qexec_clear_regu_var (THREAD_ENTRY * thread_p, XASL_NODE * xasl_p, REGU_VARIABLE
       /* the callee's own plan hangs here, and nothing else reaches it: a procedure's plan is not
        * a child of the node that calls it. Without this pass the signatures and values inside it
        * outlive the request, which the resource tracker catches at the end of one. */
-      if (regu_var->value.sp_ptr->plcs != NULL)
+      if (regu_var->value.sp_ptr->plcsql != NULL)
 	{
-	  pg_cnt += qexec_clear_xasl (thread_p, regu_var->value.sp_ptr->plcs, is_final, for_parallel_aptr);
+	  pg_cnt += qexec_clear_xasl (thread_p, regu_var->value.sp_ptr->plcsql, is_final, for_parallel_aptr);
 	}
 
       break;
@@ -2796,15 +2796,15 @@ qexec_clear_xasl (THREAD_ENTRY * thread_p, xasl_node * xasl, bool is_final, bool
 	}
       break;
 
-    case PLCS_PROC:
+    case PLCSQL_PROC:
       /* the children are not on any of the lists the walk below follows, and what they hold has
        * to be reached: a call carries a pl_signature whose strings are private allocations that
        * only a final clear disposes of (see TYPE_SP in qexec_clear_regu_var ()). */
-      pg_cnt += qexec_clear_regu_var (thread_p, xasl, xasl->proc.plcs.expr, is_final, for_parallel_aptr);
-      pg_cnt += qexec_clear_regu_var (thread_p, xasl, xasl->proc.plcs.expr2, is_final, for_parallel_aptr);
-      for (int child = 0; child < xasl->proc.plcs.children_cnt; child++)
+      pg_cnt += qexec_clear_regu_var (thread_p, xasl, xasl->proc.plcsql.expr, is_final, for_parallel_aptr);
+      pg_cnt += qexec_clear_regu_var (thread_p, xasl, xasl->proc.plcsql.expr2, is_final, for_parallel_aptr);
+      for (int child = 0; child < xasl->proc.plcsql.children_cnt; child++)
 	{
-	  pg_cnt += qexec_clear_xasl (thread_p, xasl->proc.plcs.children[child], is_final, for_parallel_aptr);
+	  pg_cnt += qexec_clear_xasl (thread_p, xasl->proc.plcsql.children[child], is_final, for_parallel_aptr);
 	}
       break;
 
@@ -3714,7 +3714,7 @@ qexec_deep_copy_xasl_state (THREAD_ENTRY * thread_p, xasl_state * xasl_state_p)
   new_xasl_state->query_id = xasl_state_p->query_id;
   /* The frame is not copied: the copy reads the same activation, and only the procedural
    * executor writes to it. */
-  new_xasl_state->plcs_frame = xasl_state_p->plcs_frame;
+  new_xasl_state->plcsql_frame = xasl_state_p->plcsql_frame;
   new_xasl_state->vd.xasl_state = new_xasl_state;
   new_xasl_state->vd.dbval_cnt = xasl_state_p->vd.dbval_cnt;
   new_xasl_state->vd.drand = xasl_state_p->vd.drand;
@@ -3762,21 +3762,21 @@ qexec_free_xasl_state (THREAD_ENTRY * thread_p, xasl_state * xasl_state)
 }
 
 /*
- * qexec_alloc_plcs_frame () - build one activation of a PL/CSQL procedure
+ * qexec_alloc_plcsql_frame () - build one activation of a PL/CSQL procedure
  *   return: the frame, NULL on error
  *   thread_p(in)   :
  *   locals_cnt(in) : how many slots the compiler numbered
  *   caller(in)     : the frame that made the call, NULL at the outermost one
  */
-PLCS_FRAME *
-qexec_alloc_plcs_frame (THREAD_ENTRY * thread_p, int locals_cnt, PLCS_FRAME * caller)
+PLCSQL_FRAME *
+qexec_alloc_plcsql_frame (THREAD_ENTRY * thread_p, int locals_cnt, PLCSQL_FRAME * caller)
 {
-  PLCS_FRAME *frame;
+  PLCSQL_FRAME *frame;
   int i;
 
   assert (locals_cnt >= 0);
 
-  frame = (PLCS_FRAME *) db_private_alloc (thread_p, sizeof (PLCS_FRAME));
+  frame = (PLCSQL_FRAME *) db_private_alloc (thread_p, sizeof (PLCSQL_FRAME));
   if (frame == NULL)
     {
       return NULL;
@@ -3784,7 +3784,7 @@ qexec_alloc_plcs_frame (THREAD_ENTRY * thread_p, int locals_cnt, PLCS_FRAME * ca
 
   frame->locals = NULL;
   frame->locals_cnt = locals_cnt;
-  frame->signal = PLCS_SIGNAL_NONE;
+  frame->signal = PLCSQL_SIGNAL_NONE;
   frame->signal_level = 0;
   db_make_null (&frame->retval);
   frame->sqlcode = 0;
@@ -3811,7 +3811,7 @@ qexec_alloc_plcs_frame (THREAD_ENTRY * thread_p, int locals_cnt, PLCS_FRAME * ca
 }
 
 /*
- * qexec_free_plcs_frame () -
+ * qexec_free_plcsql_frame () -
  *   return:
  *   thread_p(in) :
  *   frame(in)    :
@@ -3819,7 +3819,7 @@ qexec_alloc_plcs_frame (THREAD_ENTRY * thread_p, int locals_cnt, PLCS_FRAME * ca
  * note: the caller chain is not walked. Each frame is freed by the call that made it.
  */
 void
-qexec_free_plcs_frame (THREAD_ENTRY * thread_p, PLCS_FRAME * frame)
+qexec_free_plcsql_frame (THREAD_ENTRY * thread_p, PLCSQL_FRAME * frame)
 {
   int i;
 
@@ -17480,7 +17480,7 @@ qexec_execute_query (THREAD_ENTRY * thread_p, xasl_node * xasl, int dbval_cnt, c
   xasl_state.qp_xasl_line = 0;
 
   /* no procedure is running here. fetch.c raises a frame when it enters one */
-  xasl_state.plcs_frame = NULL;
+  xasl_state.plcsql_frame = NULL;
 
   time_t sec;
   int millisec;
@@ -28909,14 +28909,14 @@ qexec_execute_subquery_for_result_cache (THREAD_ENTRY * thread_p, XASL_NODE * xa
 /*
  * Executing a PL/CSQL procedure
  *
- * One recursive walk of the PLCS_PROC tree the client generated, against the frame on
+ * One recursive walk of the PLCSQL_PROC tree the client generated, against the frame on
  * XASL_STATE. Control flow that is not an error - RETURN, EXIT, CONTINUE - travels as a signal
  * on the frame rather than through GOTO_EXIT_ON_ERROR, so every step checks whether one is
  * standing before it runs the next.
  */
 
 /*
- * qexec_plcs_fetch_value () - evaluate one procedural expression
+ * qexec_plcsql_fetch_value () - evaluate one procedural expression
  *   return: NO_ERROR or ER_FAILED
  *   thread_p(in) :
  *   regu(in)   : the expression
@@ -28924,7 +28924,7 @@ qexec_execute_subquery_for_result_cache (THREAD_ENTRY * thread_p, XASL_NODE * xa
  *   value(out) : points into whatever holds the result; not owned by the caller
  */
 static int
-qexec_plcs_fetch_value (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu, XASL_STATE * xasl_state, DB_VALUE ** value)
+qexec_plcsql_fetch_value (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu, XASL_STATE * xasl_state, DB_VALUE ** value)
 {
   if (fetch_peek_dbval (thread_p, regu, &xasl_state->vd, NULL, NULL, NULL, value) != NO_ERROR)
     {
@@ -28935,7 +28935,7 @@ qexec_plcs_fetch_value (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu, XASL_STAT
 }
 
 /*
- * qexec_plcs_set_retval () - evaluate what a RETURN gives back and keep it on the frame
+ * qexec_plcsql_set_retval () - evaluate what a RETURN gives back and keep it on the frame
  *   return: NO_ERROR or ER_FAILED
  *
  * note: the value is copied for the same reason an assignment copies - what is fetched points
@@ -28943,14 +28943,14 @@ qexec_plcs_fetch_value (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu, XASL_STAT
  *       outlives this statement.
  */
 static int
-qexec_plcs_set_retval (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state)
+qexec_plcsql_set_retval (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state)
 {
-  PLCS_FRAME *frame = xasl_state->plcs_frame;
+  PLCSQL_FRAME *frame = xasl_state->plcsql_frame;
   DB_VALUE *value = NULL;
 
   assert (frame != NULL);
 
-  if (qexec_plcs_fetch_value (thread_p, xasl->proc.plcs.expr, xasl_state, &value) != NO_ERROR)
+  if (qexec_plcsql_fetch_value (thread_p, xasl->proc.plcsql.expr, xasl_state, &value) != NO_ERROR)
     {
       return ER_FAILED;
     }
@@ -28962,20 +28962,20 @@ qexec_plcs_set_retval (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * x
 }
 
 /*
- * qexec_plcs_assign () - write one slot
+ * qexec_plcsql_assign () - write one slot
  *   return: NO_ERROR or ER_FAILED
  */
 static int
-qexec_plcs_assign (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state)
+qexec_plcsql_assign (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state)
 {
-  PLCS_FRAME *frame = xasl_state->plcs_frame;
+  PLCSQL_FRAME *frame = xasl_state->plcsql_frame;
   DB_VALUE *value = NULL;
   DB_VALUE copy;
-  int slot = xasl->proc.plcs.target_slot;
+  int slot = xasl->proc.plcsql.target_slot;
 
   assert (frame != NULL && slot >= 0 && slot < frame->locals_cnt);
 
-  if (qexec_plcs_fetch_value (thread_p, xasl->proc.plcs.expr, xasl_state, &value) != NO_ERROR)
+  if (qexec_plcsql_fetch_value (thread_p, xasl->proc.plcsql.expr, xasl_state, &value) != NO_ERROR)
     {
       return ER_FAILED;
     }
@@ -28997,7 +28997,7 @@ qexec_plcs_assign (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_
 }
 
 /*
- * qexec_plcs_as_int () - read a procedural expression as an integer
+ * qexec_plcsql_as_int () - read a procedural expression as an integer
  *   return: NO_ERROR or ER_FAILED
  *   out(out)   : the value; untouched when the expression was NULL
  *   is_null(out) : whether it was
@@ -29006,12 +29006,12 @@ qexec_plcs_assign (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_
  *       these trees is where 50011 begins - so the cast is done here rather than assumed.
  */
 static int
-qexec_plcs_as_int (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu, XASL_STATE * xasl_state, int *out, bool * is_null)
+qexec_plcsql_as_int (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu, XASL_STATE * xasl_state, int *out, bool * is_null)
 {
   DB_VALUE *value = NULL;
   DB_VALUE as_int;
 
-  if (qexec_plcs_fetch_value (thread_p, regu, xasl_state, &value) != NO_ERROR)
+  if (qexec_plcsql_fetch_value (thread_p, regu, xasl_state, &value) != NO_ERROR)
     {
       return ER_FAILED;
     }
@@ -29036,18 +29036,18 @@ qexec_plcs_as_int (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu, XASL_STATE * x
 }
 
 /*
- * qexec_plcs_test () - evaluate a condition
+ * qexec_plcsql_test () - evaluate a condition
  *   return: NO_ERROR or ER_FAILED
  *   taken(out) : whether the branch, or the next turn of the loop, runs. A NULL condition is
  *                not true - the reading the manual gives IF and WHILE
  */
 static int
-qexec_plcs_test (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu, XASL_STATE * xasl_state, bool * taken)
+qexec_plcsql_test (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu, XASL_STATE * xasl_state, bool * taken)
 {
   int truth = 0;
   bool is_null = false;
 
-  if (qexec_plcs_as_int (thread_p, regu, xasl_state, &truth, &is_null) != NO_ERROR)
+  if (qexec_plcsql_as_int (thread_p, regu, xasl_state, &truth, &is_null) != NO_ERROR)
     {
       return ER_FAILED;
     }
@@ -29058,51 +29058,51 @@ qexec_plcs_test (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu, XASL_STATE * xas
 }
 
 /*
- * qexec_execute_plcs_stmt () - run one procedural statement
+ * qexec_execute_plcsql_stmt () - run one procedural statement
  *   return: NO_ERROR or ER_FAILED
  *   thread_p(in) :
- *   xasl(in)   : a PLCS_PROC node
+ *   xasl(in)   : a PLCSQL_PROC node
  *   xasl_state(in) :
  */
 static int
-qexec_execute_plcs_stmt (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state)
+qexec_execute_plcsql_stmt (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state)
 {
-  PLCS_FRAME *frame = xasl_state->plcs_frame;
+  PLCSQL_FRAME *frame = xasl_state->plcsql_frame;
   bool taken;
   int i;
 
-  switch (xasl->proc.plcs.op)
+  switch (xasl->proc.plcsql.op)
     {
-    case PLCS_OP_BLOCK:
-      for (i = 0; i < xasl->proc.plcs.children_cnt; i++)
+    case PLCSQL_OP_BLOCK:
+      for (i = 0; i < xasl->proc.plcsql.children_cnt; i++)
 	{
-	  if (qexec_execute_plcs_stmt (thread_p, xasl->proc.plcs.children[i], xasl_state) != NO_ERROR)
+	  if (qexec_execute_plcsql_stmt (thread_p, xasl->proc.plcsql.children[i], xasl_state) != NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }
-	  if (frame->signal != PLCS_SIGNAL_NONE)
+	  if (frame->signal != PLCSQL_SIGNAL_NONE)
 	    {
 	      break;
 	    }
 	}
       return NO_ERROR;
 
-    case PLCS_OP_JUMP:
-      assert (xasl->proc.plcs.flags == PLCS_JUMP_RETURN);
-      frame->signal = PLCS_SIGNAL_RETURN;
-      if (xasl->proc.plcs.expr == NULL)
+    case PLCSQL_OP_JUMP:
+      assert (xasl->proc.plcsql.flags == PLCSQL_JUMP_RETURN);
+      frame->signal = PLCSQL_SIGNAL_RETURN;
+      if (xasl->proc.plcsql.expr == NULL)
 	{
 	  /* a procedure's RETURN: the frame gives nothing back and the NULL it was built with
 	   * stands */
 	  return NO_ERROR;
 	}
-      return qexec_plcs_set_retval (thread_p, xasl, xasl_state);
+      return qexec_plcsql_set_retval (thread_p, xasl, xasl_state);
 
-    case PLCS_OP_ASSIGN:
-      return qexec_plcs_assign (thread_p, xasl, xasl_state);
+    case PLCSQL_OP_ASSIGN:
+      return qexec_plcsql_assign (thread_p, xasl, xasl_state);
 
-    case PLCS_OP_IF:
-      if (qexec_plcs_test (thread_p, xasl->proc.plcs.expr, xasl_state, &taken) != NO_ERROR)
+    case PLCSQL_OP_IF:
+      if (qexec_plcsql_test (thread_p, xasl->proc.plcsql.expr, xasl_state, &taken) != NO_ERROR)
 	{
 	  return ER_FAILED;
 	}
@@ -29111,24 +29111,24 @@ qexec_execute_plcs_stmt (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE *
        * statement was written without one */
       if (taken)
 	{
-	  return qexec_execute_plcs_stmt (thread_p, xasl->proc.plcs.children[0], xasl_state);
+	  return qexec_execute_plcsql_stmt (thread_p, xasl->proc.plcsql.children[0], xasl_state);
 	}
-      if (xasl->proc.plcs.children_cnt > 1)
+      if (xasl->proc.plcsql.children_cnt > 1)
 	{
-	  return qexec_execute_plcs_stmt (thread_p, xasl->proc.plcs.children[1], xasl_state);
+	  return qexec_execute_plcsql_stmt (thread_p, xasl->proc.plcsql.children[1], xasl_state);
 	}
       return NO_ERROR;
 
-    case PLCS_OP_LOOP:
-      return qexec_execute_plcs_loop (thread_p, xasl, xasl_state);
+    case PLCSQL_OP_LOOP:
+      return qexec_execute_plcsql_loop (thread_p, xasl, xasl_state);
 
-    case PLCS_OP_CALL:
+    case PLCSQL_OP_CALL:
       {
 	DB_VALUE *ignored = NULL;
 
 	/* the expression is a TYPE_SP regu variable, so fetching it is the call. A procedure
 	 * has no value to give back and the fetch has already cleared the one it holds. */
-	return qexec_plcs_fetch_value (thread_p, xasl->proc.plcs.expr, xasl_state, &ignored);
+	return qexec_plcsql_fetch_value (thread_p, xasl->proc.plcsql.expr, xasl_state, &ignored);
       }
 
     default:
@@ -29141,31 +29141,31 @@ qexec_execute_plcs_stmt (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE *
 }
 
 /*
- * qexec_execute_plcs_loop () - run a loop in any of its three forms
+ * qexec_execute_plcsql_loop () - run a loop in any of its three forms
  *   return: NO_ERROR or ER_FAILED
  *   thread_p(in) :
- *   xasl(in)   : a PLCS_OP_LOOP node
+ *   xasl(in)   : a PLCSQL_OP_LOOP node
  *   xasl_state(in) :
  */
 static int
-qexec_execute_plcs_loop (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state)
+qexec_execute_plcsql_loop (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state)
 {
-  PLCS_FRAME *frame = xasl_state->plcs_frame;
-  XASL_NODE *body = xasl->proc.plcs.children[0];
-  int form = xasl->proc.plcs.flags & PLCS_LOOP_FORM_MASK;
-  bool reverse = (xasl->proc.plcs.flags & PLCS_LOOP_REVERSE) != 0;
+  PLCSQL_FRAME *frame = xasl_state->plcsql_frame;
+  XASL_NODE *body = xasl->proc.plcsql.children[0];
+  int form = xasl->proc.plcsql.flags & PLCSQL_LOOP_FORM_MASK;
+  bool reverse = (xasl->proc.plcsql.flags & PLCSQL_LOOP_REVERSE) != 0;
   int max_turns = prm_get_integer_value (PRM_ID_PL_MAX_LOOP_ITERATIONS);
   int turns = 0;
   int lower = 0, upper = 0, counter = 0;
   bool is_null = false;
   bool taken;
 
-  if (form == PLCS_LOOP_FOR)
+  if (form == PLCSQL_LOOP_FOR)
     {
       /* both bounds are read once, before the first turn, so assigning to a variable they
        * mention inside the body cannot change how many turns there are */
-      if (qexec_plcs_as_int (thread_p, xasl->proc.plcs.expr, xasl_state, &lower, &is_null) != NO_ERROR
-	  || qexec_plcs_as_int (thread_p, xasl->proc.plcs.expr2, xasl_state, &upper, &is_null) != NO_ERROR)
+      if (qexec_plcsql_as_int (thread_p, xasl->proc.plcsql.expr, xasl_state, &lower, &is_null) != NO_ERROR
+	  || qexec_plcsql_as_int (thread_p, xasl->proc.plcsql.expr2, xasl_state, &upper, &is_null) != NO_ERROR)
 	{
 	  return ER_FAILED;
 	}
@@ -29187,11 +29187,11 @@ qexec_execute_plcs_loop (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE *
 
       switch (form)
 	{
-	case PLCS_LOOP_BASIC:
+	case PLCSQL_LOOP_BASIC:
 	  break;
 
-	case PLCS_LOOP_WHILE:
-	  if (qexec_plcs_test (thread_p, xasl->proc.plcs.expr, xasl_state, &taken) != NO_ERROR)
+	case PLCSQL_LOOP_WHILE:
+	  if (qexec_plcsql_test (thread_p, xasl->proc.plcsql.expr, xasl_state, &taken) != NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }
@@ -29201,7 +29201,7 @@ qexec_execute_plcs_loop (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE *
 	    }
 	  break;
 
-	case PLCS_LOOP_FOR:
+	case PLCSQL_LOOP_FOR:
 	  /* an empty range runs the body no times, which is why the test comes before it and
 	   * not after */
 	  if (lower > upper)
@@ -29212,8 +29212,8 @@ qexec_execute_plcs_loop (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE *
 	    {
 	      return NO_ERROR;
 	    }
-	  pr_clear_value (&frame->locals[xasl->proc.plcs.target_slot]);
-	  db_make_int (&frame->locals[xasl->proc.plcs.target_slot], counter);
+	  pr_clear_value (&frame->locals[xasl->proc.plcsql.target_slot]);
+	  db_make_int (&frame->locals[xasl->proc.plcsql.target_slot], counter);
 	  break;
 
 	default:
@@ -29222,43 +29222,43 @@ qexec_execute_plcs_loop (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE *
 	  return ER_FAILED;
 	}
 
-      if (qexec_execute_plcs_stmt (thread_p, body, xasl_state) != NO_ERROR)
+      if (qexec_execute_plcsql_stmt (thread_p, body, xasl_state) != NO_ERROR)
 	{
 	  return ER_FAILED;
 	}
 
-      if (frame->signal == PLCS_SIGNAL_RETURN)
+      if (frame->signal == PLCSQL_SIGNAL_RETURN)
 	{
 	  return NO_ERROR;
 	}
-      if (frame->signal == PLCS_SIGNAL_EXIT && frame->signal_level-- <= 1)
+      if (frame->signal == PLCSQL_SIGNAL_EXIT && frame->signal_level-- <= 1)
 	{
-	  frame->signal = PLCS_SIGNAL_NONE;
+	  frame->signal = PLCSQL_SIGNAL_NONE;
 	  frame->signal_level = 0;
 	  return NO_ERROR;
 	}
-      if (frame->signal == PLCS_SIGNAL_CONTINUE && frame->signal_level-- <= 1)
+      if (frame->signal == PLCSQL_SIGNAL_CONTINUE && frame->signal_level-- <= 1)
 	{
-	  frame->signal = PLCS_SIGNAL_NONE;
+	  frame->signal = PLCSQL_SIGNAL_NONE;
 	  frame->signal_level = 0;
 	}
-      if (frame->signal != PLCS_SIGNAL_NONE)
+      if (frame->signal != PLCSQL_SIGNAL_NONE)
 	{
 	  /* a labelled EXIT or CONTINUE still has enclosing loops to leave */
 	  return NO_ERROR;
 	}
 
-      if (form == PLCS_LOOP_FOR)
+      if (form == PLCSQL_LOOP_FOR)
 	{
 	  counter += reverse ? -1 : 1;
 	}
 
-      qexec_clear_plcs_turn (thread_p, body);
+      qexec_clear_plcsql_turn (thread_p, body);
     }
 }
 
 /*
- * qexec_clear_plcs_turn () - put a loop body back the way the next turn needs to find it
+ * qexec_clear_plcsql_turn () - put a loop body back the way the next turn needs to find it
  *   return:
  *   thread_p(in) :
  *   body(in)   : the loop body's block
@@ -29268,7 +29268,7 @@ qexec_execute_plcs_loop (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE *
  *       the same shape on the recursive CTE). Only the per-turn state goes.
  */
 static void
-qexec_clear_plcs_turn (THREAD_ENTRY * thread_p, XASL_NODE * body)
+qexec_clear_plcsql_turn (THREAD_ENTRY * thread_p, XASL_NODE * body)
 {
   int i;
 
@@ -29277,7 +29277,7 @@ qexec_clear_plcs_turn (THREAD_ENTRY * thread_p, XASL_NODE * body)
       return;
     }
 
-  if (body->type != PLCS_PROC)
+  if (body->type != PLCSQL_PROC)
     {
       /* an SQL statement in the body: its list file and single-tuple state are this turn's */
       (void) qexec_clear_xasl (thread_p, body, false, false);
@@ -29289,17 +29289,17 @@ qexec_clear_plcs_turn (THREAD_ENTRY * thread_p, XASL_NODE * body)
       qexec_clear_db_val_list (body->val_list->valp);
     }
 
-  for (i = 0; i < body->proc.plcs.children_cnt; i++)
+  for (i = 0; i < body->proc.plcsql.children_cnt; i++)
     {
-      qexec_clear_plcs_turn (thread_p, body->proc.plcs.children[i]);
+      qexec_clear_plcsql_turn (thread_p, body->proc.plcsql.children[i]);
     }
 }
 
 /*
- * qexec_call_plcs () - run a procedure the client sent a plan for, from a CALL statement
+ * qexec_call_plcsql () - run a procedure the client sent a plan for, from a CALL statement
  *   return: NO_ERROR or ER_FAILED
  *   thread_p(in) :
- *   xasl(in)   : the procedure's outermost PLCS_PROC block
+ *   xasl(in)   : the procedure's outermost PLCSQL_PROC block
  *   args(in)   : the call's arguments, in declared order
  *   args_cnt(in) : how many
  *   result(out) : what a RETURN left, NULL where the caller wants nothing back
@@ -29309,17 +29309,17 @@ qexec_clear_plcs_turn (THREAD_ENTRY * thread_p, XASL_NODE * body)
  *       expressions in the body may read, and the frame.
  */
 int
-qexec_call_plcs (THREAD_ENTRY * thread_p, XASL_NODE * xasl, DB_VALUE * args, int args_cnt, DB_VALUE * result)
+qexec_call_plcsql (THREAD_ENTRY * thread_p, XASL_NODE * xasl, DB_VALUE * args, int args_cnt, DB_VALUE * result)
 {
   XASL_STATE xasl_state;
-  PLCS_FRAME *frame;
+  PLCSQL_FRAME *frame;
   struct drand48_data *rand_buf_p;
   struct tm *c_time_struct, tm_val;
   time_t sec;
   int millisec;
   int error = NO_ERROR, i;
 
-  if (xasl == NULL || xasl->type != PLCS_PROC || args_cnt > xasl->proc.plcs.locals_cnt)
+  if (xasl == NULL || xasl->type != PLCSQL_PROC || args_cnt > xasl->proc.plcsql.locals_cnt)
     {
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_XASLNODE, 0);
       return ER_FAILED;
@@ -29348,7 +29348,7 @@ qexec_call_plcs (THREAD_ENTRY * thread_p, XASL_NODE * xasl, DB_VALUE * args, int
   drand48_r (rand_buf_p, &xasl_state.vd.drand);
   xasl_state.vd.xasl_state = &xasl_state;
 
-  frame = qexec_alloc_plcs_frame (thread_p, xasl->proc.plcs.locals_cnt, NULL);
+  frame = qexec_alloc_plcsql_frame (thread_p, xasl->proc.plcsql.locals_cnt, NULL);
   if (frame == NULL)
     {
       return ER_FAILED;
@@ -29377,14 +29377,14 @@ qexec_call_plcs (THREAD_ENTRY * thread_p, XASL_NODE * xasl, DB_VALUE * args, int
    * door as a procedure that ran */
   if (error == NO_ERROR)
     {
-      xasl_state.plcs_frame = frame;
-      error = qexec_execute_plcs (thread_p, xasl, &xasl_state);
+      xasl_state.plcsql_frame = frame;
+      error = qexec_execute_plcsql (thread_p, xasl, &xasl_state);
       if (error == NO_ERROR && result != NULL)
 	{
 	  error = pr_clone_value (&frame->retval, result);
 	}
     }
-  qexec_free_plcs_frame (thread_p, frame);
+  qexec_free_plcsql_frame (thread_p, frame);
 
   /* the plan came in on this request and goes out with it, so the clear is a final one. Without
    * it the pl_signature of a call inside the body outlives the request and the resource tracker
@@ -29395,22 +29395,22 @@ qexec_call_plcs (THREAD_ENTRY * thread_p, XASL_NODE * xasl, DB_VALUE * args, int
 }
 
 /*
- * qexec_execute_plcs () - run a whole PL/CSQL procedure body
+ * qexec_execute_plcsql () - run a whole PL/CSQL procedure body
  *   return: NO_ERROR or ER_FAILED
  *   thread_p(in) :
- *   xasl(in)   : the procedure's outermost PLCS_PROC block
- *   xasl_state(in) : its plcs_frame is the activation this call runs on
+ *   xasl(in)   : the procedure's outermost PLCSQL_PROC block
+ *   xasl_state(in) : its plcsql_frame is the activation this call runs on
  *
  * note: the frame belongs to the caller, not to this function. The call site is where arguments
  *       are put into slots and where a result is read back out of them, so it is the only place
- *       that can size the frame (proc.plcs.locals_cnt), fill it and take it down again.
+ *       that can size the frame (proc.plcsql.locals_cnt), fill it and take it down again.
  */
 int
-qexec_execute_plcs (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state)
+qexec_execute_plcsql (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state)
 {
-  assert (xasl != NULL && xasl->type == PLCS_PROC && xasl->proc.plcs.op == PLCS_OP_BLOCK);
-  assert (xasl_state->plcs_frame != NULL);
-  assert (xasl_state->plcs_frame->locals_cnt >= xasl->proc.plcs.locals_cnt);
+  assert (xasl != NULL && xasl->type == PLCSQL_PROC && xasl->proc.plcsql.op == PLCSQL_OP_BLOCK);
+  assert (xasl_state->plcsql_frame != NULL);
+  assert (xasl_state->plcsql_frame->locals_cnt >= xasl->proc.plcsql.locals_cnt);
 
-  return qexec_execute_plcs_stmt (thread_p, xasl, xasl_state);
+  return qexec_execute_plcsql_stmt (thread_p, xasl, xasl_state);
 }

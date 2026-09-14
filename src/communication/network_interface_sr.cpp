@@ -11227,7 +11227,7 @@ spl_call (THREAD_ENTRY *thread_p, unsigned int rid, char *request, int reqlen)
 					   &unpack_info);
       if (error_code == NO_ERROR && xasl != NULL)
 	{
-	  error_code = qexec_call_plcs (thread_p, xasl, args.data (), (int) args.size (), &ret_value);
+	  error_code = qexec_call_plcsql (thread_p, xasl, args.data (), (int) args.size (), &ret_value);
 	}
       else if (error_code == NO_ERROR)
 	{

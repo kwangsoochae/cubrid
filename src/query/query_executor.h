@@ -88,20 +88,20 @@ struct val_descr
  * a signal instead, which the enclosing block or loop reads. */
 typedef enum
 {
-  PLCS_SIGNAL_NONE = 0,
-  PLCS_SIGNAL_RETURN,
-  PLCS_SIGNAL_EXIT,
-  PLCS_SIGNAL_CONTINUE
-} PLCS_SIGNAL;
+  PLCSQL_SIGNAL_NONE = 0,
+  PLCSQL_SIGNAL_RETURN,
+  PLCSQL_SIGNAL_EXIT,
+  PLCSQL_SIGNAL_CONTINUE
+} PLCSQL_SIGNAL;
 
 /* One activation of a PL/CSQL procedure. Locals live in slots the compiler numbers. */
-typedef struct plcs_frame PLCS_FRAME;
-struct plcs_frame
+typedef struct plcsql_frame PLCSQL_FRAME;
+struct plcsql_frame
 {
   DB_VALUE *locals;
   int locals_cnt;
 
-  PLCS_SIGNAL signal;
+  PLCSQL_SIGNAL signal;
   int signal_level;		/* how many enclosing loops a labelled EXIT or CONTINUE leaves */
 
   DB_VALUE retval;		/* what a RETURN left for the caller to read; NULL until one runs,
@@ -111,7 +111,7 @@ struct plcs_frame
   char *sqlerrm;
 
   int call_depth;
-  PLCS_FRAME *caller;
+  PLCSQL_FRAME *caller;
 };
 
 // XASL_STATE
@@ -124,7 +124,7 @@ struct xasl_state
   /* A pointer, because nearly every qexec_* function carries this struct: outside a
    * procedure it stays NULL and neither the behaviour nor the cost of the existing paths
    * changes. */
-  PLCS_FRAME *plcs_frame;
+  PLCSQL_FRAME *plcsql_frame;
 };
 
 extern qfile_list_id *qexec_execute_query (THREAD_ENTRY * thread_p, xasl_node * xasl, int dbval_cnt,
@@ -149,11 +149,11 @@ extern int qexec_clear_xasl_for_parallel_aptr (THREAD_ENTRY * thread_p, xasl_nod
 extern qfile_list_id *qexec_get_xasl_list_id (xasl_node * xasl);
 extern xasl_state *qexec_deep_copy_xasl_state (THREAD_ENTRY * thread_p, xasl_state * xasl_state);
 extern void qexec_free_xasl_state (THREAD_ENTRY * thread_p, xasl_state * xasl_state);
-extern PLCS_FRAME *qexec_alloc_plcs_frame (THREAD_ENTRY * thread_p, int locals_cnt, PLCS_FRAME * caller);
-extern void qexec_free_plcs_frame (THREAD_ENTRY * thread_p, PLCS_FRAME * frame);
-extern int qexec_execute_plcs (THREAD_ENTRY * thread_p, xasl_node * xasl, xasl_state * xstate);
-extern int qexec_call_plcs (THREAD_ENTRY * thread_p, xasl_node * xasl, DB_VALUE * args, int args_cnt,
-			    DB_VALUE * result);
+extern PLCSQL_FRAME *qexec_alloc_plcsql_frame (THREAD_ENTRY * thread_p, int locals_cnt, PLCSQL_FRAME * caller);
+extern void qexec_free_plcsql_frame (THREAD_ENTRY * thread_p, PLCSQL_FRAME * frame);
+extern int qexec_execute_plcsql (THREAD_ENTRY * thread_p, xasl_node * xasl, xasl_state * xstate);
+extern int qexec_call_plcsql (THREAD_ENTRY * thread_p, xasl_node * xasl, DB_VALUE * args, int args_cnt,
+			      DB_VALUE * result);
 #if defined(CUBRID_DEBUG)
 extern void get_xasl_dumper_linked_in ();
 #endif
