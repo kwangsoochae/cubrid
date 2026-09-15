@@ -9761,6 +9761,124 @@ end:
 }
 
 /*
+ * do_update_decide_server_side () - ask the classes what they are, and settle how the update runs
+ *   return: NO_ERROR, or an error code with the error already set
+ *   parser(in) :
+ *   statement(in/out) : one UPDATE statement. What this writes is its info.update flags
+ *   not_nulls(out) : the attributes carrying NOT NULL, which pt_to_update_xasl () is given
+ *
+ * note: a plan can only be built once this has run. It settles server_update - the answer to
+ *       "may the server do this at all" - and a false answer means the update goes one object
+ *       at a time through the workspace instead, which has no plan. It likewise sets
+ *       do_class_attrs when the update writes class attributes, which has none either.
+ *
+ *       Split out of do_prepare_update () so that a caller building a plan of its own can run
+ *       it first. Nothing in it changed in the move.
+ */
+int
+do_update_decide_server_side (PARSER_CONTEXT * parser, PT_NODE * statement, PT_NODE ** not_nulls)
+{
+  int err = NO_ERROR;
+  PT_NODE *flat, *lhs, *spec = NULL;
+  DB_OBJECT *class_obj;
+  int has_trigger, has_unique, has_any_update_trigger, au_save, has_virt = 0;
+  bool server_update;
+
+  AU_SAVE_AND_DISABLE (au_save);	/* because sm_class_has_trigger() calls au_fetch_class() */
+
+  /* check if at least one spec to be updated has triggers. If none has triggers then see if at least one is
+   * virtual */
+  spec = statement->info.update.spec;
+  has_trigger = 0;
+  has_any_update_trigger = 0;
+  while (spec && !has_trigger && err == NO_ERROR)
+    {
+      if (spec->info.spec.remote_server_name)
+	{
+	  spec = spec->next;
+	  continue;
+	}
+      if (spec->info.spec.flag & PT_SPEC_FLAG_UPDATE)
+	{
+	  flat = spec->info.spec.flat_entity_list;
+	  class_obj = (flat) ? flat->info.name.db_object : NULL;
+	  assert (class_obj);	/* safeguard */
+	  /* the presence of a proxy trigger should force the update to be performed through the workspace */
+	  err = sm_class_has_triggers (class_obj, &has_trigger, TR_EVENT_UPDATE);
+
+	  if (err == NO_ERROR)
+	    {
+	      if (has_trigger)
+		{
+		  has_any_update_trigger = has_trigger;
+		}
+	      else if (!has_any_update_trigger)
+		{
+		  /* Check for statement delete triggerrs. */
+		  err = sm_class_has_triggers (class_obj, &has_any_update_trigger, TR_EVENT_STATEMENT_UPDATE);
+		}
+	    }
+
+	  if (!has_virt)
+	    {
+	      has_virt = (flat->info.name.virt_object != NULL);
+	    }
+	}
+
+      spec = spec->next;
+    }
+  AU_RESTORE (au_save);
+
+  /* err = has_proxy_trigger(flat, &has_trigger); */
+  if (err != NO_ERROR)
+    {
+      PT_INTERNAL_ERROR (parser, "update");
+      return err;
+    }
+  /* sm_class_has_triggers() checked if the class has active triggers */
+  statement->info.update.has_trigger = (bool) has_trigger;
+
+  if (statement->info.update.spec->info.spec.remote_server_name)
+    {
+      *not_nulls = NULL;
+    }
+  else
+    {
+      /* check if the target class has UNIQUE constraint and get attributes that has NOT NULL constraint */
+      err = update_check_for_constraints (parser, &has_unique, not_nulls, statement);
+      if (err < NO_ERROR)
+	{
+	  PT_INTERNAL_ERROR (parser, "update");
+	  return err;
+	}
+    }
+
+  statement->info.update.has_unique = (bool) has_unique;
+
+  /* determine whether it can be server-side or OID list update */
+  server_update = (!has_trigger && !has_virt
+		   && !update_check_having_meta_attr (parser, statement->info.update.assignment));
+
+  lhs = statement->info.update.assignment->info.expr.arg1;
+  if (PT_IS_N_COLUMN_UPDATE_EXPR (lhs))
+    {
+      lhs = lhs->info.expr.arg1;
+    }
+  statement->info.update.server_update = server_update;
+  if (server_update && !has_any_update_trigger && !(statement->info.update.hint & PT_HINT_USE_SBR))
+    {
+      statement->info.update.execute_with_commit_allowed = 1;
+    }
+
+  /* if we are updating class attributes, not need to prepare */
+  if (lhs->info.name.meta_class == PT_META_ATTR)
+    {
+      statement->info.update.do_class_attrs = true;
+    }
+  return NO_ERROR;
+}
+
+/*
  * do_prepare_update() - Prepare the UPDATE statement
  *   return: Error code
  *   parser(in): Parser context
@@ -9772,9 +9890,8 @@ int
 do_prepare_update (PARSER_CONTEXT * parser, PT_NODE * statement)
 {
   int err;
-  PT_NODE *flat, *not_nulls, *lhs, *spec = NULL;
-  DB_OBJECT *class_obj;
-  int has_trigger, has_unique, has_any_update_trigger, au_save, has_virt = 0;
+  PT_NODE *flat, *not_nulls, *spec = NULL;
+  int au_save;
   bool server_update;
 
   if (parser == NULL || statement == NULL)
@@ -9820,97 +9937,16 @@ do_prepare_update (PARSER_CONTEXT * parser, PT_NODE * statement)
 	{
 	  continue;		/* continue to next UPDATE statement */
 	}
-
-      AU_SAVE_AND_DISABLE (au_save);	/* because sm_class_has_trigger() calls au_fetch_class() */
-
-      /* check if at least one spec to be updated has triggers. If none has triggers then see if at least one is
-       * virtual */
-      spec = statement->info.update.spec;
-      has_trigger = 0;
-      has_any_update_trigger = 0;
-      while (spec && !has_trigger && err == NO_ERROR)
-	{
-	  if (spec->info.spec.remote_server_name)
-	    {
-	      spec = spec->next;
-	      continue;
-	    }
-	  if (spec->info.spec.flag & PT_SPEC_FLAG_UPDATE)
-	    {
-	      flat = spec->info.spec.flat_entity_list;
-	      class_obj = (flat) ? flat->info.name.db_object : NULL;
-	      assert (class_obj);	/* safeguard */
-	      /* the presence of a proxy trigger should force the update to be performed through the workspace */
-	      err = sm_class_has_triggers (class_obj, &has_trigger, TR_EVENT_UPDATE);
-
-	      if (err == NO_ERROR)
-		{
-		  if (has_trigger)
-		    {
-		      has_any_update_trigger = has_trigger;
-		    }
-		  else if (!has_any_update_trigger)
-		    {
-		      /* Check for statement delete triggerrs. */
-		      err = sm_class_has_triggers (class_obj, &has_any_update_trigger, TR_EVENT_STATEMENT_UPDATE);
-		    }
-		}
-
-	      if (!has_virt)
-		{
-		  has_virt = (flat->info.name.virt_object != NULL);
-		}
-	    }
-
-	  spec = spec->next;
-	}
-      AU_RESTORE (au_save);
-
-      /* err = has_proxy_trigger(flat, &has_trigger); */
+      err = do_update_decide_server_side (parser, statement, &not_nulls);
       if (err != NO_ERROR)
 	{
-	  PT_INTERNAL_ERROR (parser, "update");
 	  break;		/* stop while loop if error */
 	}
-      /* sm_class_has_triggers() checked if the class has active triggers */
-      statement->info.update.has_trigger = (bool) has_trigger;
+      server_update = statement->info.update.server_update;
 
-      if (statement->info.update.spec->info.spec.remote_server_name)
+      /* an update of class attributes has no plan to build */
+      if (statement->info.update.do_class_attrs)
 	{
-	  not_nulls = NULL;
-	}
-      else
-	{
-	  /* check if the target class has UNIQUE constraint and get attributes that has NOT NULL constraint */
-	  err = update_check_for_constraints (parser, &has_unique, &not_nulls, statement);
-	  if (err < NO_ERROR)
-	    {
-	      PT_INTERNAL_ERROR (parser, "update");
-	      break;		/* stop while loop if error */
-	    }
-	}
-
-      statement->info.update.has_unique = (bool) has_unique;
-
-      /* determine whether it can be server-side or OID list update */
-      server_update = (!has_trigger && !has_virt
-		       && !update_check_having_meta_attr (parser, statement->info.update.assignment));
-
-      lhs = statement->info.update.assignment->info.expr.arg1;
-      if (PT_IS_N_COLUMN_UPDATE_EXPR (lhs))
-	{
-	  lhs = lhs->info.expr.arg1;
-	}
-      statement->info.update.server_update = server_update;
-      if (server_update && !has_any_update_trigger && !(statement->info.update.hint & PT_HINT_USE_SBR))
-	{
-	  statement->info.update.execute_with_commit_allowed = 1;
-	}
-
-      /* if we are updating class attributes, not need to prepare */
-      if (lhs->info.name.meta_class == PT_META_ATTR)
-	{
-	  statement->info.update.do_class_attrs = true;
 	  continue;		/* continue to next UPDATE statement */
 	}
 
@@ -11168,6 +11204,94 @@ end:
 }
 
 /*
+ * do_delete_decide_server_side () - ask the classes what they are, and settle how the delete runs
+ *   return: NO_ERROR, or an error code with the error already set
+ *   parser(in) :
+ *   statement(in/out) : one DELETE statement. What this writes is its info.delete_ flags
+ *
+ * note: the counterpart of do_update_decide_server_side (). It takes no NOT NULL list because
+ *       pt_to_delete_xasl () asks for none - a delete writes no attribute.
+ *
+ *       Split out of do_prepare_delete () so that a caller building a plan of its own can run
+ *       it first. Nothing in it changed in the move.
+ */
+int
+do_delete_decide_server_side (PARSER_CONTEXT * parser, PT_NODE * statement)
+{
+  int err = NO_ERROR;
+  PT_NODE *flat, *node = NULL;
+  DB_OBJECT *class_obj;
+  int has_trigger, au_save, has_any_delete_trigger;
+  bool server_delete, has_virt_obj;
+  /* the presence of a proxy trigger should force the delete to be performed through the workspace */
+  AU_SAVE_AND_DISABLE (au_save);	/* because sm_class_has_trigger() calls au_fetch_class() */
+  has_virt_obj = false;
+  has_trigger = 0;
+  has_any_delete_trigger = 0;
+  node = (PT_NODE *) statement->info.delete_.spec;
+  while (node && err == NO_ERROR && !has_trigger)
+    {
+      if (node->info.spec.remote_server_name)
+	{
+	  node = node->next;
+	  continue;
+	}
+      if (node->info.spec.flag & PT_SPEC_FLAG_DELETE)
+	{
+	  flat = node->info.spec.flat_entity_list;
+	  if (flat)
+	    {
+	      if (flat->info.name.virt_object)
+		{
+		  has_virt_obj = true;
+		}
+	      class_obj = flat->info.name.db_object;
+	    }
+	  else
+	    {
+	      class_obj = NULL;
+	    }
+	  err = sm_class_has_triggers (class_obj, &has_trigger, TR_EVENT_DELETE);
+
+	  if (err == NO_ERROR)
+	    {
+	      if (has_trigger)
+		{
+		  has_any_delete_trigger = has_trigger;
+		}
+	      else if (!has_any_delete_trigger)
+		{
+		  /* Check for statement delete triggerrs. */
+		  err = sm_class_has_triggers (class_obj, &has_any_delete_trigger, TR_EVENT_STATEMENT_DELETE);
+		}
+	    }
+	}
+
+      node = node->next;
+    }
+
+  AU_RESTORE (au_save);
+  /* err = has_proxy_trigger(flat, &has_trigger); */
+  if (err != NO_ERROR)
+    {
+      PT_INTERNAL_ERROR (parser, "delete");
+      return err;
+    }
+  /* sm_class_has_triggers() checked if the class has active triggers */
+  statement->info.delete_.has_trigger = has_trigger;
+
+  /* determine whether it can be server-side or OID list deletion */
+  server_delete = (!has_trigger && !has_virt_obj);
+
+  statement->info.delete_.server_delete = server_delete;
+  if (server_delete && !has_any_delete_trigger && !(statement->info.delete_.hint & PT_HINT_USE_SBR))
+    {
+      statement->info.delete_.execute_with_commit_allowed = 1;
+    }
+  return NO_ERROR;
+}
+
+/*
  * do_prepare_delete() - Prepare the DELETE statement
  *   return: Error code
  *   parser(in/out): Parser context
@@ -11179,9 +11303,8 @@ do_prepare_delete (PARSER_CONTEXT * parser, PT_NODE * statement, PT_NODE * paren
 {
   int err;
   PT_NODE *flat;
-  DB_OBJECT *class_obj;
-  int has_trigger, au_save, has_any_delete_trigger;
-  bool server_delete, has_virt_obj;
+  int au_save;
+  bool server_delete;
   PT_NODE *node = NULL;
   PT_NODE *save_stmt = statement;
 
@@ -11232,71 +11355,12 @@ do_prepare_delete (PARSER_CONTEXT * parser, PT_NODE * statement, PT_NODE * paren
 	  break;
 	}
 
-      /* the presence of a proxy trigger should force the delete to be performed through the workspace */
-      AU_SAVE_AND_DISABLE (au_save);	/* because sm_class_has_trigger() calls au_fetch_class() */
-      has_virt_obj = false;
-      has_trigger = 0;
-      has_any_delete_trigger = 0;
-      node = (PT_NODE *) statement->info.delete_.spec;
-      while (node && err == NO_ERROR && !has_trigger)
-	{
-	  if (node->info.spec.remote_server_name)
-	    {
-	      node = node->next;
-	      continue;
-	    }
-	  if (node->info.spec.flag & PT_SPEC_FLAG_DELETE)
-	    {
-	      flat = node->info.spec.flat_entity_list;
-	      if (flat)
-		{
-		  if (flat->info.name.virt_object)
-		    {
-		      has_virt_obj = true;
-		    }
-		  class_obj = flat->info.name.db_object;
-		}
-	      else
-		{
-		  class_obj = NULL;
-		}
-	      err = sm_class_has_triggers (class_obj, &has_trigger, TR_EVENT_DELETE);
-
-	      if (err == NO_ERROR)
-		{
-		  if (has_trigger)
-		    {
-		      has_any_delete_trigger = has_trigger;
-		    }
-		  else if (!has_any_delete_trigger)
-		    {
-		      /* Check for statement delete triggerrs. */
-		      err = sm_class_has_triggers (class_obj, &has_any_delete_trigger, TR_EVENT_STATEMENT_DELETE);
-		    }
-		}
-	    }
-
-	  node = node->next;
-	}
-
-      AU_RESTORE (au_save);
-      /* err = has_proxy_trigger(flat, &has_trigger); */
+      err = do_delete_decide_server_side (parser, statement);
       if (err != NO_ERROR)
 	{
-	  PT_INTERNAL_ERROR (parser, "delete");
 	  break;		/* stop while loop if error */
 	}
-      /* sm_class_has_triggers() checked if the class has active triggers */
-      statement->info.delete_.has_trigger = has_trigger;
-
-      /* determine whether it can be server-side or OID list deletion */
-      server_delete = (!has_trigger && !has_virt_obj);
-
-      statement->info.delete_.server_delete = server_delete;
-      if (server_delete && !has_any_delete_trigger && !(statement->info.delete_.hint & PT_HINT_USE_SBR))
-	{
-	  statement->info.delete_.execute_with_commit_allowed = 1;
-	}
+      server_delete = statement->info.delete_.server_delete;
 
       stream.xasl_id = NULL;
       if (server_delete)
