@@ -514,6 +514,13 @@ typedef enum
 #define PLCSQL_JUMP_EXIT	0x01
 #define PLCSQL_JUMP_CONTINUE	0x02
 
+/* plcsql_proc_node.flags of a PLCSQL_OP_CURSOR. The declaration is a node of its own because
+ * the query belongs to it and not to any one OPEN: a cursor opened in two places is still one
+ * cursor, and what CLOSE lets go of has to be what OPEN ran. */
+#define PLCSQL_CURSOR_DECLARE	0x00
+#define PLCSQL_CURSOR_OPEN	0x01
+#define PLCSQL_CURSOR_CLOSE	0x02
+
 /* plcsql_proc_node.flags of a PLCSQL_OP_LOOP. These mirror the parse tree's PT_SP_LOOP_*, which the
  * XASL side cannot include; pt_to_plcsql_stmt () maps one onto the other rather than casting. */
 #define PLCSQL_LOOP_BASIC		0x00	/* LOOP ... END LOOP */

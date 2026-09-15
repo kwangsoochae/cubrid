@@ -431,6 +431,7 @@ static void qexec_clear_db_val_list (QPROC_DB_VALUE_LIST list);
 static int qexec_execute_plcsql_stmt (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
 static int qexec_execute_plcsql_stmt_inner (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
 static int qexec_plcsql_set_retval (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
+static int qexec_plcsql_cursor (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
 static int qexec_plcsql_sql (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
 static int qexec_plcsql_read_into (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
 static int qexec_execute_plcsql_loop (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
@@ -3773,12 +3774,12 @@ qexec_free_xasl_state (THREAD_ENTRY * thread_p, xasl_state * xasl_state)
  *   caller(in)     : the frame that made the call, NULL at the outermost one
  */
 PLCSQL_FRAME *
-qexec_alloc_plcsql_frame (THREAD_ENTRY * thread_p, int locals_cnt, PLCSQL_FRAME * caller)
+qexec_alloc_plcsql_frame (THREAD_ENTRY * thread_p, int locals_cnt, int cursors_cnt, PLCSQL_FRAME * caller)
 {
   PLCSQL_FRAME *frame;
   int i;
 
-  assert (locals_cnt >= 0);
+  assert (locals_cnt >= 0 && cursors_cnt >= 0);
 
   frame = (PLCSQL_FRAME *) db_private_alloc (thread_p, sizeof (PLCSQL_FRAME));
   if (frame == NULL)
@@ -3788,6 +3789,8 @@ qexec_alloc_plcsql_frame (THREAD_ENTRY * thread_p, int locals_cnt, PLCSQL_FRAME 
 
   frame->locals = NULL;
   frame->locals_cnt = locals_cnt;
+  frame->cursors = NULL;
+  frame->cursors_cnt = cursors_cnt;
   frame->signal = PLCSQL_SIGNAL_NONE;
   frame->signal_level = 0;
   db_make_null (&frame->retval);
@@ -3797,6 +3800,22 @@ qexec_alloc_plcsql_frame (THREAD_ENTRY * thread_p, int locals_cnt, PLCSQL_FRAME 
   frame->placed = NULL;
   frame->call_depth = (caller != NULL) ? caller->call_depth + 1 : 0;
   frame->caller = caller;
+
+  if (cursors_cnt > 0)
+    {
+      frame->cursors = (PLCSQL_CURSOR *) db_private_alloc (thread_p, sizeof (PLCSQL_CURSOR) * cursors_cnt);
+      if (frame->cursors == NULL)
+	{
+	  db_private_free_and_init (thread_p, frame);
+	  return NULL;
+	}
+
+      for (i = 0; i < cursors_cnt; i++)
+	{
+	  frame->cursors[i].query = NULL;
+	  frame->cursors[i].is_open = false;
+	}
+    }
 
   if (locals_cnt > 0)
     {
@@ -3832,6 +3851,22 @@ qexec_free_plcsql_frame (THREAD_ENTRY * thread_p, PLCSQL_FRAME * frame)
   if (frame == NULL)
     {
       return;
+    }
+
+  if (frame->cursors != NULL)
+    {
+      /* what leaves a cursor open is the body ending without CLOSE, which a RETURN out of the
+       * middle does. The call's query entry would free the list file at the end either way,
+       * but letting go of it here keeps the two paths alike and the file no longer than the
+       * frame that could still read it. */
+      for (i = 0; i < frame->cursors_cnt; i++)
+	{
+	  if (frame->cursors[i].is_open && frame->cursors[i].query != NULL)
+	    {
+	      qexec_clear_xasl_head (thread_p, frame->cursors[i].query);
+	    }
+	}
+      db_private_free_and_init (thread_p, frame->cursors);
     }
 
   if (frame->locals != NULL)
@@ -29403,6 +29438,9 @@ qexec_execute_plcsql_stmt_inner (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL
     case PLCSQL_OP_SQL:
       return qexec_plcsql_sql (thread_p, xasl, xasl_state);
 
+    case PLCSQL_OP_CURSOR:
+      return qexec_plcsql_cursor (thread_p, xasl, xasl_state);
+
     case PLCSQL_OP_CALL:
       {
 	DB_VALUE *ignored = NULL;
@@ -29415,6 +29453,87 @@ qexec_execute_plcsql_stmt_inner (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL
     default:
       /* the grammar builds no other op yet, and one arriving here means the plan and this
        * executor disagree rather than that the procedure did something */
+      assert (false);
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_XASLNODE, 0);
+      return ER_FAILED;
+    }
+}
+
+/*
+ * qexec_plcsql_cursor () - declare, open or close one cursor
+ *   return: NO_ERROR or ER_FAILED
+ *   thread_p(in) :
+ *   xasl(in)   : the PLCSQL_OP_CURSOR node; which of the three it is, is in its flags, and
+ *                which cursor of the frame it acts on is in target_slot
+ *   xasl_state(in) :
+ *
+ * note: the declaration form runs where the declaration stands and only tells the frame which
+ *       plan the cursor has. OPEN runs that plan; what it leaves behind is a list file, and
+ *       unlike the one a SELECT ... INTO reads it is not let go of at the end of the statement
+ *       - it has to outlive OPEN so that a FETCH can read it, and CLOSE is what ends it.
+ */
+static int
+qexec_plcsql_cursor (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state)
+{
+  PLCSQL_FRAME *frame = xasl_state->plcsql_frame;
+  PLCSQL_CURSOR *cursor;
+  int number = xasl->proc.plcsql.target_slot;
+  int i;
+
+  if (frame == NULL || number < 0 || number >= frame->cursors_cnt)
+    {
+      /* the plan names a cursor the frame was not built for, so the two disagree */
+      assert (false);
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_XASLNODE, 0);
+      return ER_FAILED;
+    }
+  cursor = &frame->cursors[number];
+
+  switch (xasl->proc.plcsql.flags)
+    {
+    case PLCSQL_CURSOR_DECLARE:
+      /* a block inside a loop declares again on every turn, which is what puts a cursor left
+       * open by the turn before back to closed */
+      cursor->query = xasl->proc.plcsql.children[0];
+      cursor->is_open = false;
+      return NO_ERROR;
+
+    case PLCSQL_CURSOR_OPEN:
+      if (cursor->is_open)
+	{
+	  /* the wording is the reference implementation's CURSOR_ALREADY_OPEN, which is what
+	   * this will raise once there are exceptions to raise */
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_SP_EXECUTE_ERROR, 1, "\n  cursor already open");
+	  return ER_FAILED;
+	}
+      /* the arguments are written into the parameters' slots first, because those slots are
+       * what the query reads */
+      for (i = 0; i < xasl->proc.plcsql.children_cnt; i++)
+	{
+	  if (qexec_execute_plcsql_stmt (thread_p, xasl->proc.plcsql.children[i], xasl_state) != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
+	}
+
+      if (qexec_execute_mainblock (thread_p, cursor->query, xasl_state, NULL) != NO_ERROR)
+	{
+	  return ER_FAILED;
+	}
+      cursor->is_open = true;
+      return NO_ERROR;
+
+    case PLCSQL_CURSOR_CLOSE:
+      if (!cursor->is_open)
+	{
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_SP_EXECUTE_ERROR, 1, "\n  invalid cursor");
+	  return ER_FAILED;
+	}
+      qexec_clear_xasl_head (thread_p, cursor->query);
+      cursor->is_open = false;
+      return NO_ERROR;
+
+    default:
       assert (false);
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_XASLNODE, 0);
       return ER_FAILED;
@@ -29798,7 +29917,7 @@ qexec_call_plcsql (THREAD_ENTRY * thread_p, XASL_NODE * xasl, DB_VALUE * args, i
   drand48_r (rand_buf_p, &xasl_state.vd.drand);
   xasl_state.vd.xasl_state = &xasl_state;
 
-  frame = qexec_alloc_plcsql_frame (thread_p, xasl->proc.plcsql.locals_cnt, NULL);
+  frame = qexec_alloc_plcsql_frame (thread_p, xasl->proc.plcsql.locals_cnt, xasl->proc.plcsql.cursors_cnt, NULL);
   if (frame == NULL)
     {
       (void) qmgr_end_server_query (thread_p, query_id);

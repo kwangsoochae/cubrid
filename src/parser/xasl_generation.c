@@ -30149,7 +30149,7 @@ static int pt_plcsql_bind_name (PARSER_CONTEXT * parser, PT_NODE * name, PT_PLCS
 static PT_NODE *pt_plcsql_bind_name_pre (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int *continue_walk);
 static int pt_plcsql_resolve_expr (PARSER_CONTEXT * parser, PT_NODE * expr, PT_PLCSQL_SCOPE * scope);
 static int pt_plcsql_bind_host_vars (PARSER_CONTEXT * parser, PT_NODE * sql, PT_PLCSQL_SCOPE * scope);
-static int pt_plcsql_bind_cursor (PARSER_CONTEXT * parser, PT_NODE * name, PT_PLCSQL_SCOPE * scope);
+static int pt_plcsql_bind_cursor (PARSER_CONTEXT * parser, PT_NODE * stmt, PT_PLCSQL_SCOPE * scope);
 static int pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_SCOPE * scope,
 					int *next_slot);
 static int pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCOPE * outer,
@@ -30209,8 +30209,9 @@ pt_plcsql_find_decl (PT_PLCSQL_SCOPE * scope, const char *name)
  *   scope(in)  : the innermost scope at the point of the statement
  */
 static int
-pt_plcsql_bind_cursor (PARSER_CONTEXT * parser, PT_NODE * name, PT_PLCSQL_SCOPE * scope)
+pt_plcsql_bind_cursor (PARSER_CONTEXT * parser, PT_NODE * stmt, PT_PLCSQL_SCOPE * scope)
 {
+  PT_NODE *name = stmt->info.sp_stmt.name;
   PT_NODE *decl = pt_plcsql_find_decl (scope, name->info.name.original);
 
   /* a body reaches this parser only after the PL engine has accepted it, so a name that is
@@ -30223,6 +30224,23 @@ pt_plcsql_bind_cursor (PARSER_CONTEXT * parser, PT_NODE * name, PT_PLCSQL_SCOPE 
     }
 
   name->info.name.plcsql_slot = decl->info.sp_stmt.name->info.name.plcsql_slot;
+
+  if (stmt->info.sp_stmt.op == PT_SP_OPEN)
+    {
+      /* the parameters travel to the OPEN so that lowering can pair each argument with the
+       * slot it is written into. They are copied because the declaration keeps its own. */
+      if (pt_length_of_list (stmt->info.sp_stmt.expr) != pt_length_of_list (decl->info.sp_stmt.params))
+	{
+	  PT_ERRORmf (parser, name, MSGCAT_SET_PARSER_SEMANTIC, MSGCAT_SEMANTIC_IS_NOT_DEFINED,
+		      name->info.name.original);
+	  return ER_FAILED;
+	}
+      stmt->info.sp_stmt.params = parser_copy_tree_list (parser, decl->info.sp_stmt.params);
+      if (decl->info.sp_stmt.params != NULL && stmt->info.sp_stmt.params == NULL)
+	{
+	  return ER_FAILED;
+	}
+    }
 
   return NO_ERROR;
 }
@@ -30563,14 +30581,14 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
 	  /* the arguments are ordinary expressions of the frame; the cursor's name is not one
 	   * of its values and is matched against the declarations instead */
 	  if (pt_plcsql_resolve_expr (parser, stmt->info.sp_stmt.expr, scope) != NO_ERROR
-	      || pt_plcsql_bind_cursor (parser, stmt->info.sp_stmt.name, scope) != NO_ERROR)
+	      || pt_plcsql_bind_cursor (parser, stmt, scope) != NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }
 	  break;
 
 	case PT_SP_CLOSE:
-	  if (pt_plcsql_bind_cursor (parser, stmt->info.sp_stmt.name, scope) != NO_ERROR)
+	  if (pt_plcsql_bind_cursor (parser, stmt, scope) != NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }
@@ -30634,10 +30652,35 @@ pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCO
 
       if (decl->info.sp_stmt.op == PT_SP_CURSOR)
 	{
+	  PT_PLCSQL_SCOPE query_scope;
+	  PT_NODE *param;
+
 	  /* a cursor is declared where a variable is but holds no value, so it is numbered in
 	   * its own sequence and takes no slot. It does come into scope here: OPEN and CLOSE
 	   * find it by name the way a reference finds a variable. */
 	  decl->info.sp_stmt.name->info.name.plcsql_slot = (*next_cursor)++;
+
+	  /* its parameters do take slots, because that is how the query reads them: the query
+	   * is compiled like any other written in the body, so a name it cannot resolve as a
+	   * column became a host variable, and a host variable reads a slot. OPEN writes the
+	   * arguments into those slots before running the query. */
+	  for (param = decl->info.sp_stmt.params; param != NULL; param = param->next)
+	    {
+	      param->info.name.meta_class = PT_PLCSQL_LOCAL;
+	      param->info.name.plcsql_slot = (*next_slot)++;
+	    }
+
+	  /* the parameters are in scope for the query and the enclosing block is outside them,
+	   * so the query can read a body variable too */
+	  query_scope.decl_list = NULL;
+	  query_scope.visible = NULL;
+	  query_scope.names = decl->info.sp_stmt.params;
+	  query_scope.outer = &scope;
+	  if (pt_plcsql_bind_host_vars (parser, decl->info.sp_stmt.sql, &query_scope) != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
+
 	  scope.visible = decl;
 	  continue;
 	}
@@ -30746,6 +30789,7 @@ static XASL_NODE *pt_to_plcsql_block (PARSER_CONTEXT * parser, PT_NODE * block, 
 				      TP_DOMAIN * ret_domain, PT_PLCSQL_LOOP * loops);
 static XASL_NODE *pt_to_plcsql_stmt_list_block (PARSER_CONTEXT * parser, PT_NODE * list, TP_DOMAIN * ret_domain,
 						PT_PLCSQL_LOOP * loops);
+static XASL_NODE *pt_to_plcsql_cursor_decl (PARSER_CONTEXT * parser, PT_NODE * decl);
 static XASL_NODE *pt_plcsql_update_to_xasl (PARSER_CONTEXT * parser, PT_NODE * sql);
 static XASL_NODE *pt_plcsql_delete_to_xasl (PARSER_CONTEXT * parser, PT_NODE * sql);
 static XASL_NODE *pt_plcsql_sql_to_xasl (PARSER_CONTEXT * parser, PT_NODE * sql);
@@ -31423,8 +31467,13 @@ pt_to_plcsql_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params, 
 
 	  if (decl->info.sp_stmt.op == PT_SP_CURSOR)
 	    {
-	      /* read as a declaration, but its query is not gathered into the plan yet */
-	      return pt_plcsql_refuse (parser, "a cursor is declared, which the plan does not carry yet");
+	      buf[i] = pt_to_plcsql_cursor_decl (parser, decl);
+	      if (buf[i] == NULL)
+		{
+		  return NULL;
+		}
+	      i++;
+	      continue;
 	    }
 
 	  buf[i] = pt_to_plcsql_open_local (parser, decl);
@@ -31563,6 +31612,44 @@ pt_plcsql_delete_to_xasl (PARSER_CONTEXT * parser, PT_NODE * sql)
   AU_RESTORE (au_save);
 
   return xasl;
+}
+
+/*
+ * pt_to_plcsql_cursor_decl () - the node a cursor's declaration becomes
+ *   return: the XASL node, NULL on error or refusal
+ *   parser(in) :
+ *   decl(in)   : a PT_SP_CURSOR out of a block's declarations
+ *
+ * note: the query's plan hangs here rather than on an OPEN because the cursor is one cursor
+ *       however many places open it, and CLOSE has to let go of what OPEN ran. What running
+ *       this node does is tell the frame that, and nothing else.
+ */
+static XASL_NODE *
+pt_to_plcsql_cursor_decl (PARSER_CONTEXT * parser, PT_NODE * decl)
+{
+  XASL_NODE *xasl, **buf;
+
+  xasl = pt_plcsql_new_node (PLCSQL_OP_CURSOR);
+  if (xasl == NULL)
+    {
+      return NULL;
+    }
+  xasl->proc.plcsql.flags = PLCSQL_CURSOR_DECLARE;
+  xasl->proc.plcsql.target_slot = decl->info.sp_stmt.name->info.name.plcsql_slot;
+
+  regu_array_alloc (&buf, 1);
+  if (buf == NULL)
+    {
+      return NULL;
+    }
+
+  buf[0] = pt_plcsql_sql_to_xasl (parser, decl->info.sp_stmt.sql);
+  if (buf[0] == NULL)
+    {
+      return NULL;
+    }
+
+  return pt_plcsql_set_children (parser, xasl, buf, 1) == NO_ERROR ? xasl : NULL;
 }
 
 /*
@@ -31798,10 +31885,10 @@ pt_to_plcsql_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * ret_doma
 static XASL_NODE *
 pt_to_plcsql_stmt_inner (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * ret_domain, PT_PLCSQL_LOOP * loops)
 {
-  XASL_NODE *xasl, *buf[2];
+  XASL_NODE *xasl, *buf[2], **args;
   PT_PLCSQL_LOOP inner;
-  PT_NODE *call;
-  int form, levels;
+  PT_NODE *call, *arg, *param;
+  int form, levels, cnt, i;
 
   switch (stmt->info.sp_stmt.op)
     {
@@ -31898,10 +31985,51 @@ pt_to_plcsql_stmt_inner (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * re
       return pt_plcsql_set_children (parser, xasl, buf, 2) == NO_ERROR ? xasl : NULL;
 
     case PT_SP_OPEN:
-      return pt_plcsql_refuse (parser, "a cursor is opened, which the plan does not carry yet");
-
     case PT_SP_CLOSE:
-      return pt_plcsql_refuse (parser, "a cursor is closed, which the plan does not carry yet");
+      xasl = pt_plcsql_new_node (PLCSQL_OP_CURSOR);
+      if (xasl == NULL)
+	{
+	  return NULL;
+	}
+      xasl->proc.plcsql.flags =
+	(stmt->info.sp_stmt.op == PT_SP_OPEN) ? PLCSQL_CURSOR_OPEN : PLCSQL_CURSOR_CLOSE;
+      xasl->proc.plcsql.target_slot = stmt->info.sp_stmt.name->info.name.plcsql_slot;
+
+      /* an argument is written into the slot its parameter was given, which is the slot the
+       * query reads, so opening is assigning and then running */
+      cnt = pt_length_of_list (stmt->info.sp_stmt.params);
+      if (cnt == 0)
+	{
+	  return xasl;
+	}
+
+      regu_array_alloc (&args, (size_t) cnt);
+      if (args == NULL)
+	{
+	  return NULL;
+	}
+
+      i = 0;
+      for (arg = stmt->info.sp_stmt.expr, param = stmt->info.sp_stmt.params;
+	   arg != NULL && param != NULL; arg = arg->next, param = param->next)
+	{
+	  PT_NODE *one = parser_copy_tree (parser, arg);
+
+	  if (one == NULL)
+	    {
+	      return NULL;
+	    }
+	  one->next = NULL;
+
+	  args[i] = pt_to_plcsql_assign (parser, param->info.name.plcsql_slot, &one, param, true);
+	  if (args[i] == NULL)
+	    {
+	      return NULL;
+	    }
+	  i++;
+	}
+
+      return pt_plcsql_set_children (parser, xasl, args, cnt) == NO_ERROR ? xasl : NULL;
 
     case PT_SP_LOOP:
       xasl = pt_plcsql_new_node (PLCSQL_OP_LOOP);
