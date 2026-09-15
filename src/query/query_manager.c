@@ -2050,6 +2050,75 @@ exit_on_error:
 }
 
 /*
+ * qmgr_begin_server_query () - a query id for a query the server runs on its own behalf
+ *   return: the id, NULL_QUERY_ID when none could be had
+ *   thread_p(in) :
+ *
+ * note: a query the client asked for is given its entry in xqmgr_execute_query (), and that
+ *       entry is what the temp files the query makes are chained on - it is how they are found
+ *       again and let go of. A procedure running on the server makes queries the client never
+ *       asked for and never sees the id of, and those need an entry for the same reason.
+ *
+ *       qmgr_end_server_query () closes one. The pair stands inside a single request.
+ */
+QUERY_ID
+qmgr_begin_server_query (THREAD_ENTRY * thread_p)
+{
+  QMGR_TRAN_ENTRY *tran_entry_p;
+  QMGR_QUERY_ENTRY *query_p;
+  int tran_index;
+
+  if (qmgr_Query_table.tran_entries_p == NULL)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_XASLNODE, 0);
+      return NULL_QUERY_ID;
+    }
+
+  tran_index = LOG_FIND_THREAD_TRAN_INDEX (thread_p);
+  tran_entry_p = &qmgr_Query_table.tran_entries_p[tran_index];
+
+  query_p = qmgr_allocate_query_entry (thread_p, tran_entry_p);
+  if (query_p == NULL)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QM_QENTRY_RUNOUT, 1,
+	      prm_get_integer_value (PRM_ID_QMGR_MAX_QUERY_PER_TRAN));
+      return NULL_QUERY_ID;
+    }
+
+  query_p->query_status = QUERY_IN_PROGRESS;
+  qmgr_add_query_entry (thread_p, query_p, tran_index);
+
+  return query_p->query_id;
+}
+
+/*
+ * qmgr_end_server_query () - close what qmgr_begin_server_query () opened
+ *   return: NO_ERROR or ER_FAILED
+ *   thread_p(in) :
+ *   query_id(in) :
+ */
+int
+qmgr_end_server_query (THREAD_ENTRY * thread_p, QUERY_ID query_id)
+{
+  QMGR_QUERY_ENTRY *query_p;
+
+  if (query_id == NULL_QUERY_ID)
+    {
+      return NO_ERROR;
+    }
+
+  query_p = qmgr_get_query_entry (thread_p, query_id, NULL_TRAN_INDEX);
+  if (query_p != NULL)
+    {
+      /* nothing is waiting on this one the way a client waits on a query of its own, so the
+       * status is set here rather than where the query finished */
+      qmgr_mark_query_as_completed (query_p);
+    }
+
+  return xqmgr_end_query (thread_p, query_id);
+}
+
+/*
  * xqmgr_end_query () -
  *   return: int (NO_ERROR or ER_FAILED)
  *   thrd(in)   : this thread handle

@@ -162,7 +162,11 @@ namespace parallel_scan
 	    set_flag (result, CANNOT_PARALLEL_SCAN);
 	  }
 	break;
+      /* A PL/CSQL local is read out of the frame on XASL_STATE, and a px worker is handed the
+       * owning thread's frame (px_scan_task.cpp), so it reads the same value. Nothing inside a
+       * scan writes one. */
       case TYPE_CONSTANT:
+      case TYPE_PLCSQL_SLOT:
       case TYPE_OID:
       case TYPE_DBVAL:
       case TYPE_POSITION:

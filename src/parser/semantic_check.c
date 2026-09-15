@@ -11077,7 +11077,10 @@ pt_check_into_clause (PARSER_CONTEXT * parser, PT_NODE * qry)
 	}
     }
 
-  if (parser->flag.is_parsing_static_sql == 1)
+  /* A plan the server runs binds the INTO targets itself, so the clause stays on the statement.
+   * The PL engine's compiler cannot be handed parse tree nodes - it is given the names and
+   * writes Java that assigns to them - which is what the stripping below is for. */
+  if (parser->flag.is_parsing_static_sql == 1 && parser->flag.is_plcsql_native_exec == 0)
     {
       pt_check_into_clause_for_static_sql (parser, qry, tgt_cnt);
     }
