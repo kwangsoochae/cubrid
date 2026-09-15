@@ -3792,6 +3792,7 @@ qexec_alloc_plcsql_frame (THREAD_ENTRY * thread_p, int locals_cnt, PLCSQL_FRAME 
   frame->sqlcode = 0;
   frame->sqlerrm = NULL;
   frame->positioned = false;
+  frame->placed = NULL;
   frame->call_depth = (caller != NULL) ? caller->call_depth + 1 : 0;
   frame->caller = caller;
 
@@ -3843,6 +3844,10 @@ qexec_free_plcsql_frame (THREAD_ENTRY * thread_p, PLCSQL_FRAME * frame)
   if (frame->sqlerrm != NULL)
     {
       db_private_free_and_init (thread_p, frame->sqlerrm);
+    }
+  if (frame->placed != NULL)
+    {
+      db_private_free_and_init (thread_p, frame->placed);
     }
 
   db_private_free (thread_p, frame);
@@ -29309,6 +29314,7 @@ qexec_execute_plcsql_stmt (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE
 	      xasl->proc.plcsql.column, inner);
     er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_SP_EXECUTE_ERROR, 1, placed);
     frame->positioned = true;
+    frame->placed = db_private_strdup (thread_p, placed);
   }
 
   return rc;
@@ -29581,13 +29587,16 @@ qexec_clear_plcsql_turn (THREAD_ENTRY * thread_p, XASL_NODE * body)
  *   args(in)   : the call's arguments, in declared order
  *   args_cnt(in) : how many
  *   result(out) : what a RETURN left, NULL where the caller wants nothing back
+ *   placed_msg(out) : the sentence a failing statement named its place with, bare and owned by
+ *                     the caller, NULL where no statement got that far
  *
  * note: a CALL does not arrive as a query, so there is no XASL_STATE to borrow and one is
  *       raised here. What it needs is the value descriptor's clock and randomness, which the
  *       expressions in the body may read, and the frame.
  */
 int
-qexec_call_plcsql (THREAD_ENTRY * thread_p, XASL_NODE * xasl, DB_VALUE * args, int args_cnt, DB_VALUE * result)
+qexec_call_plcsql (THREAD_ENTRY * thread_p, XASL_NODE * xasl, DB_VALUE * args, int args_cnt, DB_VALUE * result,
+		   char **placed_msg)
 {
   XASL_STATE xasl_state;
   PLCSQL_FRAME *frame;
@@ -29596,6 +29605,8 @@ qexec_call_plcsql (THREAD_ENTRY * thread_p, XASL_NODE * xasl, DB_VALUE * args, i
   time_t sec;
   int millisec;
   int error = NO_ERROR, i;
+
+  *placed_msg = NULL;
 
   if (xasl == NULL || xasl->type != PLCSQL_PROC || args_cnt > xasl->proc.plcsql.locals_cnt)
     {
@@ -29662,6 +29673,8 @@ qexec_call_plcsql (THREAD_ENTRY * thread_p, XASL_NODE * xasl, DB_VALUE * args, i
 	  error = pr_clone_value (&frame->retval, result);
 	}
     }
+  *placed_msg = frame->placed;
+  frame->placed = NULL;
   qexec_free_plcsql_frame (thread_p, frame);
 
   /* the plan came in on this request and goes out with it, so the clear is a final one. Without
