@@ -154,6 +154,7 @@ namespace parallel_query_execute
       {
       case TYPE_DBVAL:
       case TYPE_CONSTANT:
+      case TYPE_PLCSQL_SLOT:
       case TYPE_ORDERBY_NUM:
       case TYPE_ATTR_ID:
       case TYPE_CLASS_ATTR_ID:
