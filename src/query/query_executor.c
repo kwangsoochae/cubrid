@@ -431,6 +431,8 @@ static void qexec_clear_db_val_list (QPROC_DB_VALUE_LIST list);
 static int qexec_execute_plcsql_stmt (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
 static int qexec_execute_plcsql_stmt_inner (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
 static int qexec_plcsql_set_retval (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
+static int qexec_plcsql_sql (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
+static int qexec_plcsql_read_into (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
 static int qexec_execute_plcsql_loop (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
 static void qexec_clear_plcsql_turn (THREAD_ENTRY * thread_p, XASL_NODE * body);
 static void qexec_clear_sort_list (XASL_NODE * xasl_p, SORT_LIST * list, bool is_final);
@@ -29399,10 +29401,7 @@ qexec_execute_plcsql_stmt_inner (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL
       return qexec_execute_plcsql_loop (thread_p, xasl, xasl_state);
 
     case PLCSQL_OP_SQL:
-      /* the child is a plain plan, not a procedural node, and running it is what running the
-       * statement is. It is the same call the server makes for a query of its own, which is
-       * the point of carrying the statement here rather than asking the client for it. */
-      return qexec_execute_mainblock (thread_p, xasl->proc.plcsql.children[0], xasl_state, NULL);
+      return qexec_plcsql_sql (thread_p, xasl, xasl_state);
 
     case PLCSQL_OP_CALL:
       {
@@ -29420,6 +29419,148 @@ qexec_execute_plcsql_stmt_inner (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_XASLNODE, 0);
       return ER_FAILED;
     }
+}
+
+/*
+ * qexec_plcsql_sql () - run one SQL statement written in a body
+ *   return: NO_ERROR or ER_FAILED
+ *   thread_p(in) :
+ *   xasl(in)   : the PLCSQL_OP_SQL node. Its first child is the statement's plan and the ones
+ *                after it, if any, are the assignments its INTO clause asks for
+ *   xasl_state(in) :
+ *
+ * note: the first child is a plain plan, not a procedural node, and running it is what running
+ *       the statement is. It is the same call the server makes for a query of its own, which
+ *       is the point of carrying the statement here rather than asking the client for it.
+ */
+static int
+qexec_plcsql_sql (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state)
+{
+  if (qexec_execute_mainblock (thread_p, xasl->proc.plcsql.children[0], xasl_state, NULL) != NO_ERROR)
+    {
+      return ER_FAILED;
+    }
+
+  if (xasl->proc.plcsql.children_cnt == 1)
+    {
+      /* no INTO clause, so the statement is all there was to do */
+      return NO_ERROR;
+    }
+
+  return qexec_plcsql_read_into (thread_p, xasl, xasl_state);
+}
+
+/*
+ * qexec_plcsql_read_into () - write the row a query gave back into the slots its INTO names
+ *   return: NO_ERROR or ER_FAILED
+ *   thread_p(in) :
+ *   xasl(in)   : the PLCSQL_OP_SQL node, its query already run
+ *   xasl_state(in) :
+ *
+ * note: how many rows there are is part of the language rather than of the query. None is
+ *       NO_DATA_FOUND. More than one is TOO_MANY_ROWS - but the first row is written to the
+ *       variables before that is raised, which is what the reference implementation does
+ *       (JavaCodeWriter's tmplHandleIntoClause) and is not what a one-row query gives, since
+ *       that refuses before reading anything.
+ *
+ *       The list file is destroyed on the way out. A statement inside a loop is run again on
+ *       the next turn, and qexec_clear_plcsql_turn () leaves a prepared plan alone.
+ */
+static int
+qexec_plcsql_read_into (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state)
+{
+  XASL_NODE *query = xasl->proc.plcsql.children[0];
+  VAL_LIST *row = query->single_tuple;
+  QFILE_LIST_ID *list_id = query->list_id;
+  QFILE_TUPLE_RECORD tuple_record = { NULL, 0 };
+  QFILE_LIST_SCAN_ID scan_id;
+  QPROC_DB_VALUE_LIST value;
+  OR_BUF buf;
+  const PR_TYPE *pr_type;
+  TP_DOMAIN *domain;
+  char *ptr;
+  int length, i;
+  bool scan_open = false;
+  int error = NO_ERROR;
+
+  if (list_id == NULL || row == NULL || row->val_cnt != list_id->type_list.type_cnt)
+    {
+      /* the plan says the statement has an INTO clause and the statement is not one that
+       * gives rows back, or gives back a different number of columns than was compiled for */
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_XASLNODE, 0);
+      return ER_FAILED;
+    }
+
+  if (qfile_open_list_scan (list_id, &scan_id) != NO_ERROR)
+    {
+      return ER_FAILED;
+    }
+  scan_open = true;
+
+  if (qfile_scan_list_next (thread_p, &scan_id, &tuple_record, PEEK) != S_SUCCESS)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_SP_EXECUTE_ERROR, 1, "\n  no data found");
+      error = ER_FAILED;
+      goto end;
+    }
+
+  for (i = 0, value = row->valp; i < row->val_cnt; i++, value = value->next)
+    {
+      domain = list_id->type_list.domp[i];
+      pr_type = (domain != NULL) ? domain->type : NULL;
+      if (pr_type == NULL)
+	{
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_QRY_SINGLE_TUPLE, 0);
+	  error = ER_FAILED;
+	  goto end;
+	}
+
+      if (qfile_locate_tuple_value (tuple_record.tpl, i, &ptr, &length) != V_BOUND)
+	{
+	  db_value_domain_init (value->val, pr_type->id, DB_DEFAULT_PRECISION, DB_DEFAULT_SCALE);
+	  continue;
+	}
+
+      if (db_value_domain_init (value->val, TP_DOMAIN_TYPE (domain), domain->precision, domain->scale) != NO_ERROR)
+	{
+	  error = ER_FAILED;
+	  goto end;
+	}
+
+      /* copied rather than peeked: the scan moves on below to see whether a second row is
+       * there, and what was peeked points into the page that move gives up */
+      or_init (&buf, ptr, length);
+      if (pr_type->data_readval (&buf, value->val, domain, -1, true, NULL, 0) != NO_ERROR)
+	{
+	  error = ER_FAILED;
+	  goto end;
+	}
+    }
+
+  /* the assignments, which is where the value is cast to what the variable was declared */
+  for (i = 1; i < xasl->proc.plcsql.children_cnt; i++)
+    {
+      if (qexec_execute_plcsql_stmt (thread_p, xasl->proc.plcsql.children[i], xasl_state) != NO_ERROR)
+	{
+	  error = ER_FAILED;
+	  goto end;
+	}
+    }
+
+  if (qfile_scan_list_next (thread_p, &scan_id, &tuple_record, PEEK) == S_SUCCESS)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_SP_EXECUTE_ERROR, 1, "\n  too many rows");
+      error = ER_FAILED;
+    }
+
+end:
+  if (scan_open)
+    {
+      qfile_close_scan (thread_p, &scan_id);
+    }
+  qexec_clear_xasl_head (thread_p, query);
+
+  return error;
 }
 
 /*
