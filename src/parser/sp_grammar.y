@@ -81,6 +81,7 @@ static PT_NODE *sp_make_data_type (PT_TYPE_ENUM type, int precision, int scale);
 }
 
 %token BEGIN_ CONSTANT_ CONTINUE_ DECLARE_ ELSE_ ELSIF_ END_ EXIT_ FOR_ IF_ IN_ LOOP_ NOT_ NULL_ REVERSE_
+%token EXCEPTION_ OTHERS_ RAISE_
 %token FALSE_ THEN_ TRUE_ WHEN_ WHILE_
 %token AS_ AUTHID_ CREATE_ FUNCTION_ OUT_ PROCEDURE_ REPLACE_ RETURN_
 %token AND_ DIV_ IS_ MOD_ OR_
@@ -92,7 +93,8 @@ static PT_NODE *sp_make_data_type (PT_TYPE_ENUM type, int precision, int scale);
 %type <node> block decl_list decl_list_opt decl stmt_list stmt if_stmt else_part_opt loop_stmt
 %type <node> assign_stmt block_stmt null_stmt return_stmt return_opt expr expr_list_opt type_spec
 %type <node> call_stmt sp_name arg_list_opt arg_list
-%type <node> jump_stmt label_decl_opt label_opt when_opt sql_stmt
+%type <node> jump_stmt label_decl_opt label_opt when_opt
+%type <node> raise_stmt handler_part_opt handler_list handler handler_name_list sql_stmt
 %type <node> routine param_list_opt param_list param
 %type <number> constant_opt reverse_opt
 
@@ -243,7 +245,7 @@ param_default_opt
 /* The body of a procedure: its declaration part is the text between AS and BEGIN, so it
  * carries no DECLARE. A block written as a statement does - see block_stmt. */
 block
-	: decl_list_opt BEGIN_ stmt_list END_ semi_opt
+	: decl_list_opt BEGIN_ stmt_list handler_part_opt END_ semi_opt
 		{
 		  /* @$ takes its start from the first symbol, and an empty one is placed at the end
 		   * of the token before the rule - so where the block begins is BEGIN when nothing
@@ -255,8 +257,68 @@ block
 		    {
 		      node->info.sp_stmt.decl_list = $1;
 		      node->info.sp_stmt.body = $3;
+		      node->info.sp_stmt.else_body = $4;
 		    }
 		  $$ = node;
+		}
+	;
+
+/* The EXCEPTION part of a block. The handlers are kept in the order they were written, because
+ * the first one that names the exception is the one that runs. */
+handler_part_opt
+	: /* empty */
+		{
+		  $$ = NULL;
+		}
+	| EXCEPTION_ handler_list
+		{
+		  $$ = $2;
+		}
+	;
+
+handler_list
+	: handler
+		{
+		  $$ = $1;
+		}
+	| handler_list handler
+		{
+		  $$ = parser_append_node ($2, $1);
+		}
+	;
+
+handler
+	: WHEN_ handler_name_list THEN_ stmt_list
+		{
+		  PT_NODE *node = sp_make_stmt (PT_SP_HANDLER, @$.first_line, @$.first_column);
+
+		  if (node)
+		    {
+		      /* OTHERS names no exception, and the flag rides on the handler rather than on a
+		       * name of its own so that the executor does not have to read a reserved word
+		       * out of the name list */
+		      node->info.sp_stmt.name = ($2 != NULL) ? $2 : NULL;
+		      node->info.sp_stmt.flags = ($2 == NULL) ? PT_SP_HANDLER_OTHERS : 0;
+		      node->info.sp_stmt.body = $4;
+		    }
+		  $$ = node;
+		}
+	;
+
+/* One WHEN may name several exceptions. OTHERS cannot be one of them - it stands alone - and
+ * the empty list is how this rule says so. */
+handler_name_list
+	: OTHERS_
+		{
+		  $$ = NULL;
+		}
+	| IDENT
+		{
+		  $$ = SP_AT (pt_name (sp_Parser, $1), @$);
+		}
+	| handler_name_list OR_ IDENT
+		{
+		  $$ = parser_append_node (SP_AT (pt_name (sp_Parser, $3), @3), $1);
 		}
 	;
 
@@ -282,9 +344,20 @@ decl_list
 		}
 	;
 
-/* v bigint;   c constant int := 7; */
+/* v bigint;   c constant int := 7;   e exception; */
 decl
-	: IDENT constant_opt type_spec expr_list_opt ';'
+	: IDENT EXCEPTION_ ';'
+		{
+		  PT_NODE *node = sp_make_stmt (PT_SP_DECL, @$.first_line, @$.first_column);
+
+		  if (node)
+		    {
+		      node->info.sp_stmt.name = SP_AT (pt_name (sp_Parser, $1), @$);
+		      node->info.sp_stmt.flags = PT_SP_DECL_EXCEPTION;
+		    }
+		  $$ = node;
+		}
+	| IDENT constant_opt type_spec expr_list_opt ';'
 		{
 		  PT_NODE *node = sp_make_stmt (PT_SP_DECL, @$.first_line, @$.first_column);
 
@@ -350,6 +423,7 @@ stmt_list
 
 stmt
 	: assign_stmt
+	| raise_stmt
 	| call_stmt
 	| if_stmt
 	| loop_stmt
@@ -456,6 +530,25 @@ return_stmt
 		  if (node != NULL)
 		    {
 		      node->info.sp_stmt.expr = $2;
+		    }
+		  $$ = node;
+		}
+	;
+
+/* A bare RAISE re-raises what the handler it stands in is handling. Whether it stands in one is
+ * not judged here - the PL/CSQL compiler has already refused a body that gets it wrong. */
+raise_stmt
+	: RAISE_ ';'
+		{
+		  $$ = sp_make_stmt (PT_SP_RAISE, @$.first_line, @$.first_column);
+		}
+	| RAISE_ IDENT ';'
+		{
+		  PT_NODE *node = sp_make_stmt (PT_SP_RAISE, @$.first_line, @$.first_column);
+
+		  if (node)
+		    {
+		      node->info.sp_stmt.name = SP_AT (pt_name (sp_Parser, $2), @2);
 		    }
 		  $$ = node;
 		}

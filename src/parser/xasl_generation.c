@@ -30470,9 +30470,13 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
 	    }
 	  break;
 
+	case PT_SP_RAISE:
+	  /* the name is an exception, which is not a value and so binds to no slot */
 	case PT_SP_NULL_STMT:
 	  break;
 
+	case PT_SP_HANDLER:
+	  /* reached through the block's EXCEPTION part, never as a statement */
 	case PT_SP_DECL:
 	default:
 	  /* a declaration is reached through decl_list, never as a statement */
@@ -30506,6 +30510,14 @@ pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCO
 
   for (decl = scope.decl_list; decl != NULL; decl = decl->next)
     {
+      if (decl->info.sp_stmt.flags & PT_SP_DECL_EXCEPTION)
+	{
+	  /* an exception names no value, so it takes no frame slot. It still enters the scope,
+	   * because a handler and a RAISE name it the way an expression names a variable */
+	  scope.visible = decl;
+	  continue;
+	}
+
       /* the default expression first, while this declaration is still out of scope */
       if (pt_plcsql_resolve_expr (parser, decl->info.sp_stmt.expr, &scope) != NO_ERROR)
 	{
@@ -30520,7 +30532,22 @@ pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCO
       scope.visible = decl;
     }
 
-  return pt_plcsql_resolve_stmt_list (parser, block->info.sp_stmt.body, &scope, next_slot);
+  if (pt_plcsql_resolve_stmt_list (parser, block->info.sp_stmt.body, &scope, next_slot) != NO_ERROR)
+    {
+      return ER_FAILED;
+    }
+
+  /* A handler's statements stand in the block's own scope - what the block declared is visible
+   * to them, and what they declare is nothing. */
+  for (decl = block->info.sp_stmt.else_body; decl != NULL; decl = decl->next)
+    {
+      if (pt_plcsql_resolve_stmt_list (parser, decl->info.sp_stmt.body, &scope, next_slot) != NO_ERROR)
+	{
+	  return ER_FAILED;
+	}
+    }
+
+  return NO_ERROR;
 }
 
 /*
@@ -31123,6 +31150,14 @@ pt_to_plcsql_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params, 
   PT_NODE *decl, *stmt, *param;
   int cnt = 0, i = 0;
 
+  if (block->info.sp_stmt.else_body != NULL)
+    {
+      /* The grammar takes the EXCEPTION part so that the coverage meter can count the bodies
+       * that have one, but nothing runs a handler yet. Dropping it would be worse than
+       * refusing: the body would run to the end with its errors unhandled. */
+      return pt_plcsql_refuse (parser, "the body has an exception handler");
+    }
+
   xasl = pt_plcsql_new_node (PLCSQL_OP_BLOCK);
   if (xasl == NULL)
     {
@@ -31135,7 +31170,10 @@ pt_to_plcsql_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params, 
     }
   for (decl = block->info.sp_stmt.decl_list; decl != NULL; decl = decl->next)
     {
-      cnt++;
+      if ((decl->info.sp_stmt.flags & PT_SP_DECL_EXCEPTION) == 0)
+	{
+	  cnt++;
+	}
     }
   for (stmt = block->info.sp_stmt.body; stmt != NULL; stmt = stmt->next)
     {
@@ -31176,6 +31214,11 @@ pt_to_plcsql_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params, 
 
       for (decl = block->info.sp_stmt.decl_list; decl != NULL; decl = decl->next)
 	{
+	  if (decl->info.sp_stmt.flags & PT_SP_DECL_EXCEPTION)
+	    {
+	      /* it holds no value, so there is no slot to open */
+	      continue;
+	    }
 	  buf[i] = pt_to_plcsql_open_local (parser, decl);
 	  if (buf[i] == NULL)
 	    {
@@ -31479,6 +31522,14 @@ pt_to_plcsql_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * ret_doma
 	}
       return pt_plcsql_set_children (parser, xasl, buf, 1) == NO_ERROR ? xasl : NULL;
 
+    case PT_SP_RAISE:
+      /* The grammar takes RAISE so that the coverage meter can count the bodies that use it,
+       * but nothing runs it yet. Refusing here rather than dropping it is the whole point: a
+       * body that raises would otherwise run to the end as if it had not. */
+      return pt_plcsql_refuse (parser, "the body raises an exception");
+
+    case PT_SP_HANDLER:
+      /* reached through the block's EXCEPTION part, never as a statement */
     case PT_SP_DECL:
     case PT_SP_NULL_STMT:
     default:
