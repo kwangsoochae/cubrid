@@ -1728,6 +1728,13 @@ typedef struct pt_execute_info PT_EXECUTE_INFO;
 typedef struct pt_stored_proc_param_info PT_STORED_PROC_PARAM_INFO;
 typedef struct pt_stored_proc_body_info PT_SP_BODY_INFO;
 typedef struct pt_truncate_info PT_TRUNCATE_INFO;
+/* what a per cent attribute written on a cursor asks for; PT_NAME_INFO.plcsql_cursor_attr */
+#define PT_SP_CURSOR_ATTR_NONE		0
+#define PT_SP_CURSOR_ATTR_FOUND		1
+#define PT_SP_CURSOR_ATTR_NOTFOUND	2
+#define PT_SP_CURSOR_ATTR_ISOPEN	3
+#define PT_SP_CURSOR_ATTR_ROWCOUNT	4
+
 typedef struct pt_sp_stmt_info PT_SP_STMT_INFO;
 typedef struct pt_do_info PT_DO_INFO;
 typedef union pt_statement_info PT_STATEMENT_INFO;
@@ -2702,6 +2709,8 @@ struct pt_name_info
   PT_TYPE_ENUM virt_type_enum;	/* type of oid's in ldb for proxies. */
   PT_MISC_TYPE meta_class;	/* 0 or PT_META or PT_PARAMETER or PT_CLASS or PT_PLCSQL_LOCAL */
   int plcsql_slot;		/* the frame slot, read only where meta_class is PT_PLCSQL_LOCAL */
+  int plcsql_cursor_attr;	/* which attribute of a cursor this name is, PT_SP_CURSOR_ATTR_NONE
+				 * unless it was written as one. The cursor is in original. */
   PT_NODE *default_value;	/* PT_VALUE the default value of the attribute */
   PT_NODE *constant_value;	/* constant value derived from qo_reduce_equality_terms () */
   unsigned int custom_print;
@@ -3411,6 +3420,7 @@ typedef enum
   PT_SP_CURSOR,			/* a cursor declaration: its name, its parameters and its query */
   PT_SP_OPEN,			/* OPEN, with the arguments the declaration's parameters take */
   PT_SP_CLOSE,			/* CLOSE */
+  PT_SP_FETCH,			/* FETCH ... INTO, whose targets are the names it writes */
   PT_SP_NULL_STMT,		/* the NULL statement */
   PT_SP_RAISE,			/* RAISE, with or without a name */
   PT_SP_HANDLER			/* one WHEN of an EXCEPTION part */

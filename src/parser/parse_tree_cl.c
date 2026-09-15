@@ -8475,6 +8475,16 @@ pt_print_sp_stmt (PARSER_CONTEXT * parser, PT_NODE * p)
 	}
       break;
 
+    case PT_SP_FETCH:
+      q = pt_append_nulstring (parser, q, "fetch ");
+      r1 = pt_print_bytes (parser, p->info.sp_stmt.name);
+      q = pt_append_varchar (parser, q, r1);
+      q = pt_append_nulstring (parser, q, " into ");
+      r1 = pt_print_bytes_l (parser, p->info.sp_stmt.expr);
+      q = pt_append_varchar (parser, q, r1);
+      q = pt_append_nulstring (parser, q, ";");
+      break;
+
     case PT_SP_OPEN:
     case PT_SP_CLOSE:
       q = pt_append_nulstring (parser, q, (p->info.sp_stmt.op == PT_SP_OPEN) ? "open " : "close ");

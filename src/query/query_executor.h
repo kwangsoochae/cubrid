@@ -100,6 +100,11 @@ struct plcsql_cursor
 {
   xasl_node *query;		/* the plan the declaration carries, recorded when the block runs */
   bool is_open;			/* between OPEN and CLOSE, which is when the list file is alive */
+  bool scanning;		/* whether scan_id below has been opened on that list file */
+  QFILE_LIST_SCAN_ID scan_id;	/* where the next FETCH reads. It outlives the statement that
+				 * opened it, which is the whole difference from a SELECT ... INTO */
+  int base_slot;		/* the first slot the cursor owns; see PLCSQL_CURSOR_ATTR_* */
+  int cols_cnt;			/* how many columns its query gives back */
 };
 
 typedef struct plcsql_frame PLCSQL_FRAME;

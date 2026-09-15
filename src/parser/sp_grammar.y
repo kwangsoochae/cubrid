@@ -60,6 +60,7 @@ static void sp_unbound_char (PT_NODE * dt);
 static PT_NODE *sp_make_loop (int form, PT_NODE * label, PT_NODE * name, PT_NODE * lower, PT_NODE * upper,
 			      PT_NODE * body, int line, int column);
 static PT_NODE *sp_make_cursor_op (PT_SP_STMT_OP op, const char *name, PT_NODE * args, int line, int column);
+static PT_NODE *sp_make_cursor_attr (const char *name, int attr);
 static PT_NODE *sp_make_jump (PT_SP_STMT_OP op, PT_NODE * label, PT_NODE * cond, int line, int column);
 static PT_NODE *sp_make_integer_literal (const char *text);
 static PT_NODE *sp_make_real_literal (const char *text);
@@ -84,7 +85,7 @@ static PT_NODE *sp_make_data_type (PT_TYPE_ENUM type, int precision, int scale);
 %token BEGIN_ CONSTANT_ CONTINUE_ DECLARE_ ELSE_ ELSIF_ END_ EXIT_ FOR_ IF_ IN_ LOOP_ NOT_ NULL_ REVERSE_
 %token EXCEPTION_ OTHERS_ RAISE_
 %token FALSE_ THEN_ TRUE_ WHEN_ WHILE_
-%token CLOSE_ CURSOR_ FETCH_ OPEN_
+%token CLOSE_ CURSOR_ FETCH_ INTO_ OPEN_
 %token AS_ AUTHID_ CREATE_ FUNCTION_ OUT_ PROCEDURE_ REPLACE_ RETURN_
 %token AND_ DIV_ IS_ MOD_ OR_
 %token ASSIGN DOTDOT CONCAT NE GE LE LABEL_BEGIN LABEL_END
@@ -98,7 +99,7 @@ static PT_NODE *sp_make_data_type (PT_TYPE_ENUM type, int precision, int scale);
 %type <node> call_stmt sp_name arg_list_opt arg_list
 %type <node> jump_stmt label_decl_opt label_opt when_opt sql_stmt
 %type <node> raise_stmt handler_part_opt handler_list handler handler_name_list
-%type <node> cursor_decl cursor_params_opt open_stmt close_stmt
+%type <node> cursor_decl cursor_params_opt open_stmt close_stmt fetch_stmt fetch_targets
 %type <node> routine param_list_opt param_list param
 %type <number> constant_opt reverse_opt
 
@@ -426,6 +427,24 @@ close_stmt
 		}
 	;
 
+fetch_stmt
+	: FETCH_ IDENT INTO_ fetch_targets ';'
+		{
+		  $$ = sp_make_cursor_op (PT_SP_FETCH, $2, $4, @$.first_line, @$.first_column);
+		}
+	;
+
+fetch_targets
+	: IDENT
+		{
+		  $$ = SP_AT (pt_name (sp_Parser, $1), @$);
+		}
+	| fetch_targets ',' IDENT
+		{
+		  $$ = parser_append_node (SP_AT (pt_name (sp_Parser, $3), @$), $1);
+		}
+	;
+
 type_spec
 	: TYPE_KEYWORD
 		{
@@ -486,6 +505,7 @@ stmt
 	| sql_stmt
 	| open_stmt
 	| close_stmt
+	| fetch_stmt
 	| null_stmt
 	;
 
@@ -788,7 +808,23 @@ reverse_opt
 	;
 
 expr
-	: expr OR_ expr
+	: IDENT PERCENT_FOUND
+		{
+		  $$ = SP_AT (sp_make_cursor_attr ($1, PT_SP_CURSOR_ATTR_FOUND), @$);
+		}
+	| IDENT PERCENT_NOTFOUND
+		{
+		  $$ = SP_AT (sp_make_cursor_attr ($1, PT_SP_CURSOR_ATTR_NOTFOUND), @$);
+		}
+	| IDENT PERCENT_ISOPEN
+		{
+		  $$ = SP_AT (sp_make_cursor_attr ($1, PT_SP_CURSOR_ATTR_ISOPEN), @$);
+		}
+	| IDENT PERCENT_ROWCOUNT
+		{
+		  $$ = SP_AT (sp_make_cursor_attr ($1, PT_SP_CURSOR_ATTR_ROWCOUNT), @$);
+		}
+	| expr OR_ expr
 		{
 		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_OR, $1, $3, NULL), @$);
 		}
@@ -1048,6 +1084,29 @@ sp_make_cursor_op (PT_SP_STMT_OP op, const char *name, PT_NODE * args, int line,
     {
       node->info.sp_stmt.name = pt_name (sp_Parser, name);
       node->info.sp_stmt.expr = args;
+    }
+
+  return node;
+}
+
+/*
+ * sp_make_cursor_attr () - one per cent attribute written on a cursor
+ *   return: the node, NULL when the parser could not allocate one
+ *   name(in) : the cursor's name as written
+ *   attr(in) : which attribute, PT_SP_CURSOR_ATTR_*
+ *
+ * note: it is a PT_NAME rather than an expression because what it becomes is a frame slot -
+ *       the cursor keeps one per attribute and FETCH writes them, so reading one is reading
+ *       a local and needs nothing of its own below here.
+ */
+static PT_NODE *
+sp_make_cursor_attr (const char *name, int attr)
+{
+  PT_NODE *node = pt_name (sp_Parser, name);
+
+  if (node != NULL)
+    {
+      node->info.name.plcsql_cursor_attr = attr;
     }
 
   return node;
