@@ -113,6 +113,8 @@ struct plcsql_frame
   bool positioned;		/* whether the error in hand already names where it was raised. The
 				 * innermost statement that fails is the one that knows, and the blocks
 				 * it travels out through must not name themselves instead */
+  char *placed;			/* the sentence that named the place, kept bare for a caller that has
+				 * to raise the error again */
 
   int call_depth;
   PLCSQL_FRAME *caller;
@@ -157,7 +159,7 @@ extern PLCSQL_FRAME *qexec_alloc_plcsql_frame (THREAD_ENTRY * thread_p, int loca
 extern void qexec_free_plcsql_frame (THREAD_ENTRY * thread_p, PLCSQL_FRAME * frame);
 extern int qexec_execute_plcsql (THREAD_ENTRY * thread_p, xasl_node * xasl, xasl_state * xstate);
 extern int qexec_call_plcsql (THREAD_ENTRY * thread_p, xasl_node * xasl, DB_VALUE * args, int args_cnt,
-			      DB_VALUE * result);
+			      DB_VALUE * result, char **placed_msg);
 #if defined(CUBRID_DEBUG)
 extern void get_xasl_dumper_linked_in ();
 #endif

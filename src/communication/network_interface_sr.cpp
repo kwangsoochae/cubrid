@@ -11214,6 +11214,7 @@ spl_call (THREAD_ENTRY *thread_p, unsigned int rid, char *request, int reqlen)
    *    execution stack on the session, which a natively run procedure has no use for. */
   std::optional < cubpl::executor > executor;
   std::vector < DB_VALUE > no_out_args;
+  char *placed_msg = NULL;
 
   if (!plan.empty ())
     {
@@ -11227,7 +11228,7 @@ spl_call (THREAD_ENTRY *thread_p, unsigned int rid, char *request, int reqlen)
 					   &unpack_info);
       if (error_code == NO_ERROR && xasl != NULL)
 	{
-	  error_code = qexec_call_plcsql (thread_p, xasl, args.data (), (int) args.size (), &ret_value);
+	  error_code = qexec_call_plcsql (thread_p, xasl, args.data (), (int) args.size (), &ret_value, &placed_msg);
 	}
       else if (error_code == NO_ERROR)
 	{
@@ -11262,6 +11263,12 @@ spl_call (THREAD_ENTRY *thread_p, unsigned int rid, char *request, int reqlen)
       if (executor && executor->get_stack ())
 	{
 	  err_msg = executor->get_stack ()->get_error_message ();
+	}
+      if (err_msg.empty () && placed_msg != NULL)
+	{
+	  /* the bare sentence goes out, like the stack message above: the wrapper is put on where
+	   * the call was made, and er_msg () would carry the one this server already put on. */
+	  err_msg.assign (placed_msg);
 	}
       if (err_msg.empty () && error_code != ER_SP_EXECUTE_ERROR)
 	{
@@ -11318,6 +11325,10 @@ spl_call (THREAD_ENTRY *thread_p, unsigned int rid, char *request, int reqlen)
       }
   */
 
+  if (placed_msg != NULL)
+    {
+      db_private_free_and_init (thread_p, placed_msg);
+    }
   pr_clear_value_vector (args);
   db_value_clear (&ret_value);
 }
