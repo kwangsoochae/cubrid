@@ -46,6 +46,9 @@ extern "C"
   extern void sp_sql_add (const char *text);
   extern char *sp_sql_take (void);
 
+/* For sp_grammar.y: start the scanner's byte and line counters over on a new body. */
+  extern void sp_lexer_reset_position (void);
+
 #ifdef __cplusplus
 }
 #endif

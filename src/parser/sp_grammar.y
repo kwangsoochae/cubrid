@@ -54,17 +54,23 @@ typedef struct yy_buffer_state *SP_YY_BUFFER_STATE;
 extern SP_YY_BUFFER_STATE sp_yy_scan_string (const char *str);
 extern void sp_yy_delete_buffer (SP_YY_BUFFER_STATE buf);
 
-static PT_NODE *sp_make_stmt (PT_SP_STMT_OP op);
+static PT_NODE *sp_at (PT_NODE * node, int line, int column);
+static PT_NODE *sp_make_stmt (PT_SP_STMT_OP op, int line, int column);
 static void sp_unbound_char (PT_NODE * dt);
 static PT_NODE *sp_make_loop (int form, PT_NODE * label, PT_NODE * name, PT_NODE * lower, PT_NODE * upper,
-			      PT_NODE * body);
-static PT_NODE *sp_make_jump (PT_SP_STMT_OP op, PT_NODE * label, PT_NODE * cond);
+			      PT_NODE * body, int line, int column);
+static PT_NODE *sp_make_jump (PT_SP_STMT_OP op, PT_NODE * label, PT_NODE * cond, int line, int column);
 static PT_NODE *sp_make_integer_literal (const char *text);
 static PT_NODE *sp_make_real_literal (const char *text);
 static PT_NODE *sp_make_null_literal (void);
 static PT_NODE *sp_make_boolean_literal (bool value);
 static PT_NODE *sp_make_typed_literal (PT_TYPE_ENUM type, const char *text);
 static PT_NODE *sp_make_data_type (PT_TYPE_ENUM type, int precision, int scale);
+
+/* The location bison built for a rule, put on the node that rule returns. It is a macro
+ * because @$ is only a location inside an action - bison rewrites it there, and would leave
+ * it alone in a function of ours. */
+#define SP_AT(node, loc)	sp_at ((node), (loc).first_line, (loc).first_column)
 %}
 
 %union
@@ -98,6 +104,11 @@ static PT_NODE *sp_make_data_type (PT_TYPE_ENUM type, int precision, int scale);
 %left '+' '-'
 %left '*' '/' DIV_ MOD_
 %right UMINUS
+
+/* A statement is placed where it begins rather than where the parser stood when the reduce
+ * ran: by then the lookahead token has been read and sp_yylineno has moved past it. @$ takes
+ * its start from the rule's first symbol, which is the statement's first token. */
+%locations
 
 %start sp_unit
 
@@ -200,7 +211,7 @@ param_list
 param
 	: IDENT param_mode_opt type_spec param_default_opt
 		{
-		  PT_NODE *name = pt_name (sp_Parser, $1);
+		  PT_NODE *name = SP_AT (pt_name (sp_Parser, $1), @$);
 
 		  if (name != NULL)
 		    {
@@ -234,7 +245,11 @@ param_default_opt
 block
 	: decl_list_opt BEGIN_ stmt_list END_ semi_opt
 		{
-		  PT_NODE *node = sp_make_stmt (PT_SP_BLOCK);
+		  /* @$ takes its start from the first symbol, and an empty one is placed at the end
+		   * of the token before the rule - so where the block begins is BEGIN when nothing
+		   * was declared */
+		  YYLTYPE at = ($1 != NULL) ? @1 : @2;
+		  PT_NODE *node = sp_make_stmt (PT_SP_BLOCK, at.first_line, at.first_column);
 
 		  if (node)
 		    {
@@ -271,11 +286,11 @@ decl_list
 decl
 	: IDENT constant_opt type_spec expr_list_opt ';'
 		{
-		  PT_NODE *node = sp_make_stmt (PT_SP_DECL);
+		  PT_NODE *node = sp_make_stmt (PT_SP_DECL, @$.first_line, @$.first_column);
 
 		  if (node)
 		    {
-		      node->info.sp_stmt.name = pt_name (sp_Parser, $1);
+		      node->info.sp_stmt.name = SP_AT (pt_name (sp_Parser, $1), @$);
 		      node->info.sp_stmt.flags = $2;
 		      node->data_type = $3;
 		      node->type_enum = ($3 != NULL) ? $3->type_enum : PT_TYPE_NONE;
@@ -288,15 +303,15 @@ decl
 type_spec
 	: TYPE_KEYWORD
 		{
-		  $$ = sp_make_data_type ((PT_TYPE_ENUM) $1, DB_DEFAULT_PRECISION, DB_DEFAULT_SCALE);
+		  $$ = SP_AT (sp_make_data_type ((PT_TYPE_ENUM) $1, DB_DEFAULT_PRECISION, DB_DEFAULT_SCALE), @$);
 		}
 	| TYPE_KEYWORD '(' UNSIGNED_INTEGER ')'
 		{
-		  $$ = sp_make_data_type ((PT_TYPE_ENUM) $1, atoi ($3), DB_DEFAULT_SCALE);
+		  $$ = SP_AT (sp_make_data_type ((PT_TYPE_ENUM) $1, atoi ($3), DB_DEFAULT_SCALE), @$);
 		}
 	| TYPE_KEYWORD '(' UNSIGNED_INTEGER ',' UNSIGNED_INTEGER ')'
 		{
-		  $$ = sp_make_data_type ((PT_TYPE_ENUM) $1, atoi ($3), atoi ($5));
+		  $$ = SP_AT (sp_make_data_type ((PT_TYPE_ENUM) $1, atoi ($3), atoi ($5)), @$);
 		}
 	;
 
@@ -350,8 +365,8 @@ stmt
 call_stmt
 	: sp_name '(' arg_list_opt ')' ';'
 		{
-		  PT_NODE *node = sp_make_stmt (PT_SP_CALL);
-		  PT_NODE *call = parser_new_node (sp_Parser, PT_METHOD_CALL);
+		  PT_NODE *node = sp_make_stmt (PT_SP_CALL, @$.first_line, @$.first_column);
+		  PT_NODE *call = SP_AT (parser_new_node (sp_Parser, PT_METHOD_CALL), @$);
 
 		  if (node != NULL && call != NULL)
 		    {
@@ -367,7 +382,7 @@ call_stmt
 sp_name
 	: IDENT
 		{
-		  PT_NODE *name = pt_name (sp_Parser, $1);
+		  PT_NODE *name = SP_AT (pt_name (sp_Parser, $1), @$);
 
 		  if (name != NULL)
 		    {
@@ -379,7 +394,7 @@ sp_name
 		{
 		  /* the qualifier goes to resolved and the routine to original, which is how the
 		   * SQL grammar writes a dotted name (object_name) */
-		  PT_NODE *name = pt_name (sp_Parser, $3);
+		  PT_NODE *name = SP_AT (pt_name (sp_Parser, $3), @$);
 
 		  if (name != NULL)
 		    {
@@ -415,11 +430,11 @@ arg_list
 assign_stmt
 	: IDENT ASSIGN expr ';'
 		{
-		  PT_NODE *node = sp_make_stmt (PT_SP_ASSIGN);
+		  PT_NODE *node = sp_make_stmt (PT_SP_ASSIGN, @$.first_line, @$.first_column);
 
 		  if (node)
 		    {
-		      node->info.sp_stmt.name = pt_name (sp_Parser, $1);
+		      node->info.sp_stmt.name = SP_AT (pt_name (sp_Parser, $1), @$);
 		      node->info.sp_stmt.expr = $3;
 		    }
 		  $$ = node;
@@ -432,11 +447,11 @@ assign_stmt
 return_stmt
 	: RETURN_ ';'
 		{
-		  $$ = sp_make_stmt (PT_SP_RETURN);
+		  $$ = sp_make_stmt (PT_SP_RETURN, @$.first_line, @$.first_column);
 		}
 	| RETURN_ expr ';'
 		{
-		  PT_NODE *node = sp_make_stmt (PT_SP_RETURN);
+		  PT_NODE *node = sp_make_stmt (PT_SP_RETURN, @$.first_line, @$.first_column);
 
 		  if (node != NULL)
 		    {
@@ -449,14 +464,14 @@ return_stmt
 null_stmt
 	: NULL_ ';'
 		{
-		  $$ = sp_make_stmt (PT_SP_NULL_STMT);
+		  $$ = sp_make_stmt (PT_SP_NULL_STMT, @$.first_line, @$.first_column);
 		}
 	;
 
 block_stmt
 	: DECLARE_ decl_list BEGIN_ stmt_list END_ ';'
 		{
-		  PT_NODE *node = sp_make_stmt (PT_SP_BLOCK);
+		  PT_NODE *node = sp_make_stmt (PT_SP_BLOCK, @$.first_line, @$.first_column);
 
 		  if (node)
 		    {
@@ -468,7 +483,7 @@ block_stmt
 		}
 	| BEGIN_ stmt_list END_ ';'
 		{
-		  PT_NODE *node = sp_make_stmt (PT_SP_BLOCK);
+		  PT_NODE *node = sp_make_stmt (PT_SP_BLOCK, @$.first_line, @$.first_column);
 
 		  if (node)
 		    {
@@ -490,7 +505,7 @@ semi_opt
 if_stmt
 	: IF_ expr THEN_ stmt_list else_part_opt END_ IF_ ';'
 		{
-		  PT_NODE *node = sp_make_stmt (PT_SP_IF);
+		  PT_NODE *node = sp_make_stmt (PT_SP_IF, @$.first_line, @$.first_column);
 
 		  if (node)
 		    {
@@ -513,7 +528,7 @@ else_part_opt
 		}
 	| ELSIF_ expr THEN_ stmt_list else_part_opt
 		{
-		  PT_NODE *node = sp_make_stmt (PT_SP_IF);
+		  PT_NODE *node = sp_make_stmt (PT_SP_IF, @$.first_line, @$.first_column);
 
 		  if (node)
 		    {
@@ -531,15 +546,23 @@ else_part_opt
 loop_stmt
 	: label_decl_opt LOOP_ stmt_list END_ LOOP_ label_opt ';'
 		{
-		  $$ = sp_make_loop (PT_SP_LOOP_BASIC, $1, NULL, NULL, NULL, $3);
+		  /* the loop's own keyword is where it begins when no label was written - see block */
+		  YYLTYPE at = ($1 != NULL) ? @1 : @2;
+
+		  $$ = sp_make_loop (PT_SP_LOOP_BASIC, $1, NULL, NULL, NULL, $3, at.first_line, at.first_column);
 		}
 	| label_decl_opt WHILE_ expr LOOP_ stmt_list END_ LOOP_ label_opt ';'
 		{
-		  $$ = sp_make_loop (PT_SP_LOOP_WHILE, $1, NULL, $3, NULL, $5);
+		  YYLTYPE at = ($1 != NULL) ? @1 : @2;
+
+		  $$ = sp_make_loop (PT_SP_LOOP_WHILE, $1, NULL, $3, NULL, $5, at.first_line, at.first_column);
 		}
 	| label_decl_opt FOR_ IDENT IN_ reverse_opt expr DOTDOT expr LOOP_ stmt_list END_ LOOP_ label_opt ';'
 		{
-		  $$ = sp_make_loop (PT_SP_LOOP_FOR | $5, $1, pt_name (sp_Parser, $3), $6, $8, $10);
+		  YYLTYPE at = ($1 != NULL) ? @1 : @2;
+
+		  $$ = sp_make_loop (PT_SP_LOOP_FOR | $5, $1, SP_AT (pt_name (sp_Parser, $3), @3), $6, $8, $10,
+				     at.first_line, at.first_column);
 		}
 	;
 
@@ -550,7 +573,7 @@ label_decl_opt
 		}
 	| LABEL_BEGIN IDENT LABEL_END
 		{
-		  $$ = pt_name (sp_Parser, $2);
+		  $$ = SP_AT (pt_name (sp_Parser, $2), @$);
 		}
 	;
 
@@ -561,7 +584,7 @@ label_opt
 		}
 	| IDENT
 		{
-		  $$ = pt_name (sp_Parser, $1);
+		  $$ = SP_AT (pt_name (sp_Parser, $1), @$);
 		}
 	;
 
@@ -570,7 +593,7 @@ label_opt
 sql_stmt
 	: SQL_TEXT
 		{
-		  PT_NODE *node = sp_make_stmt (PT_SP_SQL);
+		  PT_NODE *node = sp_make_stmt (PT_SP_SQL, @$.first_line, @$.first_column);
 
 		  if (node != NULL)
 		    {
@@ -586,11 +609,11 @@ sql_stmt
 jump_stmt
 	: EXIT_ label_opt when_opt ';'
 		{
-		  $$ = sp_make_jump (PT_SP_EXIT, $2, $3);
+		  $$ = sp_make_jump (PT_SP_EXIT, $2, $3, @$.first_line, @$.first_column);
 		}
 	| CONTINUE_ label_opt when_opt ';'
 		{
-		  $$ = sp_make_jump (PT_SP_CONTINUE, $2, $3);
+		  $$ = sp_make_jump (PT_SP_CONTINUE, $2, $3, @$.first_line, @$.first_column);
 		}
 	;
 
@@ -619,79 +642,79 @@ reverse_opt
 expr
 	: expr OR_ expr
 		{
-		  $$ = parser_make_expression (sp_Parser, PT_OR, $1, $3, NULL);
+		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_OR, $1, $3, NULL), @$);
 		}
 	| expr AND_ expr
 		{
-		  $$ = parser_make_expression (sp_Parser, PT_AND, $1, $3, NULL);
+		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_AND, $1, $3, NULL), @$);
 		}
 	| NOT_ expr
 		{
-		  $$ = parser_make_expression (sp_Parser, PT_NOT, $2, NULL, NULL);
+		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_NOT, $2, NULL, NULL), @$);
 		}
 	| expr '=' expr
 		{
-		  $$ = parser_make_expression (sp_Parser, PT_EQ, $1, $3, NULL);
+		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_EQ, $1, $3, NULL), @$);
 		}
 	| expr NE expr
 		{
-		  $$ = parser_make_expression (sp_Parser, PT_NE, $1, $3, NULL);
+		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_NE, $1, $3, NULL), @$);
 		}
 	| expr '<' expr
 		{
-		  $$ = parser_make_expression (sp_Parser, PT_LT, $1, $3, NULL);
+		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_LT, $1, $3, NULL), @$);
 		}
 	| expr '>' expr
 		{
-		  $$ = parser_make_expression (sp_Parser, PT_GT, $1, $3, NULL);
+		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_GT, $1, $3, NULL), @$);
 		}
 	| expr LE expr
 		{
-		  $$ = parser_make_expression (sp_Parser, PT_LE, $1, $3, NULL);
+		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_LE, $1, $3, NULL), @$);
 		}
 	| expr GE expr
 		{
-		  $$ = parser_make_expression (sp_Parser, PT_GE, $1, $3, NULL);
+		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_GE, $1, $3, NULL), @$);
 		}
 	| expr IS_ NULL_
 		{
-		  $$ = parser_make_expression (sp_Parser, PT_IS_NULL, $1, NULL, NULL);
+		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_IS_NULL, $1, NULL, NULL), @$);
 		}
 	| expr IS_ NOT_ NULL_
 		{
-		  $$ = parser_make_expression (sp_Parser, PT_IS_NOT_NULL, $1, NULL, NULL);
+		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_IS_NOT_NULL, $1, NULL, NULL), @$);
 		}
 	| expr CONCAT expr
 		{
-		  $$ = parser_make_expression (sp_Parser, PT_STRCAT, $1, $3, NULL);
+		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_STRCAT, $1, $3, NULL), @$);
 		}
 	| expr '+' expr
 		{
-		  $$ = parser_make_expression (sp_Parser, PT_PLUS, $1, $3, NULL);
+		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_PLUS, $1, $3, NULL), @$);
 		}
 	| expr '-' expr
 		{
-		  $$ = parser_make_expression (sp_Parser, PT_MINUS, $1, $3, NULL);
+		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_MINUS, $1, $3, NULL), @$);
 		}
 	| expr '*' expr
 		{
-		  $$ = parser_make_expression (sp_Parser, PT_TIMES, $1, $3, NULL);
+		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_TIMES, $1, $3, NULL), @$);
 		}
 	| expr '/' expr
 		{
-		  $$ = parser_make_expression (sp_Parser, PT_DIVIDE, $1, $3, NULL);
+		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_DIVIDE, $1, $3, NULL), @$);
 		}
 	| expr MOD_ expr
 		{
-		  $$ = parser_make_expression (sp_Parser, PT_MODULUS, $1, $3, NULL);
+		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_MODULUS, $1, $3, NULL), @$);
 		}
 	| expr DIV_ expr
 		{
-		  $$ = parser_make_expression (sp_Parser, PT_DIV, $1, $3, NULL);
+		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_DIV, $1, $3, NULL), @$);
 		}
 	| '-' expr %prec UMINUS
 		{
-		  $$ = parser_make_expression (sp_Parser, PT_UNARY_MINUS, $2, NULL, NULL);
+		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_UNARY_MINUS, $2, NULL, NULL), @$);
 		}
 	| '(' expr ')'
 		{
@@ -699,7 +722,7 @@ expr
 		}
 	| IDENT
 		{
-		  $$ = pt_name (sp_Parser, $1);
+		  $$ = SP_AT (pt_name (sp_Parser, $1), @$);
 		}
 	/* A name with an argument list is the engine's own function where there is one of that
 	 * name, and a call to a routine where there is not - which is the order the SQL grammar's
@@ -726,35 +749,35 @@ expr
 			  call->info.method_call.call_or_expr = PT_IS_MTHD_EXPR;
 			}
 		    }
-		  $$ = call;
+		  $$ = SP_AT (call, @$);
 		}
 	| UNSIGNED_INTEGER
 		{
-		  $$ = sp_make_integer_literal ($1);
+		  $$ = SP_AT (sp_make_integer_literal ($1), @$);
 		}
 	| UNSIGNED_REAL
 		{
-		  $$ = sp_make_real_literal ($1);
+		  $$ = SP_AT (sp_make_real_literal ($1), @$);
 		}
 	| CHAR_STRING
 		{
-		  $$ = pt_make_string_value (sp_Parser, $1);
+		  $$ = SP_AT (pt_make_string_value (sp_Parser, $1), @$);
 		}
 	| NULL_
 		{
-		  $$ = sp_make_null_literal ();
+		  $$ = SP_AT (sp_make_null_literal (), @$);
 		}
 	| TRUE_
 		{
-		  $$ = sp_make_boolean_literal (true);
+		  $$ = SP_AT (sp_make_boolean_literal (true), @$);
 		}
 	| FALSE_
 		{
-		  $$ = sp_make_boolean_literal (false);
+		  $$ = SP_AT (sp_make_boolean_literal (false), @$);
 		}
 	| TYPE_KEYWORD CHAR_STRING
 		{
-		  $$ = sp_make_typed_literal ((PT_TYPE_ENUM) $1, $2);
+		  $$ = SP_AT (sp_make_typed_literal ((PT_TYPE_ENUM) $1, $2), @$);
 		}
 	;
 
@@ -787,19 +810,44 @@ sp_unbound_char (PT_NODE * dt)
 }
 
 /*
- * sp_make_stmt () - one procedural statement node on the parser in hand
- *   return: the node, NULL when the parser could not allocate one
- *   op(in) : which statement
+ * sp_at () - place a node where the construct that built it begins
+ *   return: the node it was handed, so that a call can be wrapped in place
+ *   node(in/out) : NULL is passed through
+ *   line(in)     :
+ *   column(in)   :
+ *
+ * note: parser_new_node () already fills a position in, but from the SQL lexer's globals,
+ *       which hold wherever the statement being compiled left them - a position in another
+ *       text. Every node this grammar builds is placed again here.
  */
 static PT_NODE *
-sp_make_stmt (PT_SP_STMT_OP op)
+sp_at (PT_NODE * node, int line, int column)
+{
+  if (node != NULL)
+    {
+      node->line_number = line;
+      node->column_number = column;
+    }
+
+  return node;
+}
+
+/*
+ * sp_make_stmt () - one procedural statement node on the parser in hand
+ *   return: the node, NULL when the parser could not allocate one
+ *   op(in)     : which statement
+ *   line(in)   : where the statement begins, from the rule's @$
+ *   column(in) :
+ */
+static PT_NODE *
+sp_make_stmt (PT_SP_STMT_OP op, int line, int column)
 {
   PT_NODE *node = parser_new_node (sp_Parser, PT_SP_STMT);
 
   if (node != NULL)
     {
       node->info.sp_stmt.op = op;
-      node->line_number = sp_yylineno;
+      sp_at (node, line, column);
     }
 
   return node;
@@ -813,11 +861,14 @@ sp_make_stmt (PT_SP_STMT_OP op)
  *   lower(in) : the WHILE condition, or the lower bound of a FOR
  *   upper(in) : the upper bound of a FOR, NULL otherwise
  *   body(in)  : the statements
+ *   line(in)  : where the loop begins, from the rule's @$
+ *   column(in):
  */
 static PT_NODE *
-sp_make_loop (int form, PT_NODE * label, PT_NODE * name, PT_NODE * lower, PT_NODE * upper, PT_NODE * body)
+sp_make_loop (int form, PT_NODE * label, PT_NODE * name, PT_NODE * lower, PT_NODE * upper, PT_NODE * body,
+	      int line, int column)
 {
-  PT_NODE *node = sp_make_stmt (PT_SP_LOOP);
+  PT_NODE *node = sp_make_stmt (PT_SP_LOOP, line, column);
 
   if (node != NULL)
     {
@@ -835,14 +886,16 @@ sp_make_loop (int form, PT_NODE * label, PT_NODE * name, PT_NODE * lower, PT_NOD
 /*
  * sp_make_jump () - one EXIT or CONTINUE node
  *   return: the node, NULL when the parser could not allocate one
- *   op(in)   : PT_SP_EXIT or PT_SP_CONTINUE
- *   label(in): the loop it names, NULL when it names none and acts on the innermost
- *   cond(in) : the WHEN condition, NULL when it was written without one
+ *   op(in)    : PT_SP_EXIT or PT_SP_CONTINUE
+ *   label(in) : the loop it names, NULL when it names none and acts on the innermost
+ *   cond(in)  : the WHEN condition, NULL when it was written without one
+ *   line(in)  : where the statement begins, from the rule's @$
+ *   column(in):
  */
 static PT_NODE *
-sp_make_jump (PT_SP_STMT_OP op, PT_NODE * label, PT_NODE * cond)
+sp_make_jump (PT_SP_STMT_OP op, PT_NODE * label, PT_NODE * cond, int line, int column)
 {
-  PT_NODE *node = sp_make_stmt (op);
+  PT_NODE *node = sp_make_stmt (op, line, column);
 
   if (node != NULL)
     {
@@ -1128,7 +1181,8 @@ sp_yyerror (const char *s)
 {
   if (sp_Parser != NULL)
     {
-      pt_record_error (sp_Parser, sp_Parser->statement_number, sp_yylineno, 0, s, NULL);
+      pt_record_error (sp_Parser, sp_Parser->statement_number, sp_yylloc.first_line, sp_yylloc.first_column,
+		       s, NULL);
     }
 }
 
@@ -1159,6 +1213,7 @@ sp_parse_body (PARSER_CONTEXT * parser, const char *body)
   sp_Parser = parser;
   sp_Result = NULL;
   sp_yylineno = 1;
+  sp_lexer_reset_position ();
 
   buffer = sp_yy_scan_string (body);
   if (buffer == NULL)

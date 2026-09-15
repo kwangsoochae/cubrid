@@ -103,6 +103,22 @@ static SP_KEYWORD sp_Keywords[] = {
 
 static char *sp_unquote_string (const char *text);
 static int sp_keyword_lookup (const char *text, PT_TYPE_ENUM * type);
+static void sp_yy_user_action (void);
+
+/* Byte offset of the character about to be read, and of the first character of the line it
+ * sits on. A column is the distance between the two, counted from 1 - the same arithmetic
+ * csql_grammar_scan.h names parser_column_position (). The line a token starts on is kept apart
+ * from sp_yylineno because flex has already added the token's own newlines to sp_yylineno
+ * by the time an action runs, which would put a literal written across two lines on the
+ * line it ends. */
+static int sp_buffer_pos;
+static int sp_line_start_pos;
+static int sp_token_start_line;
+
+/* Every token in every start condition goes through this, so no rule carries position
+ * bookkeeping of its own and a start condition added later is covered without being
+ * touched - csql_lexer.l reaches every one of its own states the same way. */
+#define YY_USER_ACTION	{ sp_yy_user_action (); }
 %}
 
 %option noyywrap
@@ -202,6 +218,58 @@ real		{digit}+"."{digit}+([eE][+-]?{digit}+)?|"."{digit}+([eE][+-]?{digit}+)?|{d
 .			{ return yytext[0]; }
 
 %%
+
+/*
+ * sp_yy_user_action () - place the token flex has just matched
+ *   return:
+ *
+ * note: bison reads the location of the rule's first symbol out of this, which is what lets
+ *       a statement be placed at where it begins rather than at the token whose arrival
+ *       ended it.
+ */
+static void
+sp_yy_user_action (void)
+{
+  if (YY_START == INITIAL)
+    {
+      /* a token scanned in an exclusive state is the continuation of one that opened in
+       * INITIAL, so its start is the one already recorded */
+      sp_yylloc.first_line = sp_token_start_line;
+      sp_yylloc.first_column = sp_buffer_pos - sp_line_start_pos + 1;
+    }
+
+  if (sp_token_start_line < sp_yylineno)
+    {
+      const char *last_newline = strrchr (yytext, '\n');
+
+      if (last_newline != NULL)
+	{
+	  sp_line_start_pos = sp_buffer_pos + (int) (last_newline - yytext) + 1;
+	}
+    }
+
+  sp_buffer_pos += yyleng;
+  sp_token_start_line = sp_yylineno;
+
+  sp_yylloc.last_line = sp_yylineno;
+  sp_yylloc.last_column = sp_buffer_pos - sp_line_start_pos + 1;
+}
+
+/*
+ * sp_lexer_reset_position () - count from the first character of the body about to be read
+ *   return:
+ *
+ * note: sp_parse_body () calls this beside its own reset of sp_yylineno. The scanner keeps
+ *       these across calls the way flex keeps yylineno, so a second body would otherwise
+ *       carry the first one's offsets.
+ */
+void
+sp_lexer_reset_position (void)
+{
+  sp_buffer_pos = 0;
+  sp_line_start_pos = 0;
+  sp_token_start_line = 1;
+}
 
 /*
  * sp_unquote_string () - the literal's content, with its doubled quotes folded

@@ -31780,10 +31780,8 @@ pt_plcsql_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig
 
       if (first != NULL && first->info.error_msg.error_message != NULL)
 	{
-	  /* the line only: sp_grammar.y tracks yylineno and does not carry locations, so the
-	   * column on the error node is always zero */
-	  snprintf (why, sizeof (why), "the grammar does not take the body - %s at line %d",
-		    first->info.error_msg.error_message, first->line_number);
+	  snprintf (why, sizeof (why), "the grammar does not take the body - %s at line %d, column %d",
+		    first->info.error_msg.error_message, first->line_number, first->column_number);
 	}
       else
 	{
