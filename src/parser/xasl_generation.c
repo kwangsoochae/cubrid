@@ -32053,7 +32053,15 @@ pt_plcsql_loop_levels (PT_PLCSQL_LOOP * loops, PT_NODE * label)
 static void
 pt_plcsql_place (XASL_NODE * xasl, PT_NODE * stmt)
 {
-  PT_NODE *at = (stmt->info.sp_stmt.expr != NULL) ? stmt->info.sp_stmt.expr : stmt;
+  /* expr is where the statement is reported from because for an assignment or a RETURN it is
+   * the expression the statement evaluates, and that is the place the PL engine names. A
+   * cursor statement keeps something else there - the arguments an OPEN passes, the targets a
+   * FETCH writes - and neither is what the statement does, so those are reported from the
+   * statement itself. */
+  bool on_expr = (stmt->info.sp_stmt.expr != NULL
+		  && stmt->info.sp_stmt.op != PT_SP_OPEN
+		  && stmt->info.sp_stmt.op != PT_SP_CLOSE && stmt->info.sp_stmt.op != PT_SP_FETCH);
+  PT_NODE *at = on_expr ? stmt->info.sp_stmt.expr : stmt;
 
   if (xasl != NULL)
     {

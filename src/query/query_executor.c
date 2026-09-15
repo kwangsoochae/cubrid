@@ -29682,8 +29682,7 @@ qexec_plcsql_cursor (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xas
     case PLCSQL_CURSOR_FETCH:
       if (!cursor->is_open)
 	{
-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_PT_ERROR, 1,
-		  "tried to fetch values with an unopened cursor");
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_PT_ERROR, 1, "tried to fetch values with an unopened cursor");
 	  return ER_FAILED;
 	}
       return qexec_plcsql_fetch_row (thread_p, xasl, xasl_state, cursor);
