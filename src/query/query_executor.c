@@ -29654,9 +29654,10 @@ qexec_plcsql_cursor (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xas
     case PLCSQL_CURSOR_OPEN:
       if (cursor->is_open)
 	{
-	  /* the wording is the reference implementation's CURSOR_ALREADY_OPEN, which is what
-	   * this will raise once there are exceptions to raise. Plain text rather than the
-	   * sentence a caller sees, for the reason the INTO clause's two are. */
+	  /* each of these is the sentence the reference implementation raises INVALID_CURSOR or
+	   * CURSOR_ALREADY_OPEN with, and it is a different sentence for each thing that was
+	   * tried - the exception's own default message names none of them. Plain text rather
+	   * than the sentence a caller sees, for the reason the INTO clause's two are. */
 	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_PT_ERROR, 1, "cursor already open");
 	  return ER_FAILED;
 	}
@@ -29681,7 +29682,8 @@ qexec_plcsql_cursor (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xas
     case PLCSQL_CURSOR_FETCH:
       if (!cursor->is_open)
 	{
-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_PT_ERROR, 1, "invalid cursor");
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_PT_ERROR, 1,
+		  "tried to fetch values with an unopened cursor");
 	  return ER_FAILED;
 	}
       return qexec_plcsql_fetch_row (thread_p, xasl, xasl_state, cursor);
@@ -29689,7 +29691,7 @@ qexec_plcsql_cursor (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xas
     case PLCSQL_CURSOR_CLOSE:
       if (!cursor->is_open)
 	{
-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_PT_ERROR, 1, "invalid cursor");
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_PT_ERROR, 1, "tried to close an unopened cursor");
 	  return ER_FAILED;
 	}
       qexec_close_plcsql_cursor (thread_p, cursor);
