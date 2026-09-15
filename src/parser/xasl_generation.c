@@ -30149,9 +30149,11 @@ static int pt_plcsql_bind_name (PARSER_CONTEXT * parser, PT_NODE * name, PT_PLCS
 static PT_NODE *pt_plcsql_bind_name_pre (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int *continue_walk);
 static int pt_plcsql_resolve_expr (PARSER_CONTEXT * parser, PT_NODE * expr, PT_PLCSQL_SCOPE * scope);
 static int pt_plcsql_bind_host_vars (PARSER_CONTEXT * parser, PT_NODE * sql, PT_PLCSQL_SCOPE * scope);
+static int pt_plcsql_bind_cursor (PARSER_CONTEXT * parser, PT_NODE * name, PT_PLCSQL_SCOPE * scope);
 static int pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_SCOPE * scope,
 					int *next_slot);
-static int pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCOPE * outer, int *next_slot);
+static int pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCOPE * outer,
+				    int *next_slot, int *next_cursor);
 
 /*
  * pt_plcsql_find_decl () - the declaration a name refers to, innermost scope first
@@ -30200,6 +30202,32 @@ pt_plcsql_find_decl (PT_PLCSQL_SCOPE * scope, const char *name)
 }
 
 /*
+ * pt_plcsql_bind_cursor () - match the name an OPEN or a CLOSE writes to its declaration
+ *   return: NO_ERROR, or ER_FAILED with the error left on the parser
+ *   parser(in) :
+ *   name(in/out) : the PT_NAME the statement wrote; it is given the cursor's number
+ *   scope(in)  : the innermost scope at the point of the statement
+ */
+static int
+pt_plcsql_bind_cursor (PARSER_CONTEXT * parser, PT_NODE * name, PT_PLCSQL_SCOPE * scope)
+{
+  PT_NODE *decl = pt_plcsql_find_decl (scope, name->info.name.original);
+
+  /* a body reaches this parser only after the PL engine has accepted it, so a name that is
+   * not a cursor here is not something a user can write - the answer is still an error rather
+   * than an assertion, because what it rests on is another compiler's checking */
+  if (decl == NULL || decl->node_type != PT_SP_STMT || decl->info.sp_stmt.op != PT_SP_CURSOR)
+    {
+      PT_ERRORmf (parser, name, MSGCAT_SET_PARSER_SEMANTIC, MSGCAT_SEMANTIC_IS_NOT_DEFINED, name->info.name.original);
+      return ER_FAILED;
+    }
+
+  name->info.name.plcsql_slot = decl->info.sp_stmt.name->info.name.plcsql_slot;
+
+  return NO_ERROR;
+}
+
+/*
  * pt_plcsql_bind_name () - rewrite one reference into the slot it reads
  *   return: NO_ERROR, or ER_FAILED with the error left on the parser
  *   parser(in) :
@@ -30222,6 +30250,14 @@ pt_plcsql_bind_name (PARSER_CONTEXT * parser, PT_NODE * name, PT_PLCSQL_SCOPE * 
    * for a parameter or a FOR loop variable, each of which is its own declaration */
   if (decl->node_type == PT_SP_STMT)
     {
+      if (decl->info.sp_stmt.op == PT_SP_CURSOR)
+	{
+	  /* the name is declared, but a cursor is not read the way a variable is - only OPEN,
+	   * CLOSE and the attributes name one */
+	  PT_ERRORmf (parser, name, MSGCAT_SET_PARSER_SEMANTIC, MSGCAT_SEMANTIC_IS_NOT_DEFINED,
+		      name->info.name.original);
+	  return ER_FAILED;
+	}
       assert (decl->info.sp_stmt.op == PT_SP_DECL);
       decl = decl->info.sp_stmt.name;
     }
@@ -30430,7 +30466,8 @@ pt_plcsql_take_into_list (PARSER_CONTEXT * parser, PT_NODE * stmt, PT_PLCSQL_SCO
  *   next_slot(in/out) : the next free frame slot
  */
 static int
-pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_SCOPE * scope, int *next_slot)
+pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_SCOPE * scope, int *next_slot,
+			     int *next_cursor)
 {
   PT_NODE *stmt;
   PT_PLCSQL_SCOPE loop_scope;
@@ -30440,7 +30477,7 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
       switch (stmt->info.sp_stmt.op)
 	{
 	case PT_SP_BLOCK:
-	  if (pt_plcsql_resolve_block (parser, stmt, scope, next_slot) != NO_ERROR)
+	  if (pt_plcsql_resolve_block (parser, stmt, scope, next_slot, next_cursor) != NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }
@@ -30456,8 +30493,8 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
 
 	case PT_SP_IF:
 	  if (pt_plcsql_resolve_expr (parser, stmt->info.sp_stmt.expr, scope) != NO_ERROR
-	      || pt_plcsql_resolve_stmt_list (parser, stmt->info.sp_stmt.body, scope, next_slot) != NO_ERROR
-	      || pt_plcsql_resolve_stmt_list (parser, stmt->info.sp_stmt.else_body, scope, next_slot) != NO_ERROR)
+	      || pt_plcsql_resolve_stmt_list (parser, stmt->info.sp_stmt.body, scope, next_slot, next_cursor) != NO_ERROR
+	      || pt_plcsql_resolve_stmt_list (parser, stmt->info.sp_stmt.else_body, scope, next_slot, next_cursor) != NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }
@@ -30485,7 +30522,7 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
 	      loop_scope.names->type_enum = PT_TYPE_INTEGER;
 	    }
 
-	  if (pt_plcsql_resolve_stmt_list (parser, stmt->info.sp_stmt.body, &loop_scope, next_slot) != NO_ERROR)
+	  if (pt_plcsql_resolve_stmt_list (parser, stmt->info.sp_stmt.body, &loop_scope, next_slot, next_cursor) != NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }
@@ -30523,15 +30560,22 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
 	  break;
 
 	case PT_SP_OPEN:
-	  /* the arguments are ordinary expressions of the frame; the cursor's own name is not
-	   * one of its values, so there is nothing to bind for it */
-	  if (pt_plcsql_resolve_expr (parser, stmt->info.sp_stmt.expr, scope) != NO_ERROR)
+	  /* the arguments are ordinary expressions of the frame; the cursor's name is not one
+	   * of its values and is matched against the declarations instead */
+	  if (pt_plcsql_resolve_expr (parser, stmt->info.sp_stmt.expr, scope) != NO_ERROR
+	      || pt_plcsql_bind_cursor (parser, stmt->info.sp_stmt.name, scope) != NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }
 	  break;
 
 	case PT_SP_CLOSE:
+	  if (pt_plcsql_bind_cursor (parser, stmt->info.sp_stmt.name, scope) != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
+	  break;
+
 	case PT_SP_RAISE:
 	  /* the name is an exception, which is not a value and so binds to no slot */
 	case PT_SP_NULL_STMT:
@@ -30561,7 +30605,8 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
  *   next_slot(in/out) : the next free frame slot
  */
 static int
-pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCOPE * outer, int *next_slot)
+pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCOPE * outer, int *next_slot,
+			 int *next_cursor)
 {
   PT_PLCSQL_SCOPE scope;
   PT_NODE *decl;
@@ -30589,9 +30634,11 @@ pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCO
 
       if (decl->info.sp_stmt.op == PT_SP_CURSOR)
 	{
-	  /* a cursor is declared here but is not a value: it has no type and nothing reads it
-	   * as one, so it takes no slot and does not become visible to an expression. What it
-	   * does need at run time is a handle, and that is settled when OPEN is lowered. */
+	  /* a cursor is declared where a variable is but holds no value, so it is numbered in
+	   * its own sequence and takes no slot. It does come into scope here: OPEN and CLOSE
+	   * find it by name the way a reference finds a variable. */
+	  decl->info.sp_stmt.name->info.name.plcsql_slot = (*next_cursor)++;
+	  scope.visible = decl;
 	  continue;
 	}
 
@@ -30603,7 +30650,7 @@ pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCO
       scope.visible = decl;
     }
 
-  if (pt_plcsql_resolve_stmt_list (parser, block->info.sp_stmt.body, &scope, next_slot) != NO_ERROR)
+  if (pt_plcsql_resolve_stmt_list (parser, block->info.sp_stmt.body, &scope, next_slot, next_cursor) != NO_ERROR)
     {
       return ER_FAILED;
     }
@@ -30612,7 +30659,7 @@ pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCO
    * to them, and what they declare is nothing. */
   for (decl = block->info.sp_stmt.else_body; decl != NULL; decl = decl->next)
     {
-      if (pt_plcsql_resolve_stmt_list (parser, decl->info.sp_stmt.body, &scope, next_slot) != NO_ERROR)
+      if (pt_plcsql_resolve_stmt_list (parser, decl->info.sp_stmt.body, &scope, next_slot, next_cursor) != NO_ERROR)
 	{
 	  return ER_FAILED;
 	}
@@ -30627,12 +30674,14 @@ pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCO
  *   parser(in) :
  *   block(in/out) : the PT_SP_BLOCK sp_parse_body () returned
  *   params(in/out) : the parameters, a PT_NAME list in declared order, NULL when there are none
+ *   cursors_cnt(out) : how many cursors the body declares, counted in their own sequence
  *
  * note: the parameters take the first slots, in order, so the caller can fill them by position
- *       without being told which slot each went to. The body's declarations follow.
+ *       without being told which slot each went to. The body's declarations follow. A cursor
+ *       is numbered apart from the slots because it holds no value.
  */
 int
-pt_plcsql_resolve_locals (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params)
+pt_plcsql_resolve_locals (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params, int *cursors_cnt)
 {
   PT_PLCSQL_SCOPE outer;
   PT_NODE *p;
@@ -30651,7 +30700,8 @@ pt_plcsql_resolve_locals (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * pa
       p->info.name.plcsql_slot = next_slot++;
     }
 
-  if (pt_plcsql_resolve_block (parser, block, (params != NULL) ? &outer : NULL, &next_slot) != NO_ERROR)
+  *cursors_cnt = 0;
+  if (pt_plcsql_resolve_block (parser, block, (params != NULL) ? &outer : NULL, &next_slot, cursors_cnt) != NO_ERROR)
     {
       return -1;
     }
@@ -31974,9 +32024,9 @@ pt_to_plcsql_xasl (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params)
 {
   XASL_NODE *xasl;
   TP_DOMAIN *ret_domain = NULL;
-  int locals_cnt;
+  int locals_cnt, cursors_cnt;
 
-  locals_cnt = pt_plcsql_resolve_locals (parser, block, params);
+  locals_cnt = pt_plcsql_resolve_locals (parser, block, params, &cursors_cnt);
   if (locals_cnt < 0)
     {
       return NULL;
@@ -32000,6 +32050,7 @@ pt_to_plcsql_xasl (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params)
     }
 
   xasl->proc.plcsql.locals_cnt = locals_cnt;
+  xasl->proc.plcsql.cursors_cnt = cursors_cnt;
 
   return xasl;
 }
