@@ -30740,6 +30740,20 @@ pt_plcsql_read_static_sql (PARSER_CONTEXT * parser, PT_NODE * list)
 	    }
 
 	  stmt->info.sp_stmt.sql = pt_compile (parser, *parsed);
+	  if (stmt->info.sp_stmt.sql != NULL && !pt_has_error (parser)
+	      && !PT_IS_DBLINK_DML_QUERY (stmt->info.sp_stmt.sql))
+	    {
+	      /* pt_compile () is the semantic check and nothing else. What db_compile_statement ()
+	       * does next is what turns a view into the classes underneath it and marks the specs
+	       * an UPDATE or a DELETE writes - a plan built without those marks holds no class at
+	       * all, and the builder asserts on that rather than reporting it. Remote DML is the
+	       * one statement left untranslated, for the reason given at that call. */
+	      stmt->info.sp_stmt.sql = mq_translate (parser, stmt->info.sp_stmt.sql);
+	      if (stmt->info.sp_stmt.sql != NULL && !pt_has_error (parser))
+		{
+		  (void) pt_class_pre_fetch (parser, stmt->info.sp_stmt.sql);
+		}
+	    }
 	  parser->flag.is_parsing_static_sql = saved_static;
 	  parser->flag.is_plcsql_native_exec = saved_native;
 
