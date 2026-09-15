@@ -534,6 +534,10 @@ struct plcsql_proc_node
 				 * written without a label, and the depth of the labelled loop otherwise */
   int locals_cnt;		/* BLOCK: how many slots the frame needs. Numbering is flat over the
 				 * procedure, so only its outermost block carries the count */
+  int line;			/* where an error this statement raises is reported. It is the place the
+				 * PL engine names, which for a statement that evaluates an expression is
+				 * where that expression begins rather than where the statement does */
+  int column;
   /* An SQL statement inside a procedure is a plain XASL node, not a kind of its own, and
    * hangs here as a child. */
   XASL_NODE **children;
