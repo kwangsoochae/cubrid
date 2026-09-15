@@ -3655,7 +3655,13 @@ mq_translate_tree (PARSER_CONTEXT * parser, PT_NODE * tree, PT_NODE * spec_list,
 		      return NULL;
 		    }
 
-		  if (PT_IS_FOR_PL_COMPILE (parser) && sm_is_system_vclass (entity->info.name.original))
+		  /* A system vclass is left standing for the PL engine's compiler, which prints the
+		   * statement back out and sends the text: expanding it there would send the
+		   * expansion instead of what was written. A plan is the other reader of the same
+		   * text and it is run rather than printed, so what is not expanded here is a spec
+		   * with nothing under it and the query comes back empty. */
+		  if (PT_IS_FOR_PL_COMPILE (parser) && !parser->flag.is_plcsql_native_exec
+		      && sm_is_system_vclass (entity->info.name.original))
 		    {
 		      continue;
 		    }
