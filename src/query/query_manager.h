@@ -150,6 +150,8 @@ struct qmgr_query_entry
 };
 
 extern QMGR_QUERY_ENTRY *qmgr_get_query_entry (THREAD_ENTRY * thread_p, QUERY_ID query_id, int trans_ind);
+extern QUERY_ID qmgr_begin_server_query (THREAD_ENTRY * thread_p);
+extern int qmgr_end_server_query (THREAD_ENTRY * thread_p, QUERY_ID query_id);
 extern int qmgr_allocate_tran_entries (THREAD_ENTRY * thread_p, int trans_cnt);
 extern void qmgr_dump (void);
 extern int qmgr_initialize (THREAD_ENTRY * thread_p);

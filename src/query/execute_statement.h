@@ -117,6 +117,7 @@ extern int do_remove_trigger (PARSER_CONTEXT * parser, PT_NODE * statement);
 
 extern int do_delete (PARSER_CONTEXT * parser, PT_NODE * statement);
 extern int do_prepare_delete (PARSER_CONTEXT * parser, PT_NODE * statement, PT_NODE * parent);
+extern int do_delete_decide_server_side (PARSER_CONTEXT * parser, PT_NODE * statement);
 extern int do_execute_delete (PARSER_CONTEXT * parser, PT_NODE * statement);
 
 extern int do_drop (PARSER_CONTEXT * parser, PT_NODE * statement);
@@ -131,6 +132,7 @@ extern int do_create_user (const PARSER_CONTEXT * parser, const PT_NODE * statem
 extern int do_drop_user (const PARSER_CONTEXT * parser, const PT_NODE * statement);
 extern int do_alter_user (const PARSER_CONTEXT * parser, const PT_NODE * statement);
 
+extern int is_server_insert_allowed (PARSER_CONTEXT * parser, PT_NODE * statement);
 extern int do_insert (PARSER_CONTEXT * parser, PT_NODE * statement);
 extern int do_prepare_insert (PARSER_CONTEXT * parser, PT_NODE * statement);
 extern int do_execute_insert (PARSER_CONTEXT * parser, PT_NODE * statement);
@@ -157,6 +159,7 @@ extern bool pt_is_allowed_result_cache (void);
 
 extern int do_update (PARSER_CONTEXT * parser, PT_NODE * statement);
 extern int do_prepare_update (PARSER_CONTEXT * parser, PT_NODE * statement);
+extern int do_update_decide_server_side (PARSER_CONTEXT * parser, PT_NODE * statement, PT_NODE ** not_nulls);
 extern int do_execute_update (PARSER_CONTEXT * parser, PT_NODE * statement);
 
 extern int do_update_stats (PARSER_CONTEXT * parser, PT_NODE * statement);

@@ -30373,6 +30373,55 @@ pt_plcsql_bind_host_vars (PARSER_CONTEXT * parser, PT_NODE * sql, PT_PLCSQL_SCOP
 }
 
 /*
+ * pt_plcsql_take_into_list () - move a SELECT's INTO targets onto the statement
+ *   return: NO_ERROR or ER_FAILED
+ *   parser(in) :
+ *   stmt(in/out) : a PT_SP_SQL whose statement pt_compile () has settled
+ *   scope(in)  : the innermost scope at the statement
+ *
+ * note: the targets are the body's own variables, not anything the query reads, so they are
+ *       taken off the query and kept beside it: what is left is a plain SELECT, and the plan
+ *       built from it has nothing about the assignment in it. Each becomes a frame slot the
+ *       same way an assignment's target does.
+ *
+ *       The SQL grammar gives an INTO target under static SQL as a PT_NAME, and a dotted one
+ *       as a single PT_NAME spelling both halves - which is a record field, and is refused
+ *       here because no declaration answers to that name.
+ */
+static int
+pt_plcsql_take_into_list (PARSER_CONTEXT * parser, PT_NODE * stmt, PT_PLCSQL_SCOPE * scope)
+{
+  PT_NODE *sql = stmt->info.sp_stmt.sql;
+  PT_NODE *target;
+
+  /* the statement is read before this only when a plan is being built. Resolution runs on its
+   * own where what is wanted is whether the body's names hold together, and there is no
+   * statement then. */
+  if (sql == NULL || !PT_IS_QUERY_NODE_TYPE (sql->node_type) || sql->info.query.into_list == NULL)
+    {
+      return NO_ERROR;
+    }
+
+  stmt->info.sp_stmt.name = sql->info.query.into_list;
+  sql->info.query.into_list = NULL;
+
+  for (target = stmt->info.sp_stmt.name; target != NULL; target = target->next)
+    {
+      if (target->node_type != PT_NAME)
+	{
+	  PT_ERRORc (parser, target, "an INTO target is not a name");
+	  return ER_FAILED;
+	}
+      if (pt_plcsql_bind_name (parser, target, scope) != NO_ERROR)
+	{
+	  return ER_FAILED;
+	}
+    }
+
+  return NO_ERROR;
+}
+
+/*
  * pt_plcsql_resolve_stmt_list () - resolve a statement list in one scope
  *   return: NO_ERROR or ER_FAILED
  *   parser(in) :
@@ -30464,7 +30513,10 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
 	  break;
 
 	case PT_SP_SQL:
-	  if (pt_plcsql_bind_host_vars (parser, stmt->info.sp_stmt.sql, scope) != NO_ERROR)
+	  /* the INTO targets go first: they are taken off the statement, so what the host
+	   * variable walk below sees is the query alone */
+	  if (pt_plcsql_take_into_list (parser, stmt, scope) != NO_ERROR
+	      || pt_plcsql_bind_host_vars (parser, stmt->info.sp_stmt.sql, scope) != NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }
@@ -30624,7 +30676,10 @@ static XASL_NODE *pt_to_plcsql_block (PARSER_CONTEXT * parser, PT_NODE * block, 
 				      TP_DOMAIN * ret_domain, PT_PLCSQL_LOOP * loops);
 static XASL_NODE *pt_to_plcsql_stmt_list_block (PARSER_CONTEXT * parser, PT_NODE * list, TP_DOMAIN * ret_domain,
 						PT_PLCSQL_LOOP * loops);
+static XASL_NODE *pt_plcsql_update_to_xasl (PARSER_CONTEXT * parser, PT_NODE * sql);
+static XASL_NODE *pt_plcsql_delete_to_xasl (PARSER_CONTEXT * parser, PT_NODE * sql);
 static XASL_NODE *pt_plcsql_sql_to_xasl (PARSER_CONTEXT * parser, PT_NODE * sql);
+static XASL_NODE *pt_to_plcsql_sql (PARSER_CONTEXT * parser, PT_NODE * stmt);
 static int pt_plcsql_set_children (PARSER_CONTEXT * parser, XASL_NODE * xasl, XASL_NODE ** buf, int cnt);
 
 /*
@@ -30645,7 +30700,7 @@ pt_plcsql_read_static_sql (PARSER_CONTEXT * parser, PT_NODE * list)
 {
   PT_NODE *stmt, **parsed;
   char why[512];
-  int saved_static;
+  int saved_static, saved_native;
 
   for (stmt = list; stmt != NULL; stmt = stmt->next)
     {
@@ -30655,9 +30710,12 @@ pt_plcsql_read_static_sql (PARSER_CONTEXT * parser, PT_NODE * list)
 	  /* the flag has to stand over the name binding too, not only the parse: what it settles
 	   * is what an unresolved name becomes, and that is decided in pt_compile (). The path the
 	   * PL engine's compiler takes sets it on the session and leaves it there for the same
-	   * reason (db_open_buffer_local ()). */
+	   * reason (db_open_buffer_local ()). The second flag says which of the two readers this
+	   * is, which is what keeps an INTO clause on the statement instead of stripping it. */
 	  saved_static = parser->flag.is_parsing_static_sql;
+	  saved_native = parser->flag.is_plcsql_native_exec;
 	  parser->flag.is_parsing_static_sql = 1;
+	  parser->flag.is_plcsql_native_exec = 1;
 
 	  parsed = parser_parse_string_with_escapes (parser, stmt->info.sp_stmt.sql_text, false);
 
@@ -30667,6 +30725,7 @@ pt_plcsql_read_static_sql (PARSER_CONTEXT * parser, PT_NODE * list)
 	       * it names is not the one the user called - it is one written inside a routine - so
 	       * the text has to come along for the reason to be of any use */
 	      parser->flag.is_parsing_static_sql = saved_static;
+	      parser->flag.is_plcsql_native_exec = saved_native;
 	      snprintf (why, sizeof (why), "the SQL was not read - %s", stmt->info.sp_stmt.sql_text);
 	      pt_reset_error (parser);
 	      PT_ERRORc (parser, stmt, why);
@@ -30676,12 +30735,29 @@ pt_plcsql_read_static_sql (PARSER_CONTEXT * parser, PT_NODE * list)
 	    {
 	      /* the text was gathered up to one semicolon, so a second statement can only mean
 	       * the gathering and the SQL parser disagree about where the first one ended */
+	      parser->flag.is_parsing_static_sql = saved_static;
+	      parser->flag.is_plcsql_native_exec = saved_native;
 	      PT_INTERNAL_ERROR (parser, "static sql");
 	      return ER_FAILED;
 	    }
 
 	  stmt->info.sp_stmt.sql = pt_compile (parser, *parsed);
+	  if (stmt->info.sp_stmt.sql != NULL && !pt_has_error (parser)
+	      && !PT_IS_DBLINK_DML_QUERY (stmt->info.sp_stmt.sql))
+	    {
+	      /* pt_compile () is the semantic check and nothing else. What db_compile_statement ()
+	       * does next is what turns a view into the classes underneath it and marks the specs
+	       * an UPDATE or a DELETE writes - a plan built without those marks holds no class at
+	       * all, and the builder asserts on that rather than reporting it. Remote DML is the
+	       * one statement left untranslated, for the reason given at that call. */
+	      stmt->info.sp_stmt.sql = mq_translate (parser, stmt->info.sp_stmt.sql);
+	      if (stmt->info.sp_stmt.sql != NULL && !pt_has_error (parser))
+		{
+		  (void) pt_class_pre_fetch (parser, stmt->info.sp_stmt.sql);
+		}
+	    }
 	  parser->flag.is_parsing_static_sql = saved_static;
+	  parser->flag.is_plcsql_native_exec = saved_native;
 
 	  if (stmt->info.sp_stmt.sql == NULL || pt_has_error (parser))
 	    {
@@ -30992,11 +31068,12 @@ pt_plcsql_cast_to (PARSER_CONTEXT * parser, REGU_VARIABLE * regu, TP_DOMAIN * do
 }
 
 /*
- * pt_to_plcsql_assign () - an assignment writing one slot
+ * pt_plcsql_assign_regu () - an assignment writing one slot, from a value already lowered
  *   return: the node, NULL on error
  *   parser(in) :
  *   slot(in)   : the frame slot written
- *   value(in/out) : the expression assigned; typing can replace the node
+ *   regu(in)   : what is assigned. A procedural expression, or a column of the row a
+ *                SELECT INTO read
  *   target(in) : the declared name of what is written, NULL when there is nothing to coerce to
  *   always_cast(in) : cast even where the two types read the same. A parameter needs this: the
  *                  slot is declared one type and the caller put a value of another in it, and
@@ -31009,31 +31086,48 @@ pt_plcsql_cast_to (PARSER_CONTEXT * parser, REGU_VARIABLE * regu, TP_DOMAIN * do
  *       ones already in use.
  */
 static XASL_NODE *
-pt_to_plcsql_assign (PARSER_CONTEXT * parser, int slot, PT_NODE ** value, PT_NODE * target, bool always_cast)
+pt_plcsql_assign_regu (PARSER_CONTEXT * parser, int slot, REGU_VARIABLE * regu, PT_NODE * target, bool always_cast)
 {
   XASL_NODE *xasl = pt_plcsql_new_node (PLCSQL_OP_ASSIGN);
   TP_DOMAIN *domain;
 
-  if (xasl == NULL)
+  if (xasl == NULL || regu == NULL)
     {
       return NULL;
     }
 
   xasl->proc.plcsql.target_slot = slot;
-  xasl->proc.plcsql.expr = pt_plcsql_expr_to_regu (parser, value);
-  if (xasl->proc.plcsql.expr == NULL)
-    {
-      return NULL;
-    }
 
   domain = (target != NULL) ? pt_xasl_node_to_domain (parser, target) : NULL;
-  xasl->proc.plcsql.expr = pt_plcsql_cast_to (parser, xasl->proc.plcsql.expr, domain, always_cast);
+  xasl->proc.plcsql.expr = pt_plcsql_cast_to (parser, regu, domain, always_cast);
   if (xasl->proc.plcsql.expr == NULL)
     {
       return NULL;
     }
 
   return xasl;
+}
+
+/*
+ * pt_to_plcsql_assign () - an assignment whose value is a procedural expression
+ *   return: the node, NULL on error
+ *   parser(in) :
+ *   slot(in)   : the frame slot written
+ *   value(in/out) : the expression assigned, typed in place
+ *   target(in) : the name written on the left, which is what the value is cast to
+ *   always_cast(in) : see pt_plcsql_cast_to ()
+ */
+static XASL_NODE *
+pt_to_plcsql_assign (PARSER_CONTEXT * parser, int slot, PT_NODE ** value, PT_NODE * target, bool always_cast)
+{
+  REGU_VARIABLE *regu = pt_plcsql_expr_to_regu (parser, value);
+
+  if (regu == NULL)
+    {
+      return NULL;
+    }
+
+  return pt_plcsql_assign_regu (parser, slot, regu, target, always_cast);
 }
 
 /*
@@ -31252,6 +31346,117 @@ pt_to_plcsql_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params, 
 }
 
 /*
+ * pt_plcsql_update_to_xasl () - the plan of one UPDATE written in a body
+ *   return: the XASL node, NULL on error or refusal
+ *   parser(in) :
+ *   sql(in/out) : a PT_UPDATE. The flags do_update_decide_server_side () settles are left on it
+ *
+ * note: do_update_decide_server_side () is this statement's share of the step every writing
+ *       statement has - see pt_plcsql_sql_to_xasl (). What it settles is server_update, and
+ *       what it collects is the NOT NULL attributes the builder is handed.
+ *
+ *       server_update false is the widest of the refusals below. It means the rows are changed
+ *       one object at a time through the client's workspace, which is not work the server can
+ *       be asked for, so an UPDATE of a table a trigger watches stays refused however much of
+ *       the grammar is filled in.
+ */
+static XASL_NODE *
+pt_plcsql_update_to_xasl (PARSER_CONTEXT * parser, PT_NODE * sql)
+{
+  XASL_NODE *xasl;
+  PT_NODE *not_nulls = NULL;
+  int au_save;
+
+  if (pt_false_where (parser, sql))
+    {
+      return pt_plcsql_refuse (parser, "the UPDATE has a WHERE that is false as it stands");
+    }
+  if (sql->info.update.object != NULL)
+    {
+      return pt_plcsql_refuse (parser, "the UPDATE names an object the client holds");
+    }
+
+  if (do_update_decide_server_side (parser, sql, &not_nulls) != NO_ERROR)
+    {
+      return NULL;
+    }
+
+  if (sql->info.update.do_class_attrs)
+    {
+      return pt_plcsql_refuse (parser, "the UPDATE writes a class attribute");
+    }
+  if (!sql->info.update.server_update)
+    {
+      /* which of the three it was is only recorded for the trigger */
+      return pt_plcsql_refuse (parser,
+			       sql->info.update.has_trigger
+			       ? "a trigger watches a table the UPDATE writes"
+			       : "the UPDATE writes through a view or to a class attribute");
+    }
+
+  /* the prepare path builds with authorization off, and this is the same build */
+  AU_SAVE_AND_DISABLE (au_save);
+  xasl = pt_to_update_xasl (parser, sql, &not_nulls);
+  AU_RESTORE (au_save);
+
+  return xasl;
+}
+
+/*
+ * pt_plcsql_delete_to_xasl () - the plan of one DELETE written in a body
+ *   return: the XASL node, NULL on error or refusal
+ *   parser(in) :
+ *   sql(in/out) : a PT_DELETE. The flags do_delete_decide_server_side () settles are left on it
+ *
+ * note: the counterpart of pt_plcsql_update_to_xasl (). There is no NOT NULL list to collect,
+ *       because a delete writes no attribute, and the refusals are the two that are left once
+ *       assignments are out of the picture.
+ */
+static XASL_NODE *
+pt_plcsql_delete_to_xasl (PARSER_CONTEXT * parser, PT_NODE * sql)
+{
+  XASL_NODE *xasl;
+  int au_save;
+
+  if (pt_false_where (parser, sql))
+    {
+      return pt_plcsql_refuse (parser, "the DELETE has a WHERE that is false as it stands");
+    }
+  if (sql->info.delete_.spec == NULL)
+    {
+      return pt_plcsql_refuse (parser, "the DELETE names an object the client holds");
+    }
+  if (sql->info.delete_.target_classes != NULL && sql->info.delete_.target_classes->next != NULL)
+    {
+      /* the prepare path answers more than one target by splitting the statement into one per
+       * table (pt_split_delete_stmt ()). That is several plans, and one statement here carries
+       * one. */
+      return pt_plcsql_refuse (parser, "the DELETE names more than one table to delete from");
+    }
+
+  if (do_delete_decide_server_side (parser, sql) != NO_ERROR)
+    {
+      return NULL;
+    }
+
+  if (!sql->info.delete_.server_delete)
+    {
+      /* which of the two it was is only recorded for the trigger */
+      return pt_plcsql_refuse (parser,
+			       sql->info.delete_.has_trigger
+			       ? "a trigger watches a table the DELETE removes rows from"
+			       : "the DELETE removes rows through a view");
+    }
+
+  /* the prepare path builds with authorization off, and this is the same build */
+  AU_SAVE_AND_DISABLE (au_save);
+  xasl = pt_to_delete_xasl (parser, sql);
+  AU_RESTORE (au_save);
+
+  return xasl;
+}
+
+/*
  * pt_plcsql_sql_to_xasl () - the plan of one SQL statement written in a body
  *   return: the XASL node, NULL on error
  *   parser(in) :
@@ -31261,6 +31466,12 @@ pt_to_plcsql_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params, 
  *       asking the server whether it already holds a plan, packing the answer into a stream.
  *       None of that applies here: this plan is not looked up by text and is packed with the
  *       procedure that holds it, so only the plan itself is wanted.
+ *
+ *       What does apply is the step each writing statement has before its builder. None of the
+ *       three can be built cold: the step asks the classes what they are, settles whether the
+ *       server may do the work at all, and collects the constraints the builder is handed. Skip
+ *       it and the plan is wrong quietly - an empty NOT NULL list writes a row that breaks the
+ *       constraint, and a plan with no class in it fails an assertion rather than reporting.
  */
 static XASL_NODE *
 pt_plcsql_sql_to_xasl (PARSER_CONTEXT * parser, PT_NODE * sql)
@@ -31268,16 +31479,135 @@ pt_plcsql_sql_to_xasl (PARSER_CONTEXT * parser, PT_NODE * sql)
   switch (sql->node_type)
     {
     case PT_INSERT:
+      if (is_server_insert_allowed (parser, sql) != NO_ERROR)
+	{
+	  return NULL;
+	}
+      if (sql->info.insert.server_allowed != SERVER_INSERT_IS_ALLOWED)
+	{
+	  return pt_plcsql_refuse (parser, "the INSERT is one the client has to do a row at a time");
+	}
       return pt_to_insert_xasl (parser, sql);
 
+    case PT_SELECT:
+      return parser_generate_xasl (parser, sql);
+
+    case PT_UPDATE:
+      return pt_plcsql_update_to_xasl (parser, sql);
+
+    case PT_DELETE:
+      return pt_plcsql_delete_to_xasl (parser, sql);
+
+    case PT_UNION:
+    case PT_INTERSECTION:
+    case PT_DIFFERENCE:
+      /* The row a set operator gives back is not read here yet. Its plan puts the result
+       * together after the two sides have run, in a list file of its own, and the one this
+       * reads is not that one: both UNION and UNION ALL come back as no row, with nothing
+       * said. A wrong answer rather than a refusal is why the shape is named out here
+       * instead of being left to fail. */
+      return pt_plcsql_refuse (parser, "the query is a set operator");
+
     default:
-      /* UPDATE and DELETE are not a matter of calling the other two builders. Each is prepared
-       * first - the statement is split, the classes are asked whether a trigger watches them,
-       * and the answer decides whether the server may do the work at all - and a plan built
-       * without that has no classes in it, which the executor asserts on rather than reports.
-       * A query is its own piece too: SELECT INTO is what reads rows back into a body. */
-      return pt_plcsql_refuse (parser, "only INSERT is carried in the plan so far");
+      return pt_plcsql_refuse (parser, "the statement is not one the plan carries");
     }
+}
+
+/*
+ * pt_to_plcsql_sql () - one SQL statement written in a body, with its INTO clause
+ *   return: the node, NULL on error
+ *   parser(in) :
+ *   stmt(in)   : a PT_SP_SQL. Its INTO targets were taken off the query and bound to slots
+ *
+ * note: the query's plan is the first child and the assignments the INTO clause asks for are
+ *       the ones after it, so what runs the statement and what writes the frame stay apart -
+ *       the plan is the one the SQL side would have built either way.
+ *
+ *       Where the row lands between the two is the query's own single_tuple, which is the
+ *       field a one-row result is read into everywhere else. It holds one value per column of
+ *       the list file, hidden ones included, because an assignment names its value by pointer:
+ *       a hidden column is prepended rather than appended (pt_add_oid_to_select_list ()), so
+ *       counting only the visible ones would name the wrong column.
+ */
+static XASL_NODE *
+pt_to_plcsql_sql (PARSER_CONTEXT * parser, PT_NODE * stmt)
+{
+  XASL_NODE *xasl, **buf;
+  PT_NODE *column, *target;
+  QPROC_DB_VALUE_LIST value;
+  REGU_VARIABLE *regu;
+  int cnt, i;
+
+  xasl = pt_plcsql_new_node (PLCSQL_OP_SQL);
+  if (xasl == NULL)
+    {
+      return NULL;
+    }
+
+  cnt = 1 + pt_length_of_list (stmt->info.sp_stmt.name);
+  regu_array_alloc (&buf, (size_t) cnt);
+  if (buf == NULL)
+    {
+      return NULL;
+    }
+
+  buf[0] = pt_plcsql_sql_to_xasl (parser, stmt->info.sp_stmt.sql);
+  if (buf[0] == NULL)
+    {
+      return NULL;
+    }
+  if (cnt == 1)
+    {
+      return pt_plcsql_set_children (parser, xasl, buf, 1) == NO_ERROR ? xasl : NULL;
+    }
+
+  column = pt_get_select_list (parser, stmt->info.sp_stmt.sql);
+  buf[0]->single_tuple = pt_make_val_list (parser, column);
+  if (buf[0]->single_tuple == NULL)
+    {
+      return NULL;
+    }
+
+  i = 1;
+  target = stmt->info.sp_stmt.name;
+  for (value = buf[0]->single_tuple->valp; value != NULL && target != NULL; value = value->next, column = column->next)
+    {
+      if (column->flag.is_hidden_column)
+	{
+	  /* not one of the statement's own columns, so no target answers to it */
+	  continue;
+	}
+
+      regu_alloc (regu);
+      if (regu == NULL)
+	{
+	  return NULL;
+	}
+
+      /* the value is read out of the list file with the column's type, and the cast the
+       * assignment puts on top is what brings it to the type the target was declared */
+      regu->type = TYPE_CONSTANT;
+      regu->value.dbvalptr = value->val;
+      regu->domain = pt_xasl_node_to_domain (parser, column);
+
+      buf[i] = pt_plcsql_assign_regu (parser, target->info.name.plcsql_slot, regu, target, true);
+      if (buf[i] == NULL)
+	{
+	  return NULL;
+	}
+      i++;
+      target = target->next;
+    }
+
+  if (target != NULL)
+    {
+      /* pt_check_into_clause () counts the two and errors when they differ, so arriving here
+       * means the select list this walked is not the one it counted */
+      PT_INTERNAL_ERROR (parser, "generate plcsql");
+      return NULL;
+    }
+
+  return pt_plcsql_set_children (parser, xasl, buf, cnt) == NO_ERROR ? xasl : NULL;
 }
 
 /*
@@ -31546,18 +31876,7 @@ pt_to_plcsql_stmt_inner (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * re
       return xasl;
 
     case PT_SP_SQL:
-      xasl = pt_plcsql_new_node (PLCSQL_OP_SQL);
-      if (xasl == NULL)
-	{
-	  return NULL;
-	}
-
-      buf[0] = pt_plcsql_sql_to_xasl (parser, stmt->info.sp_stmt.sql);
-      if (buf[0] == NULL)
-	{
-	  return NULL;
-	}
-      return pt_plcsql_set_children (parser, xasl, buf, 1) == NO_ERROR ? xasl : NULL;
+      return pt_to_plcsql_sql (parser, stmt);
 
     case PT_SP_RAISE:
       /* The grammar takes RAISE so that the coverage meter can count the bodies that use it,
@@ -31766,16 +32085,18 @@ pt_plcsql_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig
   const char *text;
   char why[512];
   bool refused = false;
+  XASL_SUPP_INFO saved_supp;
   int save;
 
-  if (!prm_get_bool_value (PRM_ID_PL_NATIVE_EXECUTION) || sig == NULL || sig->type != PL_TYPE_PLCSQL)
+  /* DBMS_OUTPUT and its like are catalogued as PL/CSQL (sp_catalog.cpp) but implemented in
+   * Java, so they carry no stored code. That is not a refusal: there is nothing here to build
+   * a plan from, and the call goes out to the PL engine through the TYPE_SP regu variable the
+   * way it always has. Refusing would carry the error out to the body that made the call,
+   * which is a different statement and one this can perfectly well run. */
+  if (!prm_get_bool_value (PRM_ID_PL_NATIVE_EXECUTION) || sig == NULL || sig->type != PL_TYPE_PLCSQL
+      || OID_ISNULL (&sig->ext.sp.code_oid))
     {
       return NULL;
-    }
-
-  if (OID_ISNULL (&sig->ext.sp.code_oid))
-    {
-      return pt_plcsql_refuse (parser, "the routine has no stored code");
     }
 
   if (pt_plcsql_is_compiling (&sig->ext.sp.code_oid))
@@ -31839,12 +32160,23 @@ pt_plcsql_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig
 	  return pt_plcsql_refuse (parser, "the header's parameters do not agree with the signature");
 	}
 
+      /* A body is compiled in the middle of the statement that calls the routine, and what
+       * the two generations put their cache information in is one file-scope struct. Handing
+       * the body an empty one and giving the statement its own back keeps the body's classes
+       * out of the statement's list - and, since pt_init_xasl_supp_info () frees what it finds,
+       * keeps the statement's list from being freed under it. */
+      saved_supp = xasl_Supp_info;
+      memset (&xasl_Supp_info, 0, sizeof (xasl_Supp_info));
+
       pt_Plcsql_compiling[pt_Plcsql_compile_depth++] = sig->ext.sp.code_oid;
       if (pt_plcsql_read_static_sql (body_parser, block->info.sp_stmt.body) == NO_ERROR)
 	{
 	  xasl = pt_to_plcsql_xasl (body_parser, block, params);
 	}
       pt_Plcsql_compile_depth--;
+
+      pt_init_xasl_supp_info ();
+      xasl_Supp_info = saved_supp;
       if (pt_has_error (body_parser))
 	{
 	  xasl = NULL;
