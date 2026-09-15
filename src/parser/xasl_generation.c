@@ -30522,6 +30522,16 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
 	    }
 	  break;
 
+	case PT_SP_OPEN:
+	  /* the arguments are ordinary expressions of the frame; the cursor's own name is not
+	   * one of its values, so there is nothing to bind for it */
+	  if (pt_plcsql_resolve_expr (parser, stmt->info.sp_stmt.expr, scope) != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
+	  break;
+
+	case PT_SP_CLOSE:
 	case PT_SP_RAISE:
 	  /* the name is an exception, which is not a value and so binds to no slot */
 	case PT_SP_NULL_STMT:
@@ -30529,6 +30539,7 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
 
 	case PT_SP_HANDLER:
 	  /* reached through the block's EXCEPTION part, never as a statement */
+	case PT_SP_CURSOR:
 	case PT_SP_DECL:
 	default:
 	  /* a declaration is reached through decl_list, never as a statement */
@@ -30574,6 +30585,14 @@ pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCO
       if (pt_plcsql_resolve_expr (parser, decl->info.sp_stmt.expr, &scope) != NO_ERROR)
 	{
 	  return ER_FAILED;
+	}
+
+      if (decl->info.sp_stmt.op == PT_SP_CURSOR)
+	{
+	  /* a cursor is declared here but is not a value: it has no type and nothing reads it
+	   * as one, so it takes no slot and does not become visible to an expression. What it
+	   * does need at run time is a handle, and that is settled when OPEN is lowered. */
+	  continue;
 	}
 
       decl->info.sp_stmt.name->info.name.meta_class = PT_PLCSQL_LOCAL;
@@ -31318,6 +31337,13 @@ pt_to_plcsql_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params, 
 	      /* it holds no value, so there is no slot to open */
 	      continue;
 	    }
+
+	  if (decl->info.sp_stmt.op == PT_SP_CURSOR)
+	    {
+	      /* read as a declaration, but its query is not gathered into the plan yet */
+	      return pt_plcsql_refuse (parser, "a cursor is declared, which the plan does not carry yet");
+	    }
+
 	  buf[i] = pt_to_plcsql_open_local (parser, decl);
 	  if (buf[i] == NULL)
 	    {
@@ -31787,6 +31813,12 @@ pt_to_plcsql_stmt_inner (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * re
 	  return NULL;
 	}
       return pt_plcsql_set_children (parser, xasl, buf, 2) == NO_ERROR ? xasl : NULL;
+
+    case PT_SP_OPEN:
+      return pt_plcsql_refuse (parser, "a cursor is opened, which the plan does not carry yet");
+
+    case PT_SP_CLOSE:
+      return pt_plcsql_refuse (parser, "a cursor is closed, which the plan does not carry yet");
 
     case PT_SP_LOOP:
       xasl = pt_plcsql_new_node (PLCSQL_OP_LOOP);
