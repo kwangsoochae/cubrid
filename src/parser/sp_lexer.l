@@ -54,9 +54,11 @@ static SP_KEYWORD sp_Keywords[] = {
   {"boolean", TYPE_KEYWORD, PT_TYPE_LOGICAL},
   {"char", TYPE_KEYWORD, PT_TYPE_CHAR},
   {"character", TYPE_KEYWORD, PT_TYPE_CHAR},
+  {"close", CLOSE_, PT_TYPE_NONE},
   {"constant", CONSTANT_, PT_TYPE_NONE},
   {"continue", CONTINUE_, PT_TYPE_NONE},
   {"create", CREATE_, PT_TYPE_NONE},
+  {"cursor", CURSOR_, PT_TYPE_NONE},
   {"date", TYPE_KEYWORD, PT_TYPE_DATE},
   {"datetime", TYPE_KEYWORD, PT_TYPE_DATETIME},
   {"dec", TYPE_KEYWORD, PT_TYPE_NUMERIC},
@@ -70,6 +72,7 @@ static SP_KEYWORD sp_Keywords[] = {
   {"exception", EXCEPTION_, PT_TYPE_NONE},
   {"exit", EXIT_, PT_TYPE_NONE},
   {"false", FALSE_, PT_TYPE_NONE},
+  {"fetch", FETCH_, PT_TYPE_NONE},
   {"float", TYPE_KEYWORD, PT_TYPE_FLOAT},
   {"for", FOR_, PT_TYPE_NONE},
   {"function", FUNCTION_, PT_TYPE_NONE},
@@ -83,6 +86,7 @@ static SP_KEYWORD sp_Keywords[] = {
   {"not", NOT_, PT_TYPE_NONE},
   {"null", NULL_, PT_TYPE_NONE},
   {"numeric", TYPE_KEYWORD, PT_TYPE_NUMERIC},
+  {"open", OPEN_, PT_TYPE_NONE},
   {"or", OR_, PT_TYPE_NONE},
   {"others", OTHERS_, PT_TYPE_NONE},
   {"out", OUT_, PT_TYPE_NONE},
@@ -175,6 +179,18 @@ real		{digit}+"."{digit}+([eE][+-]?{digit}+)?|"."{digit}+([eE][+-]?{digit}+)?|{d
 			  sp_yylval.number = (int) PT_TYPE_DOUBLE;
 			  return TYPE_KEYWORD;
 			}
+
+	/* A cursor's attribute and a declaration's %TYPE are one family: a per cent sign and a
+	 * word, which the reference implementation lexes as one token each and allows a space
+	 * inside (PlcLexer.g4, PERCENT_*). Spelled out for the same reason the two-word type
+	 * names above are - the keyword table looks up a single word. There is no token for a
+	 * per cent sign on its own, here or there: the remainder operator is the word MOD. */
+"%"[ \t\r\n]*[fF][oO][uU][nN][dD]		{ return PERCENT_FOUND; }
+"%"[ \t\r\n]*[iI][sS][oO][pP][eE][nN]		{ return PERCENT_ISOPEN; }
+"%"[ \t\r\n]*[nN][oO][tT][fF][oO][uU][nN][dD]	{ return PERCENT_NOTFOUND; }
+"%"[ \t\r\n]*[rR][oO][wW][cC][oO][uU][nN][tT]	{ return PERCENT_ROWCOUNT; }
+"%"[ \t\r\n]*[rR][oO][wW][tT][yY][pP][eE]	{ return PERCENT_ROWTYPE; }
+"%"[ \t\r\n]*[tT][yY][pP][eE]			{ return PERCENT_TYPE; }
 
 	/* A statement that begins with one of these is SQL, and the SQL parser reads it - not
 	 * this one. The text is taken as written, up to the semicolon that ends it, because what
