@@ -31766,6 +31766,7 @@ pt_plcsql_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig
   const char *text;
   char why[512];
   bool refused = false;
+  XASL_SUPP_INFO saved_supp;
   int save;
 
   if (!prm_get_bool_value (PRM_ID_PL_NATIVE_EXECUTION) || sig == NULL || sig->type != PL_TYPE_PLCSQL)
@@ -31839,12 +31840,23 @@ pt_plcsql_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig
 	  return pt_plcsql_refuse (parser, "the header's parameters do not agree with the signature");
 	}
 
+      /* A body is compiled in the middle of the statement that calls the routine, and what
+       * the two generations put their cache information in is one file-scope struct. Handing
+       * the body an empty one and giving the statement its own back keeps the body's classes
+       * out of the statement's list - and, since pt_init_xasl_supp_info () frees what it finds,
+       * keeps the statement's list from being freed under it. */
+      saved_supp = xasl_Supp_info;
+      memset (&xasl_Supp_info, 0, sizeof (xasl_Supp_info));
+
       pt_Plcsql_compiling[pt_Plcsql_compile_depth++] = sig->ext.sp.code_oid;
       if (pt_plcsql_read_static_sql (body_parser, block->info.sp_stmt.body) == NO_ERROR)
 	{
 	  xasl = pt_to_plcsql_xasl (body_parser, block, params);
 	}
       pt_Plcsql_compile_depth--;
+
+      pt_init_xasl_supp_info ();
+      xasl_Supp_info = saved_supp;
       if (pt_has_error (body_parser))
 	{
 	  xasl = NULL;
