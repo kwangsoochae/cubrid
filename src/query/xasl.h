@@ -529,7 +529,8 @@ struct plcsql_proc_node
   int flags;			/* op-specific: which loop form, which jump */
   REGU_VARIABLE *expr;		/* condition, assigned value, RAISE argument */
   REGU_VARIABLE *expr2;		/* LOOP: the upper bound of a FOR, NULL in every other form */
-  int target_slot;		/* frame slot an assignment writes, -1 when there is none */
+  int target_slot;		/* frame slot an assignment writes, -1 when there is none.
+				 * CURSOR: which of the frame's cursors the OPEN or CLOSE acts on */
   int jump_levels;		/* JUMP: how many enclosing loops an EXIT or CONTINUE acts on - 1 for one
 				 * written without a label, and the depth of the labelled loop otherwise */
   int locals_cnt;		/* BLOCK: how many slots the frame needs. Numbering is flat over the
@@ -538,6 +539,9 @@ struct plcsql_proc_node
 				 * PL engine names, which for a statement that evaluates an expression is
 				 * where that expression begins rather than where the statement does */
   int column;
+  int cursors_cnt;		/* BLOCK: how many cursors the frame holds, numbered flat over the
+				 * procedure the way the slots are, so again only the outermost
+				 * block carries the count */
   /* An SQL statement inside a procedure is a plain XASL node, not a kind of its own, and
    * hangs here as a child. */
   XASL_NODE **children;
