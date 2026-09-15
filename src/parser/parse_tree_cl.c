@@ -8700,7 +8700,37 @@ static PARSER_VARCHAR *
 pt_print_sp_body (PARSER_CONTEXT * parser, PT_NODE * p)
 {
   PARSER_VARCHAR *q = NULL, *r1 = NULL;
-  q = pt_append_nulstring (parser, q, parser->flag.is_unloading_plcsql_def ? " AS\n" : " as ");
+
+  if (parser->flag.is_unloading_plcsql_def && p->info.sp_body.lang == SP_LANG_PLCSQL && p->info.sp_body.impl_line > 0)
+    {
+      /* The header is rewritten to one line, so a body that stood further down would move up
+       * and every position in it would count short. Put back the newlines and the indent that
+       * led to its first character - the body itself is copied out below byte for byte, so
+       * that is the whole of what the rewrite would otherwise lose.
+       *
+       * A body that begins on the header's own line cannot have its column kept: the rewritten
+       * header is not the length the user's was. It keeps its line.
+       *
+       * A line of zero is a body whose text was never set, and there is no layout to put back;
+       * the guard above leaves those to the one newline this used to write unconditionally. */
+      int lines = p->info.sp_body.impl_line - 1;
+      int indent = (lines > 0) ? p->info.sp_body.impl_column - 1 : 1;
+      char *pad = (char *) parser_alloc (parser, lines + indent + 1);
+
+      q = pt_append_nulstring (parser, q, " AS");
+      if (pad != NULL)
+	{
+	  memset (pad, '\n', lines);
+	  memset (pad + lines, ' ', indent);
+	  pad[lines + indent] = '\0';
+	  q = pt_append_nulstring (parser, q, pad);
+	}
+    }
+  else
+    {
+      q = pt_append_nulstring (parser, q, parser->flag.is_unloading_plcsql_def ? " AS\n" : " as ");
+    }
+
   if (p->info.sp_body.lang == SP_LANG_PLCSQL)
     {
       r1 = pt_append_varchar (parser, r1, p->info.sp_body.impl->info.value.data_value.str);

@@ -477,6 +477,7 @@ int g_query_string_len;
 int g_original_buffer_len;
 
 static int pt_set_plcsql_body_impl(PT_NODE* node, PT_NODE* body, int start, int spec_start, int spec_end, int end);
+static void pt_set_plcsql_body_text(PT_NODE* body, const char* stmt, int at, int len);
 static int g_plcsql_text_pos;
 
 /*
@@ -11827,8 +11828,7 @@ pl_language_spec
 			  {
 			    node->info.sp_body.lang = SP_LANG_PLCSQL;
                             if (g_query_string) {
-                                node->info.sp_body.impl = pt_create_string_literal_node_w_charset_coll(
-                                        g_query_string + g_plcsql_text_pos, $2);
+                                pt_set_plcsql_body_text(node, g_query_string, g_plcsql_text_pos, $2);
                             } else {
                                 node->info.sp_body.impl = NULL; // set later
                             }
@@ -26277,12 +26277,48 @@ pt_set_plcsql_body_impl(PT_NODE* node, PT_NODE* body, int start, int spec_start,
     }
 
     buff[read_sz] = '\0';
-    char* impl = buff + (spec_start - start);
 
     node->sql_user_text = buff;
     node->sql_user_text_len = read_sz;
 
-    body->info.sp_body.impl = pt_create_string_literal_node_w_charset_coll(impl, (spec_end - spec_start));
+    pt_set_plcsql_body_text(body, buff, spec_start - start, spec_end - spec_start);
 
     return 0;
+}
+
+/*
+ * pt_set_plcsql_body_text () - the body's text, and where its first character stood
+ *   return:
+ *   body(in/out) : the PT_SP_BODY the text belongs to
+ *   stmt(in)     : the statement as the user wrote it, from its own first character
+ *   at(in)       : offset in stmt where the body text starts, leading blanks and all
+ *   len(in)      : its length from at
+ *
+ * note: the blanks between AS and the body are dropped, because the two places a body is
+ *       captured from do not agree on whether they are part of it. What is kept instead is
+ *       the line and column they led to - the catalog's copy is padded back out to that, so
+ *       that a position the server reports counts the same as one the PL engine reports.
+ */
+static void
+pt_set_plcsql_body_text(PT_NODE* body, const char* stmt, int at, int len)
+{
+    int line = 1, column = 1, i;
+
+    while (len > 0 && char_isspace(stmt[at])) {
+        at++;
+        len--;
+    }
+
+    for (i = 0; i < at; i++) {
+        if (stmt[i] == '\n') {
+            line++;
+            column = 1;
+        } else {
+            column++;
+        }
+    }
+
+    body->info.sp_body.impl = pt_create_string_literal_node_w_charset_coll(stmt + at, len);
+    body->info.sp_body.impl_line = line;
+    body->info.sp_body.impl_column = column;
 }

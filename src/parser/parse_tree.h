@@ -3329,6 +3329,10 @@ struct pt_stored_proc_body_info
   int lang;
   PT_NODE *decl;		/* PT_VALUE */
   PT_NODE *impl;		/* PT_VALUE */
+  int impl_line;		/* where impl's first character stood in the statement as written, */
+  int impl_column;		/* counted from 1. The catalog's copy is padded out to it, so that a
+				 * runtime error names the place the user wrote and not a place in
+				 * the rewritten header */
 };
 
 struct pt_stored_proc_info
