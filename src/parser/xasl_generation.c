@@ -30676,6 +30676,7 @@ static XASL_NODE *pt_to_plcsql_block (PARSER_CONTEXT * parser, PT_NODE * block, 
 				      TP_DOMAIN * ret_domain, PT_PLCSQL_LOOP * loops);
 static XASL_NODE *pt_to_plcsql_stmt_list_block (PARSER_CONTEXT * parser, PT_NODE * list, TP_DOMAIN * ret_domain,
 						PT_PLCSQL_LOOP * loops);
+static XASL_NODE *pt_plcsql_update_to_xasl (PARSER_CONTEXT * parser, PT_NODE * sql);
 static XASL_NODE *pt_plcsql_sql_to_xasl (PARSER_CONTEXT * parser, PT_NODE * sql);
 static XASL_NODE *pt_to_plcsql_sql (PARSER_CONTEXT * parser, PT_NODE * stmt);
 static int pt_plcsql_set_children (PARSER_CONTEXT * parser, XASL_NODE * xasl, XASL_NODE ** buf, int cnt);
@@ -31344,6 +31345,65 @@ pt_to_plcsql_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params, 
 }
 
 /*
+ * pt_plcsql_update_to_xasl () - the plan of one UPDATE written in a body
+ *   return: the XASL node, NULL on error or refusal
+ *   parser(in) :
+ *   sql(in/out) : a PT_UPDATE. The flags do_update_decide_server_side () settles are left on it
+ *
+ * note: the builder cannot be called cold. do_update_decide_server_side () asks the classes
+ *       whether a trigger watches them and whether any is a view, and that answer is
+ *       server_update - whether the server may do the work at all. It also collects the NOT
+ *       NULL attributes the builder is handed. A plan built without it holds no class, and the
+ *       executor asserts on that rather than reporting it.
+ *
+ *       server_update false is the widest of the refusals below. It means the rows are changed
+ *       one object at a time through the client's workspace, which is not work the server can
+ *       be asked for, so an UPDATE of a table a trigger watches stays refused however much of
+ *       the grammar is filled in.
+ */
+static XASL_NODE *
+pt_plcsql_update_to_xasl (PARSER_CONTEXT * parser, PT_NODE * sql)
+{
+  XASL_NODE *xasl;
+  PT_NODE *not_nulls = NULL;
+  int au_save;
+
+  if (pt_false_where (parser, sql))
+    {
+      return pt_plcsql_refuse (parser, "the UPDATE has a WHERE that is false as it stands");
+    }
+  if (sql->info.update.object != NULL)
+    {
+      return pt_plcsql_refuse (parser, "the UPDATE names an object the client holds");
+    }
+
+  if (do_update_decide_server_side (parser, sql, &not_nulls) != NO_ERROR)
+    {
+      return NULL;
+    }
+
+  if (sql->info.update.do_class_attrs)
+    {
+      return pt_plcsql_refuse (parser, "the UPDATE writes a class attribute");
+    }
+  if (!sql->info.update.server_update)
+    {
+      /* which of the three it was is only recorded for the trigger */
+      return pt_plcsql_refuse (parser,
+			       sql->info.update.has_trigger
+			       ? "a trigger watches a table the UPDATE writes"
+			       : "the UPDATE writes through a view or to a class attribute");
+    }
+
+  /* the prepare path builds with authorization off, and this is the same build */
+  AU_SAVE_AND_DISABLE (au_save);
+  xasl = pt_to_update_xasl (parser, sql, &not_nulls);
+  AU_RESTORE (au_save);
+
+  return xasl;
+}
+
+/*
  * pt_plcsql_sql_to_xasl () - the plan of one SQL statement written in a body
  *   return: the XASL node, NULL on error
  *   parser(in) :
@@ -31365,6 +31425,9 @@ pt_plcsql_sql_to_xasl (PARSER_CONTEXT * parser, PT_NODE * sql)
     case PT_SELECT:
       return parser_generate_xasl (parser, sql);
 
+    case PT_UPDATE:
+      return pt_plcsql_update_to_xasl (parser, sql);
+
     case PT_UNION:
     case PT_INTERSECTION:
     case PT_DIFFERENCE:
@@ -31376,11 +31439,8 @@ pt_plcsql_sql_to_xasl (PARSER_CONTEXT * parser, PT_NODE * sql)
       return pt_plcsql_refuse (parser, "the query is a set operator");
 
     default:
-      /* UPDATE and DELETE are not a matter of calling the other builders. Each is prepared
-       * first - the statement is split, the classes are asked whether a trigger watches them,
-       * and the answer decides whether the server may do the work at all - and a plan built
-       * without that has no classes in it, which the executor asserts on rather than reports. */
-      return pt_plcsql_refuse (parser, "only INSERT and SELECT are carried in the plan so far");
+      /* DELETE is prepared the way UPDATE is and is not here yet */
+      return pt_plcsql_refuse (parser, "only INSERT, SELECT and UPDATE are carried in the plan so far");
     }
 }
 
