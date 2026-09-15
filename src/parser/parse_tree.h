@@ -3408,7 +3408,9 @@ typedef enum
   PT_SP_EXIT,			/* EXIT, which leaves a loop */
   PT_SP_CONTINUE,		/* CONTINUE, which starts a loop's next turn */
   PT_SP_SQL,			/* one SQL statement written in the body */
-  PT_SP_NULL_STMT		/* the NULL statement */
+  PT_SP_NULL_STMT,		/* the NULL statement */
+  PT_SP_RAISE,			/* RAISE, with or without a name */
+  PT_SP_HANDLER			/* one WHEN of an EXCEPTION part */
 } PT_SP_STMT_OP;
 
 /* pt_sp_stmt_info.flags */
@@ -3419,12 +3421,17 @@ typedef enum
 #define PT_SP_LOOP_REVERSE   0x04	/* FOR i IN REVERSE lo .. hi */
 #define PT_SP_DECL_CONSTANT  0x08
 #define PT_SP_BLOCK_NESTED   0x10	/* a block written as a statement, so it carries DECLARE */
+#define PT_SP_DECL_EXCEPTION 0x20	/* e EXCEPTION; - a declaration that names an exception rather
+					 * than a variable, so it has no type and no initial value */
+#define PT_SP_HANDLER_OTHERS 0x40	/* WHEN OTHERS, which names no exception and catches the rest */
 
 struct pt_sp_stmt_info
 {
   PT_SP_STMT_OP op;
   int flags;
-  PT_NODE *name;		/* PT_NAME - assignment target, declared name, loop variable */
+  PT_NODE *name;		/* PT_NAME - assignment target, declared name, loop variable.
+				 * RAISE: the exception named, NULL when it was written bare.
+				 * HANDLER: the exceptions this WHEN catches, as a list */
   PT_NODE *label;		/* PT_NAME - LOOP: the name written before it. EXIT, CONTINUE: the loop
 				 * they name. NULL wherever none was written */
   PT_NODE *expr;		/* condition, assigned value, declaration default, lower bound.
@@ -3438,7 +3445,8 @@ struct pt_sp_stmt_info
 				 * NULL for a procedure. A RETURN casts to it */
   PT_NODE *decl_list;		/* BLOCK: the declarations */
   PT_NODE *body;		/* BLOCK, LOOP: statements. IF: the then branch */
-  PT_NODE *else_body;		/* IF: the else branch */
+  PT_NODE *else_body;		/* IF: the else branch. BLOCK: the EXCEPTION part, a list of
+				 * HANDLER nodes in the order they were written */
   PT_NODE *sql;			/* SQL: the statement the SQL parser read out of sql_text */
   const char *sql_text;		/* SQL: the statement as written, which is what the SQL parser
 				 * is given - a hint lives in a comment, so nothing is normalised */

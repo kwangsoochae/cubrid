@@ -8347,12 +8347,23 @@ pt_print_sp_stmt (PARSER_CONTEXT * parser, PT_NODE * p)
       q = pt_append_nulstring (parser, q, "begin ");
       r1 = pt_print_sp_stmt_list (parser, p->info.sp_stmt.body);
       q = pt_append_varchar (parser, q, r1);
+      if (p->info.sp_stmt.else_body != NULL)
+	{
+	  q = pt_append_nulstring (parser, q, "exception ");
+	  r1 = pt_print_sp_stmt_list (parser, p->info.sp_stmt.else_body);
+	  q = pt_append_varchar (parser, q, r1);
+	}
       q = pt_append_nulstring (parser, q, "end;");
       break;
 
     case PT_SP_DECL:
       r1 = pt_print_bytes (parser, p->info.sp_stmt.name);
       q = pt_append_varchar (parser, q, r1);
+      if (p->info.sp_stmt.flags & PT_SP_DECL_EXCEPTION)
+	{
+	  q = pt_append_nulstring (parser, q, " exception;");
+	  break;
+	}
       if (p->info.sp_stmt.flags & PT_SP_DECL_CONSTANT)
 	{
 	  q = pt_append_nulstring (parser, q, " constant");
@@ -8470,6 +8481,42 @@ pt_print_sp_stmt (PARSER_CONTEXT * parser, PT_NODE * p)
 	  q = pt_append_nulstring (parser, q, p->info.sp_stmt.sql_text);
 	}
       q = pt_append_nulstring (parser, q, ";");
+      break;
+
+    case PT_SP_RAISE:
+      q = pt_append_nulstring (parser, q, "raise");
+      if (p->info.sp_stmt.name != NULL)
+	{
+	  r1 = pt_print_bytes (parser, p->info.sp_stmt.name);
+	  q = pt_append_nulstring (parser, q, " ");
+	  q = pt_append_varchar (parser, q, r1);
+	}
+      q = pt_append_nulstring (parser, q, ";");
+      break;
+
+    case PT_SP_HANDLER:
+      q = pt_append_nulstring (parser, q, "when ");
+      if (p->info.sp_stmt.flags & PT_SP_HANDLER_OTHERS)
+	{
+	  q = pt_append_nulstring (parser, q, "others");
+	}
+      else
+	{
+	  PT_NODE *name;
+
+	  for (name = p->info.sp_stmt.name; name != NULL; name = name->next)
+	    {
+	      if (name != p->info.sp_stmt.name)
+		{
+		  q = pt_append_nulstring (parser, q, " or ");
+		}
+	      r1 = pt_print_bytes (parser, name);
+	      q = pt_append_varchar (parser, q, r1);
+	    }
+	}
+      q = pt_append_nulstring (parser, q, " then ");
+      r1 = pt_print_sp_stmt_list (parser, p->info.sp_stmt.body);
+      q = pt_append_varchar (parser, q, r1);
       break;
 
     case PT_SP_NULL_STMT:
