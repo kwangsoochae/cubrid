@@ -112,6 +112,7 @@ static int sp_keyword_lookup (const char *text, PT_TYPE_ENUM * type);
 %option yylineno
 
 %x COMMENT
+%x SQLTEXT
 
 digit		[0-9]
 letter		[A-Za-z_]
@@ -155,6 +156,33 @@ real		{digit}+"."{digit}+([eE][+-]?{digit}+)?|"."{digit}+([eE][+-]?{digit}+)?|{d
 			  sp_yylval.number = (int) PT_TYPE_DOUBLE;
 			  return TYPE_KEYWORD;
 			}
+
+	/* A statement that begins with one of these is SQL, and the SQL parser reads it - not
+	 * this one. The text is taken as written, up to the semicolon that ends it, because what
+	 * is handed on has to be what the user typed: a hint lives in a comment and a name's
+	 * spelling matters. REPLACE is missing from the list because it is this grammar's own
+	 * keyword in CREATE OR REPLACE; taking it needs that pair read as one token first.
+	 * A word that only starts one of these, selectfoo say, is an identifier - the longer
+	 * match wins - but INSERT and TRUNCATE spelled exactly are also functions, and those
+	 * forms are read as a statement here. Both were refused before this too. */
+[sS][eE][lL][eE][cC][tT]|[iI][nN][sS][eE][rR][tT]|[uU][pP][dD][aA][tT][eE]|[dD][eE][lL][eE][tT][eE]|[mM][eE][rR][gG][eE]|[tT][rR][uU][nN][cC][aA][tT][eE]|[wW][iI][tT][hH]	{
+			  sp_sql_begin (yytext);
+			  BEGIN (SQLTEXT);
+			}
+
+	/* Inside the SQL the only things that have to be recognised are the ones that can hide a
+	 * semicolon or a quote from the scan - a literal and the two comment forms. Everything
+	 * else is copied through. */
+<SQLTEXT>";"		{
+			  BEGIN (INITIAL);
+			  sp_yylval.cptr = sp_sql_take ();
+			  return SQL_TEXT;
+			}
+<SQLTEXT>'([^']|'')*'	{ sp_sql_add (yytext); }
+<SQLTEXT>"--"[^\n]*	{ sp_sql_add (yytext); }
+<SQLTEXT>"/*"([^*]|\*+[^*/])*\*+"/"	{ sp_sql_add (yytext); }
+<SQLTEXT>[^';/-]+	{ sp_sql_add (yytext); }
+<SQLTEXT>.|\n		{ sp_sql_add (yytext); }
 
 {ident}			{
 			  PT_TYPE_ENUM type = PT_TYPE_NONE;

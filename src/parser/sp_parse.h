@@ -41,6 +41,11 @@ extern "C"
 /* For sp_lexer.l: token text copied onto the parser of the running parse. */
   extern char *sp_copy_token (const char *text);
 
+/* For sp_lexer.l: the SQL text of one statement, gathered as the scan crosses it. */
+  extern void sp_sql_begin (const char *text);
+  extern void sp_sql_add (const char *text);
+  extern char *sp_sql_take (void);
+
 #ifdef __cplusplus
 }
 #endif

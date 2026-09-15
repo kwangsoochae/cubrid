@@ -8289,6 +8289,7 @@ pt_apply_sp_stmt (PARSER_CONTEXT * parser, PT_NODE * p, void *arg)
   PT_APPLY_WALK (parser, p->info.sp_stmt.decl_list, arg);
   PT_APPLY_WALK (parser, p->info.sp_stmt.body, arg);
   PT_APPLY_WALK (parser, p->info.sp_stmt.else_body, arg);
+  PT_APPLY_WALK (parser, p->info.sp_stmt.sql, arg);
   return p;
 }
 
@@ -8451,6 +8452,20 @@ pt_print_sp_stmt (PARSER_CONTEXT * parser, PT_NODE * p)
 	  r1 = pt_print_bytes (parser, p->info.sp_stmt.expr);
 	  q = pt_append_nulstring (parser, q, " when ");
 	  q = pt_append_varchar (parser, q, r1);
+	}
+      q = pt_append_nulstring (parser, q, ";");
+      break;
+
+    case PT_SP_SQL:
+      /* the statement once the SQL parser has read it, and the text until then */
+      if (p->info.sp_stmt.sql != NULL)
+	{
+	  r1 = pt_print_bytes (parser, p->info.sp_stmt.sql);
+	  q = pt_append_varchar (parser, q, r1);
+	}
+      else
+	{
+	  q = pt_append_nulstring (parser, q, p->info.sp_stmt.sql_text);
 	}
       q = pt_append_nulstring (parser, q, ";");
       break;

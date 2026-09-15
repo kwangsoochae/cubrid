@@ -504,7 +504,8 @@ typedef enum
   PLCSQL_OP_JUMP,		/* EXIT, CONTINUE, RETURN */
   PLCSQL_OP_RAISE,		/* RAISE, RAISE_APPLICATION_ERROR */
   PLCSQL_OP_CURSOR,		/* OPEN, FETCH, CLOSE, OPEN FOR */
-  PLCSQL_OP_CALL		/* procedure call */
+  PLCSQL_OP_CALL,		/* procedure call */
+  PLCSQL_OP_SQL			/* one SQL statement, whose plan is this node's only child */
 } PLCSQL_OP;
 
 /* plcsql_proc_node.flags of a PLCSQL_OP_JUMP. A jump with no flag set is the RETURN that leaves
