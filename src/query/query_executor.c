@@ -29655,8 +29655,9 @@ qexec_plcsql_cursor (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xas
       if (cursor->is_open)
 	{
 	  /* the wording is the reference implementation's CURSOR_ALREADY_OPEN, which is what
-	   * this will raise once there are exceptions to raise */
-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_SP_EXECUTE_ERROR, 1, "\n  cursor already open");
+	   * this will raise once there are exceptions to raise. Plain text rather than the
+	   * sentence a caller sees, for the reason the INTO clause's two are. */
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_PT_ERROR, 1, "cursor already open");
 	  return ER_FAILED;
 	}
       /* the arguments are written into the parameters' slots first, because those slots are
@@ -29680,7 +29681,7 @@ qexec_plcsql_cursor (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xas
     case PLCSQL_CURSOR_FETCH:
       if (!cursor->is_open)
 	{
-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_SP_EXECUTE_ERROR, 1, "\n  invalid cursor");
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_PT_ERROR, 1, "invalid cursor");
 	  return ER_FAILED;
 	}
       return qexec_plcsql_fetch_row (thread_p, xasl, xasl_state, cursor);
@@ -29688,7 +29689,7 @@ qexec_plcsql_cursor (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xas
     case PLCSQL_CURSOR_CLOSE:
       if (!cursor->is_open)
 	{
-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_SP_EXECUTE_ERROR, 1, "\n  invalid cursor");
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_PT_ERROR, 1, "invalid cursor");
 	  return ER_FAILED;
 	}
       qexec_close_plcsql_cursor (thread_p, cursor);
