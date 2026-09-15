@@ -30682,6 +30682,7 @@ struct pt_plcsql_loop
   PT_PLCSQL_LOOP *outer;
 };
 
+static int pt_plcsql_read_one_sql (PARSER_CONTEXT * parser, PT_NODE * stmt);
 static int pt_plcsql_read_static_sql (PARSER_CONTEXT * parser, PT_NODE * list);
 static PT_NODE *pt_plcsql_type_expr (PARSER_CONTEXT * parser, PT_NODE * expr);
 static REGU_VARIABLE *pt_plcsql_expr_to_regu (PARSER_CONTEXT * parser, PT_NODE ** expr);
@@ -30702,6 +30703,80 @@ static XASL_NODE *pt_to_plcsql_sql (PARSER_CONTEXT * parser, PT_NODE * stmt);
 static int pt_plcsql_set_children (PARSER_CONTEXT * parser, XASL_NODE * xasl, XASL_NODE ** buf, int cnt);
 
 /*
+ * pt_plcsql_read_one_sql () - have the SQL parser read one statement a body wrote
+ *   return: NO_ERROR, or ER_FAILED with the reason on the parser
+ *   parser(in) :
+ *   stmt(in/out) : a PT_SP_SQL or a PT_SP_CURSOR; its sql_text is read into its sql
+ *
+ * note: the two are read the same way - a cursor's query is a statement written in the body
+ *       like any other, and what tells them apart is only when it runs.
+ */
+static int
+pt_plcsql_read_one_sql (PARSER_CONTEXT * parser, PT_NODE * stmt)
+{
+  PT_NODE **parsed;
+  char why[512];
+  int saved_static, saved_native;
+
+  saved_static = parser->flag.is_parsing_static_sql;
+  saved_native = parser->flag.is_plcsql_native_exec;
+  parser->flag.is_parsing_static_sql = 1;
+  parser->flag.is_plcsql_native_exec = 1;
+
+  parsed = parser_parse_string_with_escapes (parser, stmt->info.sp_stmt.sql_text, false);
+
+  if (parsed == NULL || *parsed == NULL || pt_has_error (parser))
+    {
+      /* the reason the SQL parser gives names a place in the statement, and the statement
+       * it names is not the one the user called - it is one written inside a routine - so
+       * the text has to come along for the reason to be of any use */
+      parser->flag.is_parsing_static_sql = saved_static;
+      parser->flag.is_plcsql_native_exec = saved_native;
+      snprintf (why, sizeof (why), "the SQL was not read - %s", stmt->info.sp_stmt.sql_text);
+      pt_reset_error (parser);
+      PT_ERRORc (parser, stmt, why);
+      return ER_FAILED;
+    }
+  if ((*parsed)->next != NULL)
+    {
+      /* the text was gathered up to one semicolon, so a second statement can only mean
+       * the gathering and the SQL parser disagree about where the first one ended */
+      parser->flag.is_parsing_static_sql = saved_static;
+      parser->flag.is_plcsql_native_exec = saved_native;
+      PT_INTERNAL_ERROR (parser, "static sql");
+      return ER_FAILED;
+    }
+
+  stmt->info.sp_stmt.sql = pt_compile (parser, *parsed);
+  if (stmt->info.sp_stmt.sql != NULL && !pt_has_error (parser)
+      && !PT_IS_DBLINK_DML_QUERY (stmt->info.sp_stmt.sql))
+    {
+      /* pt_compile () is the semantic check and nothing else. What db_compile_statement ()
+       * does next is what turns a view into the classes underneath it and marks the specs
+       * an UPDATE or a DELETE writes - a plan built without those marks holds no class at
+       * all, and the builder asserts on that rather than reporting it. Remote DML is the
+       * one statement left untranslated, for the reason given at that call. */
+      stmt->info.sp_stmt.sql = mq_translate (parser, stmt->info.sp_stmt.sql);
+      if (stmt->info.sp_stmt.sql != NULL && !pt_has_error (parser))
+	{
+	  (void) pt_class_pre_fetch (parser, stmt->info.sp_stmt.sql);
+	}
+    }
+  parser->flag.is_parsing_static_sql = saved_static;
+  parser->flag.is_plcsql_native_exec = saved_native;
+
+  if (stmt->info.sp_stmt.sql == NULL || pt_has_error (parser))
+    {
+      snprintf (why, sizeof (why), "the SQL was refused - %s", stmt->info.sp_stmt.sql_text);
+      pt_reset_error (parser);
+      PT_ERRORc (parser, stmt, why);
+      return ER_FAILED;
+    }
+
+  return NO_ERROR;
+}
+
+/*
  * pt_plcsql_read_static_sql () - have the SQL parser read the statements the body wrote
  *   return: NO_ERROR, or ER_FAILED with the reason on the parser
  *   parser(in) :
@@ -30717,9 +30792,7 @@ static int pt_plcsql_set_children (PARSER_CONTEXT * parser, XASL_NODE * xasl, XA
 static int
 pt_plcsql_read_static_sql (PARSER_CONTEXT * parser, PT_NODE * list)
 {
-  PT_NODE *stmt, **parsed;
-  char why[512];
-  int saved_static, saved_native;
+  PT_NODE *stmt;
 
   for (stmt = list; stmt != NULL; stmt = stmt->next)
     {
@@ -30731,65 +30804,25 @@ pt_plcsql_read_static_sql (PARSER_CONTEXT * parser, PT_NODE * list)
 	   * PL engine's compiler takes sets it on the session and leaves it there for the same
 	   * reason (db_open_buffer_local ()). The second flag says which of the two readers this
 	   * is, which is what keeps an INTO clause on the statement instead of stripping it. */
-	  saved_static = parser->flag.is_parsing_static_sql;
-	  saved_native = parser->flag.is_plcsql_native_exec;
-	  parser->flag.is_parsing_static_sql = 1;
-	  parser->flag.is_plcsql_native_exec = 1;
-
-	  parsed = parser_parse_string_with_escapes (parser, stmt->info.sp_stmt.sql_text, false);
-
-	  if (parsed == NULL || *parsed == NULL || pt_has_error (parser))
+	  if (pt_plcsql_read_one_sql (parser, stmt) != NO_ERROR)
 	    {
-	      /* the reason the SQL parser gives names a place in the statement, and the statement
-	       * it names is not the one the user called - it is one written inside a routine - so
-	       * the text has to come along for the reason to be of any use */
-	      parser->flag.is_parsing_static_sql = saved_static;
-	      parser->flag.is_plcsql_native_exec = saved_native;
-	      snprintf (why, sizeof (why), "the SQL was not read - %s", stmt->info.sp_stmt.sql_text);
-	      pt_reset_error (parser);
-	      PT_ERRORc (parser, stmt, why);
 	      return ER_FAILED;
 	    }
-	  if ((*parsed)->next != NULL)
+	  break;
+
+	case PT_SP_CURSOR:
+	  /* a cursor's query is read here too, so that what OPEN runs is a plan like any other */
+	  if (pt_plcsql_read_one_sql (parser, stmt) != NO_ERROR)
 	    {
-	      /* the text was gathered up to one semicolon, so a second statement can only mean
-	       * the gathering and the SQL parser disagree about where the first one ended */
-	      parser->flag.is_parsing_static_sql = saved_static;
-	      parser->flag.is_plcsql_native_exec = saved_native;
-	      PT_INTERNAL_ERROR (parser, "static sql");
 	      return ER_FAILED;
 	    }
-
-	  stmt->info.sp_stmt.sql = pt_compile (parser, *parsed);
-	  if (stmt->info.sp_stmt.sql != NULL && !pt_has_error (parser)
-	      && !PT_IS_DBLINK_DML_QUERY (stmt->info.sp_stmt.sql))
-	    {
-	      /* pt_compile () is the semantic check and nothing else. What db_compile_statement ()
-	       * does next is what turns a view into the classes underneath it and marks the specs
-	       * an UPDATE or a DELETE writes - a plan built without those marks holds no class at
-	       * all, and the builder asserts on that rather than reporting it. Remote DML is the
-	       * one statement left untranslated, for the reason given at that call. */
-	      stmt->info.sp_stmt.sql = mq_translate (parser, stmt->info.sp_stmt.sql);
-	      if (stmt->info.sp_stmt.sql != NULL && !pt_has_error (parser))
-		{
-		  (void) pt_class_pre_fetch (parser, stmt->info.sp_stmt.sql);
-		}
-	    }
-	  parser->flag.is_parsing_static_sql = saved_static;
-	  parser->flag.is_plcsql_native_exec = saved_native;
-
-	  if (stmt->info.sp_stmt.sql == NULL || pt_has_error (parser))
-	    {
-	      snprintf (why, sizeof (why), "the SQL was refused - %s", stmt->info.sp_stmt.sql_text);
-	      pt_reset_error (parser);
-	      PT_ERRORc (parser, stmt, why);
-	      return ER_FAILED;
-	    }
-
 	  break;
 
 	case PT_SP_BLOCK:
-	  if (pt_plcsql_read_static_sql (parser, stmt->info.sp_stmt.body) != NO_ERROR)
+	  /* a cursor is declared rather than written as a statement, so the declarations are
+	   * walked as well as the body */
+	  if (pt_plcsql_read_static_sql (parser, stmt->info.sp_stmt.decl_list) != NO_ERROR
+	      || pt_plcsql_read_static_sql (parser, stmt->info.sp_stmt.body) != NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }
@@ -32201,7 +32234,8 @@ pt_plcsql_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig
       memset (&xasl_Supp_info, 0, sizeof (xasl_Supp_info));
 
       pt_Plcsql_compiling[pt_Plcsql_compile_depth++] = sig->ext.sp.code_oid;
-      if (pt_plcsql_read_static_sql (body_parser, block->info.sp_stmt.body) == NO_ERROR)
+      if (pt_plcsql_read_static_sql (body_parser, block->info.sp_stmt.decl_list) == NO_ERROR
+	  && pt_plcsql_read_static_sql (body_parser, block->info.sp_stmt.body) == NO_ERROR)
 	{
 	  xasl = pt_to_plcsql_xasl (body_parser, block, params);
 	}
