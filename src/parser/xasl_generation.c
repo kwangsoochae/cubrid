@@ -31769,14 +31769,15 @@ pt_plcsql_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig
   XASL_SUPP_INFO saved_supp;
   int save;
 
-  if (!prm_get_bool_value (PRM_ID_PL_NATIVE_EXECUTION) || sig == NULL || sig->type != PL_TYPE_PLCSQL)
+  /* DBMS_OUTPUT and its like are catalogued as PL/CSQL (sp_catalog.cpp) but implemented in
+   * Java, so they carry no stored code. That is not a refusal: there is nothing here to build
+   * a plan from, and the call goes out to the PL engine through the TYPE_SP regu variable the
+   * way it always has. Refusing would carry the error out to the body that made the call,
+   * which is a different statement and one this can perfectly well run. */
+  if (!prm_get_bool_value (PRM_ID_PL_NATIVE_EXECUTION) || sig == NULL || sig->type != PL_TYPE_PLCSQL
+      || OID_ISNULL (&sig->ext.sp.code_oid))
     {
       return NULL;
-    }
-
-  if (OID_ISNULL (&sig->ext.sp.code_oid))
-    {
-      return pt_plcsql_refuse (parser, "the routine has no stored code");
     }
 
   if (pt_plcsql_is_compiling (&sig->ext.sp.code_oid))
