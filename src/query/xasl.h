@@ -520,6 +520,15 @@ typedef enum
 #define PLCSQL_CURSOR_DECLARE	0x00
 #define PLCSQL_CURSOR_OPEN	0x01
 #define PLCSQL_CURSOR_CLOSE	0x02
+#define PLCSQL_CURSOR_FETCH	0x03
+
+/* the slots a cursor owns, counted from plcsql_proc_node.cursor_base_slot. The columns of its
+ * query follow them, which is why the attributes are numbered first and their count is fixed. */
+#define PLCSQL_CURSOR_ATTR_FOUND	0
+#define PLCSQL_CURSOR_ATTR_NOTFOUND	1
+#define PLCSQL_CURSOR_ATTR_ISOPEN	2
+#define PLCSQL_CURSOR_ATTR_ROWCOUNT	3
+#define PLCSQL_CURSOR_ATTR_CNT		4
 
 /* plcsql_proc_node.flags of a PLCSQL_OP_LOOP. These mirror the parse tree's PT_SP_LOOP_*, which the
  * XASL side cannot include; pt_to_plcsql_stmt () maps one onto the other rather than casting. */
@@ -549,6 +558,10 @@ struct plcsql_proc_node
   int cursors_cnt;		/* BLOCK: how many cursors the frame holds, numbered flat over the
 				 * procedure the way the slots are, so again only the outermost
 				 * block carries the count */
+  int cursor_base_slot;		/* CURSOR: the first slot the cursor owns. It owns four for its
+				 * attributes and then one per column of its query, so reading an
+				 * attribute and reading a fetched column are both reading a local */
+  int cursor_cols_cnt;		/* CURSOR: how many columns its query gives back */
   /* An SQL statement inside a procedure is a plain XASL node, not a kind of its own, and
    * hangs here as a child. */
   XASL_NODE **children;

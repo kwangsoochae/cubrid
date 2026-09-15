@@ -30149,6 +30149,7 @@ static int pt_plcsql_bind_name (PARSER_CONTEXT * parser, PT_NODE * name, PT_PLCS
 static PT_NODE *pt_plcsql_bind_name_pre (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int *continue_walk);
 static int pt_plcsql_resolve_expr (PARSER_CONTEXT * parser, PT_NODE * expr, PT_PLCSQL_SCOPE * scope);
 static int pt_plcsql_bind_host_vars (PARSER_CONTEXT * parser, PT_NODE * sql, PT_PLCSQL_SCOPE * scope);
+static int pt_plcsql_cursor_attr_slot (PT_NODE * name);
 static int pt_plcsql_bind_cursor (PARSER_CONTEXT * parser, PT_NODE * stmt, PT_PLCSQL_SCOPE * scope);
 static int pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_SCOPE * scope,
 					int *next_slot);
@@ -30202,6 +30203,30 @@ pt_plcsql_find_decl (PT_PLCSQL_SCOPE * scope, const char *name)
 }
 
 /*
+ * pt_plcsql_cursor_attr_slot () - which of the cursor's attribute slots a name asks for
+ *   return: 0 .. PLCSQL_CURSOR_ATTR_CNT - 1
+ *   name(in) : a PT_NAME written with a per cent attribute
+ *
+ * note: the parse tree says which attribute was written and the plan says which slot holds it;
+ *       they are numbered apart so that neither has to know the other's order.
+ */
+static int
+pt_plcsql_cursor_attr_slot (PT_NODE * name)
+{
+  switch (name->info.name.plcsql_cursor_attr)
+    {
+    case PT_SP_CURSOR_ATTR_FOUND:
+      return PLCSQL_CURSOR_ATTR_FOUND;
+    case PT_SP_CURSOR_ATTR_ISOPEN:
+      return PLCSQL_CURSOR_ATTR_ISOPEN;
+    case PT_SP_CURSOR_ATTR_ROWCOUNT:
+      return PLCSQL_CURSOR_ATTR_ROWCOUNT;
+    default:
+      return PLCSQL_CURSOR_ATTR_NOTFOUND;
+    }
+}
+
+/*
  * pt_plcsql_bind_cursor () - match the name an OPEN or a CLOSE writes to its declaration
  *   return: NO_ERROR, or ER_FAILED with the error left on the parser
  *   parser(in) :
@@ -30224,6 +30249,18 @@ pt_plcsql_bind_cursor (PARSER_CONTEXT * parser, PT_NODE * stmt, PT_PLCSQL_SCOPE 
     }
 
   name->info.name.plcsql_slot = decl->info.sp_stmt.name->info.name.plcsql_slot;
+  stmt->info.sp_stmt.flags = decl->info.sp_stmt.flags;
+
+  if (stmt->info.sp_stmt.op == PT_SP_FETCH)
+    {
+      /* the columns travel to the FETCH the way the parameters travel to an OPEN, so that
+       * lowering can pair each target with the slot the row lands in */
+      stmt->info.sp_stmt.params = parser_copy_tree_list (parser, decl->info.sp_stmt.decl_list);
+      if (decl->info.sp_stmt.decl_list != NULL && stmt->info.sp_stmt.params == NULL)
+	{
+	  return ER_FAILED;
+	}
+    }
 
   if (stmt->info.sp_stmt.op == PT_SP_OPEN)
     {
@@ -30258,6 +30295,25 @@ pt_plcsql_bind_name (PARSER_CONTEXT * parser, PT_NODE * name, PT_PLCSQL_SCOPE * 
   PT_NODE *decl;
 
   decl = pt_plcsql_find_decl (scope, name->info.name.original);
+
+  if (name->info.name.plcsql_cursor_attr != PT_SP_CURSOR_ATTR_NONE)
+    {
+      if (decl == NULL || decl->node_type != PT_SP_STMT || decl->info.sp_stmt.op != PT_SP_CURSOR)
+	{
+	  PT_ERRORmf (parser, name, MSGCAT_SET_PARSER_SEMANTIC, MSGCAT_SEMANTIC_IS_NOT_DEFINED,
+		      name->info.name.original);
+	  return ER_FAILED;
+	}
+
+      /* the attributes are the first slots the cursor owns, in the order the flags name them */
+      name->info.name.meta_class = PT_PLCSQL_LOCAL;
+      name->info.name.plcsql_slot = decl->info.sp_stmt.flags + pt_plcsql_cursor_attr_slot (name);
+      name->type_enum =
+	(name->info.name.plcsql_cursor_attr == PT_SP_CURSOR_ATTR_ROWCOUNT) ? PT_TYPE_INTEGER : PT_TYPE_LOGICAL;
+      name->data_type = NULL;
+      return NO_ERROR;
+    }
+
   if (decl == NULL)
     {
       PT_ERRORmf (parser, name, MSGCAT_SET_PARSER_SEMANTIC, MSGCAT_SEMANTIC_IS_NOT_DEFINED, name->info.name.original);
@@ -30511,8 +30567,10 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
 
 	case PT_SP_IF:
 	  if (pt_plcsql_resolve_expr (parser, stmt->info.sp_stmt.expr, scope) != NO_ERROR
-	      || pt_plcsql_resolve_stmt_list (parser, stmt->info.sp_stmt.body, scope, next_slot, next_cursor) != NO_ERROR
-	      || pt_plcsql_resolve_stmt_list (parser, stmt->info.sp_stmt.else_body, scope, next_slot, next_cursor) != NO_ERROR)
+	      || pt_plcsql_resolve_stmt_list (parser, stmt->info.sp_stmt.body, scope, next_slot,
+					      next_cursor) != NO_ERROR
+	      || pt_plcsql_resolve_stmt_list (parser, stmt->info.sp_stmt.else_body, scope, next_slot,
+					      next_cursor) != NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }
@@ -30540,7 +30598,8 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
 	      loop_scope.names->type_enum = PT_TYPE_INTEGER;
 	    }
 
-	  if (pt_plcsql_resolve_stmt_list (parser, stmt->info.sp_stmt.body, &loop_scope, next_slot, next_cursor) != NO_ERROR)
+	  if (pt_plcsql_resolve_stmt_list (parser, stmt->info.sp_stmt.body, &loop_scope, next_slot, next_cursor) !=
+	      NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }
@@ -30589,6 +30648,16 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
 
 	case PT_SP_CLOSE:
 	  if (pt_plcsql_bind_cursor (parser, stmt, scope) != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
+	  break;
+
+	case PT_SP_FETCH:
+	  /* the targets are names the statement writes, and they are bound the way a name being
+	   * read is - what tells them apart is only which side of the assignment they sit on */
+	  if (pt_plcsql_bind_cursor (parser, stmt, scope) != NO_ERROR
+	      || pt_plcsql_resolve_expr (parser, stmt->info.sp_stmt.expr, scope) != NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }
@@ -30653,7 +30722,7 @@ pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCO
       if (decl->info.sp_stmt.op == PT_SP_CURSOR)
 	{
 	  PT_PLCSQL_SCOPE query_scope;
-	  PT_NODE *param;
+	  PT_NODE *param, *column, *last;
 
 	  /* a cursor is declared where a variable is but holds no value, so it is numbered in
 	   * its own sequence and takes no slot. It does come into scope here: OPEN and CLOSE
@@ -30679,6 +30748,34 @@ pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCO
 	  if (pt_plcsql_bind_host_vars (parser, decl->info.sp_stmt.sql, &query_scope) != NO_ERROR)
 	    {
 	      return ER_FAILED;
+	    }
+
+	  /* the cursor owns a run of slots: its four attributes, then one per column its query
+	   * gives back. Reading c%notfound and reading a fetched column are then both reading a
+	   * local, which is machinery that already exists. The hidden columns get a slot too,
+	   * because what the list file holds is what the row is read out of. */
+	  decl->info.sp_stmt.flags = *next_slot;
+	  *next_slot += PLCSQL_CURSOR_ATTR_CNT;
+
+	  column = pt_get_select_list (parser, decl->info.sp_stmt.sql);
+	  last = NULL;
+	  for (; column != NULL; column = column->next)
+	    {
+	      PT_NODE *slot_name = pt_name (parser, "");
+
+	      if (slot_name == NULL)
+		{
+		  return ER_FAILED;
+		}
+	      slot_name->info.name.meta_class = PT_PLCSQL_LOCAL;
+	      slot_name->info.name.plcsql_slot = (*next_slot)++;
+	      slot_name->type_enum = column->type_enum;
+	      slot_name->data_type = parser_copy_tree (parser, column->data_type);
+	      slot_name->flag.is_hidden_column = column->flag.is_hidden_column;
+
+	      decl->info.sp_stmt.decl_list = (last == NULL)
+		? slot_name : parser_append_node (slot_name, decl->info.sp_stmt.decl_list);
+	      last = slot_name;
 	    }
 
 	  scope.visible = decl;
@@ -30789,6 +30886,8 @@ static XASL_NODE *pt_to_plcsql_block (PARSER_CONTEXT * parser, PT_NODE * block, 
 				      TP_DOMAIN * ret_domain, PT_PLCSQL_LOOP * loops);
 static XASL_NODE *pt_to_plcsql_stmt_list_block (PARSER_CONTEXT * parser, PT_NODE * list, TP_DOMAIN * ret_domain,
 						PT_PLCSQL_LOOP * loops);
+static int pt_plcsql_cursor_op_flag (PT_SP_STMT_OP op);
+static XASL_NODE *pt_to_plcsql_fetch (PARSER_CONTEXT * parser, XASL_NODE * xasl, PT_NODE * stmt);
 static XASL_NODE *pt_to_plcsql_cursor_decl (PARSER_CONTEXT * parser, PT_NODE * decl);
 static XASL_NODE *pt_plcsql_update_to_xasl (PARSER_CONTEXT * parser, PT_NODE * sql);
 static XASL_NODE *pt_plcsql_delete_to_xasl (PARSER_CONTEXT * parser, PT_NODE * sql);
@@ -30842,8 +30941,7 @@ pt_plcsql_read_one_sql (PARSER_CONTEXT * parser, PT_NODE * stmt)
     }
 
   stmt->info.sp_stmt.sql = pt_compile (parser, *parsed);
-  if (stmt->info.sp_stmt.sql != NULL && !pt_has_error (parser)
-      && !PT_IS_DBLINK_DML_QUERY (stmt->info.sp_stmt.sql))
+  if (stmt->info.sp_stmt.sql != NULL && !pt_has_error (parser) && !PT_IS_DBLINK_DML_QUERY (stmt->info.sp_stmt.sql))
     {
       /* pt_compile () is the semantic check and nothing else. What db_compile_statement ()
        * does next is what turns a view into the classes underneath it and marks the specs
@@ -31615,6 +31713,95 @@ pt_plcsql_delete_to_xasl (PARSER_CONTEXT * parser, PT_NODE * sql)
 }
 
 /*
+ * pt_plcsql_cursor_op_flag () - which form of cursor node a statement becomes
+ *   return: PLCSQL_CURSOR_*
+ *   op(in) : PT_SP_OPEN, PT_SP_CLOSE or PT_SP_FETCH
+ */
+static int
+pt_plcsql_cursor_op_flag (PT_SP_STMT_OP op)
+{
+  switch (op)
+    {
+    case PT_SP_OPEN:
+      return PLCSQL_CURSOR_OPEN;
+    case PT_SP_FETCH:
+      return PLCSQL_CURSOR_FETCH;
+    default:
+      return PLCSQL_CURSOR_CLOSE;
+    }
+}
+
+/*
+ * pt_to_plcsql_fetch () - the assignments a FETCH's INTO clause asks for
+ *   return: the node it was given, NULL on error
+ *   parser(in) :
+ *   xasl(in/out) : the PLCSQL_OP_CURSOR node being built
+ *   stmt(in)   : the PT_SP_FETCH, its targets in expr and its cursor's columns in params
+ *
+ * note: the row lands in the slots the cursor owns and the targets are assigned from there,
+ *       which is an ordinary assignment and casts the way the declaration asks. Only a column
+ *       the statement can see is paired: a hidden one is in the row because the list file
+ *       holds it, and no target answers to it.
+ */
+static XASL_NODE *
+pt_to_plcsql_fetch (PARSER_CONTEXT * parser, XASL_NODE * xasl, PT_NODE * stmt)
+{
+  XASL_NODE **buf;
+  PT_NODE *target, *column;
+  int cnt = pt_length_of_list (stmt->info.sp_stmt.expr);
+  int i = 0;
+
+  if (cnt == 0)
+    {
+      return xasl;
+    }
+
+  regu_array_alloc (&buf, (size_t) cnt);
+  if (buf == NULL)
+    {
+      return NULL;
+    }
+
+  target = stmt->info.sp_stmt.expr;
+  column = stmt->info.sp_stmt.params;
+  while (target != NULL && column != NULL)
+    {
+      PT_NODE *ref;
+
+      if (column->flag.is_hidden_column)
+	{
+	  column = column->next;
+	  continue;
+	}
+
+      ref = parser_copy_tree (parser, column);
+      if (ref == NULL)
+	{
+	  return NULL;
+	}
+      ref->next = NULL;
+
+      buf[i] = pt_to_plcsql_assign (parser, target->info.name.plcsql_slot, &ref, target, true);
+      if (buf[i] == NULL)
+	{
+	  return NULL;
+	}
+      i++;
+
+      target = target->next;
+      column = column->next;
+    }
+
+  if (target != NULL)
+    {
+      /* more targets than the row has columns the statement can see */
+      return pt_plcsql_refuse (parser, "the FETCH names more targets than the cursor's query has columns");
+    }
+
+  return pt_plcsql_set_children (parser, xasl, buf, i) == NO_ERROR ? xasl : NULL;
+}
+
+/*
  * pt_to_plcsql_cursor_decl () - the node a cursor's declaration becomes
  *   return: the XASL node, NULL on error or refusal
  *   parser(in) :
@@ -31636,6 +31823,8 @@ pt_to_plcsql_cursor_decl (PARSER_CONTEXT * parser, PT_NODE * decl)
     }
   xasl->proc.plcsql.flags = PLCSQL_CURSOR_DECLARE;
   xasl->proc.plcsql.target_slot = decl->info.sp_stmt.name->info.name.plcsql_slot;
+  xasl->proc.plcsql.cursor_base_slot = decl->info.sp_stmt.flags;
+  xasl->proc.plcsql.cursor_cols_cnt = pt_length_of_list (decl->info.sp_stmt.decl_list);
 
   regu_array_alloc (&buf, 1);
   if (buf == NULL)
@@ -31986,14 +32175,23 @@ pt_to_plcsql_stmt_inner (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * re
 
     case PT_SP_OPEN:
     case PT_SP_CLOSE:
+    case PT_SP_FETCH:
       xasl = pt_plcsql_new_node (PLCSQL_OP_CURSOR);
       if (xasl == NULL)
 	{
 	  return NULL;
 	}
-      xasl->proc.plcsql.flags =
-	(stmt->info.sp_stmt.op == PT_SP_OPEN) ? PLCSQL_CURSOR_OPEN : PLCSQL_CURSOR_CLOSE;
+      xasl->proc.plcsql.flags = pt_plcsql_cursor_op_flag (stmt->info.sp_stmt.op);
       xasl->proc.plcsql.target_slot = stmt->info.sp_stmt.name->info.name.plcsql_slot;
+      xasl->proc.plcsql.cursor_base_slot = stmt->info.sp_stmt.flags;
+
+      if (stmt->info.sp_stmt.op == PT_SP_FETCH)
+	{
+	  /* each target is assigned the column slot the row lands in, so the cast the
+	   * declaration asks for is the one an assignment already makes. A hidden column has
+	   * no target answering to it - it is in the row because the list file holds it. */
+	  return pt_to_plcsql_fetch (parser, xasl, stmt);
+	}
 
       /* an argument is written into the slot its parameter was given, which is the slot the
        * query reads, so opening is assigning and then running */

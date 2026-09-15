@@ -80,6 +80,7 @@ static SP_KEYWORD sp_Keywords[] = {
   {"in", IN_, PT_TYPE_NONE},
   {"int", TYPE_KEYWORD, PT_TYPE_INTEGER},
   {"integer", TYPE_KEYWORD, PT_TYPE_INTEGER},
+  {"into", INTO_, PT_TYPE_NONE},
   {"is", IS_, PT_TYPE_NONE},
   {"loop", LOOP_, PT_TYPE_NONE},
   {"mod", MOD_, PT_TYPE_NONE},
