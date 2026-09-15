@@ -59,6 +59,7 @@ static PT_NODE *sp_make_stmt (PT_SP_STMT_OP op, int line, int column);
 static void sp_unbound_char (PT_NODE * dt);
 static PT_NODE *sp_make_loop (int form, PT_NODE * label, PT_NODE * name, PT_NODE * lower, PT_NODE * upper,
 			      PT_NODE * body, int line, int column);
+static PT_NODE *sp_make_cursor_op (PT_SP_STMT_OP op, const char *name, PT_NODE * args, int line, int column);
 static PT_NODE *sp_make_jump (PT_SP_STMT_OP op, PT_NODE * label, PT_NODE * cond, int line, int column);
 static PT_NODE *sp_make_integer_literal (const char *text);
 static PT_NODE *sp_make_real_literal (const char *text);
@@ -95,8 +96,9 @@ static PT_NODE *sp_make_data_type (PT_TYPE_ENUM type, int precision, int scale);
 %type <node> block decl_list decl_list_opt decl stmt_list stmt if_stmt else_part_opt loop_stmt
 %type <node> assign_stmt block_stmt null_stmt return_stmt return_opt expr expr_list_opt type_spec
 %type <node> call_stmt sp_name arg_list_opt arg_list
-%type <node> jump_stmt label_decl_opt label_opt when_opt
-%type <node> raise_stmt handler_part_opt handler_list handler handler_name_list sql_stmt
+%type <node> jump_stmt label_decl_opt label_opt when_opt sql_stmt
+%type <node> raise_stmt handler_part_opt handler_list handler handler_name_list
+%type <node> cursor_decl cursor_params_opt open_stmt close_stmt
 %type <node> routine param_list_opt param_list param
 %type <number> constant_opt reverse_opt
 
@@ -348,7 +350,8 @@ decl_list
 
 /* v bigint;   c constant int := 7;   e exception; */
 decl
-	: IDENT EXCEPTION_ ';'
+	: cursor_decl
+	| IDENT EXCEPTION_ ';'
 		{
 		  PT_NODE *node = sp_make_stmt (PT_SP_DECL, @$.first_line, @$.first_column);
 
@@ -372,6 +375,54 @@ decl
 		      node->info.sp_stmt.expr = $4;
 		    }
 		  $$ = node;
+		}
+	;
+
+/* A cursor is declared where a variable is, but it is not one: it holds no value and takes
+ * no frame slot. Its query is gathered the way a statement's is - the lexer starts on SELECT
+ * and reads to the semicolon - so the text arrives here already whole, semicolon included,
+ * and the rule wants no ';' of its own. */
+cursor_decl
+	: CURSOR_ IDENT cursor_params_opt IS_ SQL_TEXT
+		{
+		  PT_NODE *node = sp_make_stmt (PT_SP_CURSOR, @$.first_line, @$.first_column);
+
+		  if (node != NULL)
+		    {
+		      node->info.sp_stmt.name = pt_name (sp_Parser, $2);
+		      node->info.sp_stmt.params = $3;
+		      node->info.sp_stmt.sql_text = $5;
+		    }
+		  $$ = node;
+		}
+	;
+
+cursor_params_opt
+	: /* empty */
+		{
+		  $$ = NULL;
+		}
+	| '(' param_list ')'
+		{
+		  $$ = $2;
+		}
+	;
+
+open_stmt
+	: OPEN_ IDENT ';'
+		{
+		  $$ = sp_make_cursor_op (PT_SP_OPEN, $2, NULL, @$.first_line, @$.first_column);
+		}
+	| OPEN_ IDENT '(' arg_list_opt ')' ';'
+		{
+		  $$ = sp_make_cursor_op (PT_SP_OPEN, $2, $4, @$.first_line, @$.first_column);
+		}
+	;
+
+close_stmt
+	: CLOSE_ IDENT ';'
+		{
+		  $$ = sp_make_cursor_op (PT_SP_CLOSE, $2, NULL, @$.first_line, @$.first_column);
 		}
 	;
 
@@ -433,6 +484,8 @@ stmt
 	| return_stmt
 	| jump_stmt
 	| sql_stmt
+	| open_stmt
+	| close_stmt
 	| null_stmt
 	;
 
@@ -973,6 +1026,28 @@ sp_make_loop (int form, PT_NODE * label, PT_NODE * name, PT_NODE * lower, PT_NOD
       node->info.sp_stmt.expr = lower;
       node->info.sp_stmt.expr2 = upper;
       node->info.sp_stmt.body = body;
+    }
+
+  return node;
+}
+
+/*
+ * sp_make_cursor_op () - one OPEN or CLOSE node
+ *   return: the node, NULL when the parser could not allocate one
+ *   op(in)   : PT_SP_OPEN or PT_SP_CLOSE
+ *   name(in) : the cursor's name as written
+ *   args(in) : the arguments an OPEN passes, NULL for CLOSE and for an OPEN written without any
+ *   line(in), column(in) : where the statement was written
+ */
+static PT_NODE *
+sp_make_cursor_op (PT_SP_STMT_OP op, const char *name, PT_NODE * args, int line, int column)
+{
+  PT_NODE *node = sp_make_stmt (op, line, column);
+
+  if (node != NULL)
+    {
+      node->info.sp_stmt.name = pt_name (sp_Parser, name);
+      node->info.sp_stmt.expr = args;
     }
 
   return node;

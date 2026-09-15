@@ -3408,6 +3408,9 @@ typedef enum
   PT_SP_EXIT,			/* EXIT, which leaves a loop */
   PT_SP_CONTINUE,		/* CONTINUE, which starts a loop's next turn */
   PT_SP_SQL,			/* one SQL statement written in the body */
+  PT_SP_CURSOR,			/* a cursor declaration: its name, its parameters and its query */
+  PT_SP_OPEN,			/* OPEN, with the arguments the declaration's parameters take */
+  PT_SP_CLOSE,			/* CLOSE */
   PT_SP_NULL_STMT,		/* the NULL statement */
   PT_SP_RAISE,			/* RAISE, with or without a name */
   PT_SP_HANDLER			/* one WHEN of an EXCEPTION part */
@@ -3440,15 +3443,16 @@ struct pt_sp_stmt_info
 				 * of a stored procedure call can be reused whole */
   PT_NODE *expr2;		/* upper bound of a FOR range */
   PT_NODE *params;		/* BLOCK: the routine's parameters, when the header was parsed.
-				 * Only the outermost block of a routine has any */
+				 * Only the outermost block of a routine has any.
+				 * CURSOR: the parameters its query is written against */
   PT_NODE *ret_type;		/* BLOCK: the PT_DATA_TYPE a function's header declares it gives back,
 				 * NULL for a procedure. A RETURN casts to it */
   PT_NODE *decl_list;		/* BLOCK: the declarations */
   PT_NODE *body;		/* BLOCK, LOOP: statements. IF: the then branch */
   PT_NODE *else_body;		/* IF: the else branch. BLOCK: the EXCEPTION part, a list of
 				 * HANDLER nodes in the order they were written */
-  PT_NODE *sql;			/* SQL: the statement the SQL parser read out of sql_text */
-  const char *sql_text;		/* SQL: the statement as written, which is what the SQL parser
+  PT_NODE *sql;			/* SQL, CURSOR: the statement the SQL parser read out of sql_text */
+  const char *sql_text;		/* SQL, CURSOR: the statement as written, which is what the SQL parser
 				 * is given - a hint lives in a comment, so nothing is normalised */
 };
 
