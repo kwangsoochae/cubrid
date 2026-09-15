@@ -29463,6 +29463,11 @@ qexec_plcsql_sql (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_s
  *       (JavaCodeWriter's tmplHandleIntoClause) and is not what a one-row query gives, since
  *       that refuses before reading anything.
  *
+ *       The two conditions are raised as plain text rather than as ER_SP_EXECUTE_ERROR. What
+ *       puts the place on a failed statement, and what turns it into the sentence a caller
+ *       sees, each wrap the message they find; an inner error that is already that sentence
+ *       gets wrapped again, and the reader is told three times what went wrong.
+ *
  *       The list file is destroyed on the way out. A statement inside a loop is run again on
  *       the next turn, and qexec_clear_plcsql_turn () leaves a prepared plan alone.
  */
@@ -29499,7 +29504,7 @@ qexec_plcsql_read_into (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * 
 
   if (qfile_scan_list_next (thread_p, &scan_id, &tuple_record, PEEK) != S_SUCCESS)
     {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_SP_EXECUTE_ERROR, 1, "\n  no data found");
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_PT_ERROR, 1, "no data found");
       error = ER_FAILED;
       goto end;
     }
@@ -29549,7 +29554,7 @@ qexec_plcsql_read_into (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * 
 
   if (qfile_scan_list_next (thread_p, &scan_id, &tuple_record, PEEK) == S_SUCCESS)
     {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_SP_EXECUTE_ERROR, 1, "\n  too many rows");
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_PT_ERROR, 1, "too many rows");
       error = ER_FAILED;
     }
 
