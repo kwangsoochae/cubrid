@@ -11902,7 +11902,6 @@ static int insert_object_attr (const PARSER_CONTEXT * parser, DB_OTMPL * otempla
 			       DB_ATTDESC * attr_desc);
 static int check_for_cons (PARSER_CONTEXT * parser, int *has_unique, PT_NODE ** non_null_attrs,
 			   const PT_NODE * attr_list, DB_OBJECT * class_obj);
-static int is_server_insert_allowed (PARSER_CONTEXT * parser, PT_NODE * statement);
 static int do_insert_at_server (PARSER_CONTEXT * parser, PT_NODE * statement);
 static int insert_subquery_results (PARSER_CONTEXT * parser, PT_NODE * statement, PT_NODE * values_list,
 				    PT_NODE * class_, const char **savepoint_name);
@@ -12364,11 +12363,15 @@ check_for_cons (PARSER_CONTEXT * parser, int *has_unique, PT_NODE ** non_null_at
  * is_server_insert_allowed () - Checks to see if a server-side insert is
  *                               allowed
  *
+ * note: it also collects what pt_to_insert_xasl () is handed - the NOT NULL attributes and
+ *       whether the class has a unique constraint - so a caller building a plan of its own
+ *       has to run it first, the way do_update_decide_server_side () is run for an UPDATE.
+ *
  * return	  : Error code.
  * parser (in)	  : Parser context.
  * statement (in) : Parse tree node for insert statement.
  */
-static int
+int
 is_server_insert_allowed (PARSER_CONTEXT * parser, PT_NODE * statement)
 {
   int error = NO_ERROR;

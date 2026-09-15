@@ -132,6 +132,7 @@ extern int do_create_user (const PARSER_CONTEXT * parser, const PT_NODE * statem
 extern int do_drop_user (const PARSER_CONTEXT * parser, const PT_NODE * statement);
 extern int do_alter_user (const PARSER_CONTEXT * parser, const PT_NODE * statement);
 
+extern int is_server_insert_allowed (PARSER_CONTEXT * parser, PT_NODE * statement);
 extern int do_insert (PARSER_CONTEXT * parser, PT_NODE * statement);
 extern int do_prepare_insert (PARSER_CONTEXT * parser, PT_NODE * statement);
 extern int do_execute_insert (PARSER_CONTEXT * parser, PT_NODE * statement);

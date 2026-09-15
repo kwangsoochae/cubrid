@@ -31351,11 +31351,9 @@ pt_to_plcsql_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params, 
  *   parser(in) :
  *   sql(in/out) : a PT_UPDATE. The flags do_update_decide_server_side () settles are left on it
  *
- * note: the builder cannot be called cold. do_update_decide_server_side () asks the classes
- *       whether a trigger watches them and whether any is a view, and that answer is
- *       server_update - whether the server may do the work at all. It also collects the NOT
- *       NULL attributes the builder is handed. A plan built without it holds no class, and the
- *       executor asserts on that rather than reporting it.
+ * note: do_update_decide_server_side () is this statement's share of the step every writing
+ *       statement has - see pt_plcsql_sql_to_xasl (). What it settles is server_update, and
+ *       what it collects is the NOT NULL attributes the builder is handed.
  *
  *       server_update false is the widest of the refusals below. It means the rows are changed
  *       one object at a time through the client's workspace, which is not work the server can
@@ -31468,6 +31466,12 @@ pt_plcsql_delete_to_xasl (PARSER_CONTEXT * parser, PT_NODE * sql)
  *       asking the server whether it already holds a plan, packing the answer into a stream.
  *       None of that applies here: this plan is not looked up by text and is packed with the
  *       procedure that holds it, so only the plan itself is wanted.
+ *
+ *       What does apply is the step each writing statement has before its builder. None of the
+ *       three can be built cold: the step asks the classes what they are, settles whether the
+ *       server may do the work at all, and collects the constraints the builder is handed. Skip
+ *       it and the plan is wrong quietly - an empty NOT NULL list writes a row that breaks the
+ *       constraint, and a plan with no class in it fails an assertion rather than reporting.
  */
 static XASL_NODE *
 pt_plcsql_sql_to_xasl (PARSER_CONTEXT * parser, PT_NODE * sql)
@@ -31475,6 +31479,14 @@ pt_plcsql_sql_to_xasl (PARSER_CONTEXT * parser, PT_NODE * sql)
   switch (sql->node_type)
     {
     case PT_INSERT:
+      if (is_server_insert_allowed (parser, sql) != NO_ERROR)
+	{
+	  return NULL;
+	}
+      if (sql->info.insert.server_allowed != SERVER_INSERT_IS_ALLOWED)
+	{
+	  return pt_plcsql_refuse (parser, "the INSERT is one the client has to do a row at a time");
+	}
       return pt_to_insert_xasl (parser, sql);
 
     case PT_SELECT:
