@@ -8451,6 +8451,26 @@ pt_print_sp_stmt (PARSER_CONTEXT * parser, PT_NODE * p)
       q = pt_append_nulstring (parser, q, "end loop;");
       break;
 
+    case PT_SP_CALL:
+      /* the call is kept as the PT_METHOD_CALL the SQL side builds, and printing that gives
+       * back what was written - a name and its arguments */
+      r1 = pt_print_bytes (parser, p->info.sp_stmt.expr);
+      q = pt_append_varchar (parser, q, r1);
+      q = pt_append_nulstring (parser, q, ";");
+      break;
+
+    case PT_SP_RETURN:
+      q = pt_append_nulstring (parser, q, "return");
+      if (p->info.sp_stmt.expr != NULL)
+	{
+	  /* a procedure's RETURN carries no value */
+	  r1 = pt_print_bytes (parser, p->info.sp_stmt.expr);
+	  q = pt_append_nulstring (parser, q, " ");
+	  q = pt_append_varchar (parser, q, r1);
+	}
+      q = pt_append_nulstring (parser, q, ";");
+      break;
+
     case PT_SP_EXIT:
     case PT_SP_CONTINUE:
       q = pt_append_nulstring (parser, q, p->info.sp_stmt.op == PT_SP_EXIT ? "exit" : "continue");
