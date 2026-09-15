@@ -29604,6 +29604,7 @@ qexec_call_plcsql (THREAD_ENTRY * thread_p, XASL_NODE * xasl, DB_VALUE * args, i
   struct tm *c_time_struct, tm_val;
   time_t sec;
   int millisec;
+  QUERY_ID query_id;
   int error = NO_ERROR, i;
 
   *placed_msg = NULL;
@@ -29617,11 +29618,24 @@ qexec_call_plcsql (THREAD_ENTRY * thread_p, XASL_NODE * xasl, DB_VALUE * args, i
   memset (&xasl_state, 0, sizeof (xasl_state));
   xasl_state.qp_xasl_line = 0;
 
+  /* A query the body writes makes a temp file, and a temp file is chained on a query entry.
+   * The call came in on its own request rather than as part of a query, so there is no entry
+   * to borrow - one is opened for the length of the call. A procedure that writes no query
+   * never asks for a temp file and would do without this, but the entry is cheap and having
+   * it in one place keeps the body's statements alike. */
+  query_id = qmgr_begin_server_query (thread_p);
+  if (query_id == NULL_QUERY_ID)
+    {
+      return ER_FAILED;
+    }
+  xasl_state.query_id = query_id;
+
   util_get_second_and_ms_since_epoch (&sec, &millisec);
   c_time_struct = localtime_r (&sec, &tm_val);
   if (c_time_struct == NULL)
     {
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DATE_CONVERSION, 0);
+      (void) qmgr_end_server_query (thread_p, query_id);
       return ER_FAILED;
     }
   xasl_state.vd.sys_epochtime = (DB_TIMESTAMP) sec;
@@ -29629,6 +29643,7 @@ qexec_call_plcsql (THREAD_ENTRY * thread_p, XASL_NODE * xasl, DB_VALUE * args, i
 			  c_time_struct->tm_year + 1900, c_time_struct->tm_hour, c_time_struct->tm_min,
 			  c_time_struct->tm_sec, millisec) != NO_ERROR)
     {
+      (void) qmgr_end_server_query (thread_p, query_id);
       return ER_FAILED;
     }
 
@@ -29640,6 +29655,7 @@ qexec_call_plcsql (THREAD_ENTRY * thread_p, XASL_NODE * xasl, DB_VALUE * args, i
   frame = qexec_alloc_plcsql_frame (thread_p, xasl->proc.plcsql.locals_cnt, NULL);
   if (frame == NULL)
     {
+      (void) qmgr_end_server_query (thread_p, query_id);
       return ER_FAILED;
     }
 
@@ -29681,6 +29697,9 @@ qexec_call_plcsql (THREAD_ENTRY * thread_p, XASL_NODE * xasl, DB_VALUE * args, i
    * it the pl_signature of a call inside the body outlives the request and the resource tracker
    * stops the server at its end. */
   (void) qexec_clear_xasl (thread_p, xasl, true, false);
+
+  /* after the clear, which is what destroys the list files the entry holds */
+  (void) qmgr_end_server_query (thread_p, query_id);
 
   return error;
 }
