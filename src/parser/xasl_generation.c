@@ -30677,6 +30677,7 @@ static XASL_NODE *pt_to_plcsql_block (PARSER_CONTEXT * parser, PT_NODE * block, 
 static XASL_NODE *pt_to_plcsql_stmt_list_block (PARSER_CONTEXT * parser, PT_NODE * list, TP_DOMAIN * ret_domain,
 						PT_PLCSQL_LOOP * loops);
 static XASL_NODE *pt_plcsql_update_to_xasl (PARSER_CONTEXT * parser, PT_NODE * sql);
+static XASL_NODE *pt_plcsql_delete_to_xasl (PARSER_CONTEXT * parser, PT_NODE * sql);
 static XASL_NODE *pt_plcsql_sql_to_xasl (PARSER_CONTEXT * parser, PT_NODE * sql);
 static XASL_NODE *pt_to_plcsql_sql (PARSER_CONTEXT * parser, PT_NODE * stmt);
 static int pt_plcsql_set_children (PARSER_CONTEXT * parser, XASL_NODE * xasl, XASL_NODE ** buf, int cnt);
@@ -31404,6 +31405,60 @@ pt_plcsql_update_to_xasl (PARSER_CONTEXT * parser, PT_NODE * sql)
 }
 
 /*
+ * pt_plcsql_delete_to_xasl () - the plan of one DELETE written in a body
+ *   return: the XASL node, NULL on error or refusal
+ *   parser(in) :
+ *   sql(in/out) : a PT_DELETE. The flags do_delete_decide_server_side () settles are left on it
+ *
+ * note: the counterpart of pt_plcsql_update_to_xasl (). There is no NOT NULL list to collect,
+ *       because a delete writes no attribute, and the refusals are the two that are left once
+ *       assignments are out of the picture.
+ */
+static XASL_NODE *
+pt_plcsql_delete_to_xasl (PARSER_CONTEXT * parser, PT_NODE * sql)
+{
+  XASL_NODE *xasl;
+  int au_save;
+
+  if (pt_false_where (parser, sql))
+    {
+      return pt_plcsql_refuse (parser, "the DELETE has a WHERE that is false as it stands");
+    }
+  if (sql->info.delete_.spec == NULL)
+    {
+      return pt_plcsql_refuse (parser, "the DELETE names an object the client holds");
+    }
+  if (sql->info.delete_.target_classes != NULL && sql->info.delete_.target_classes->next != NULL)
+    {
+      /* the prepare path answers more than one target by splitting the statement into one per
+       * table (pt_split_delete_stmt ()). That is several plans, and one statement here carries
+       * one. */
+      return pt_plcsql_refuse (parser, "the DELETE names more than one table to delete from");
+    }
+
+  if (do_delete_decide_server_side (parser, sql) != NO_ERROR)
+    {
+      return NULL;
+    }
+
+  if (!sql->info.delete_.server_delete)
+    {
+      /* which of the two it was is only recorded for the trigger */
+      return pt_plcsql_refuse (parser,
+			       sql->info.delete_.has_trigger
+			       ? "a trigger watches a table the DELETE removes rows from"
+			       : "the DELETE removes rows through a view");
+    }
+
+  /* the prepare path builds with authorization off, and this is the same build */
+  AU_SAVE_AND_DISABLE (au_save);
+  xasl = pt_to_delete_xasl (parser, sql);
+  AU_RESTORE (au_save);
+
+  return xasl;
+}
+
+/*
  * pt_plcsql_sql_to_xasl () - the plan of one SQL statement written in a body
  *   return: the XASL node, NULL on error
  *   parser(in) :
@@ -31428,6 +31483,9 @@ pt_plcsql_sql_to_xasl (PARSER_CONTEXT * parser, PT_NODE * sql)
     case PT_UPDATE:
       return pt_plcsql_update_to_xasl (parser, sql);
 
+    case PT_DELETE:
+      return pt_plcsql_delete_to_xasl (parser, sql);
+
     case PT_UNION:
     case PT_INTERSECTION:
     case PT_DIFFERENCE:
@@ -31439,8 +31497,7 @@ pt_plcsql_sql_to_xasl (PARSER_CONTEXT * parser, PT_NODE * sql)
       return pt_plcsql_refuse (parser, "the query is a set operator");
 
     default:
-      /* DELETE is prepared the way UPDATE is and is not here yet */
-      return pt_plcsql_refuse (parser, "only INSERT, SELECT and UPDATE are carried in the plan so far");
+      return pt_plcsql_refuse (parser, "the statement is not one the plan carries");
     }
 }
 
