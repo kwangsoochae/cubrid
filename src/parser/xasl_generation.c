@@ -30617,6 +30617,9 @@ static REGU_VARIABLE *pt_plcsql_expr_to_regu (PARSER_CONTEXT * parser, PT_NODE *
 static XASL_NODE *pt_plcsql_refuse (PARSER_CONTEXT * parser, const char *reason);
 static XASL_NODE *pt_to_plcsql_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * ret_domain,
 				     PT_PLCSQL_LOOP * loops);
+static XASL_NODE *pt_to_plcsql_stmt_inner (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * ret_domain,
+					   PT_PLCSQL_LOOP * loops);
+static void pt_plcsql_place (XASL_NODE * xasl, PT_NODE * stmt);
 static XASL_NODE *pt_to_plcsql_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params,
 				      TP_DOMAIN * ret_domain, PT_PLCSQL_LOOP * loops);
 static XASL_NODE *pt_to_plcsql_stmt_list_block (PARSER_CONTEXT * parser, PT_NODE * list, TP_DOMAIN * ret_domain,
@@ -30940,6 +30943,8 @@ pt_plcsql_new_node (PLCSQL_OP op)
       xasl->proc.plcsql.target_slot = -1;
       xasl->proc.plcsql.jump_levels = 0;
       xasl->proc.plcsql.locals_cnt = 0;
+      xasl->proc.plcsql.line = 0;
+      xasl->proc.plcsql.column = 0;
       xasl->proc.plcsql.children = NULL;
       xasl->proc.plcsql.children_cnt = 0;
     }
@@ -31319,8 +31324,40 @@ pt_plcsql_loop_levels (PT_PLCSQL_LOOP * loops, PT_NODE * label)
  *   ret_domain(in) : what a RETURN casts to, NULL in a procedure
  *   loops(in)  : the loops this statement stands inside, innermost first
  */
+/*
+ * pt_plcsql_place () - where an error this statement raises is reported
+ *   return: nothing
+ *   xasl(in/out) : the node the statement became, NULL is passed through
+ *   stmt(in)     : the statement it came from
+ *
+ * note: the PL engine names the place the value came from, not the place the statement begins.
+ *       x := 1 / z is named at the 1, and a statement written across lines is named at the line
+ *       the expression opens on rather than the line the assignment does. So the expression's
+ *       own place is what travels when the statement has one.
+ */
+static void
+pt_plcsql_place (XASL_NODE * xasl, PT_NODE * stmt)
+{
+  PT_NODE *at = (stmt->info.sp_stmt.expr != NULL) ? stmt->info.sp_stmt.expr : stmt;
+
+  if (xasl != NULL)
+    {
+      xasl->proc.plcsql.line = at->line_number;
+      xasl->proc.plcsql.column = at->column_number;
+    }
+}
+
 static XASL_NODE *
 pt_to_plcsql_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * ret_domain, PT_PLCSQL_LOOP * loops)
+{
+  XASL_NODE *xasl = pt_to_plcsql_stmt_inner (parser, stmt, ret_domain, loops);
+
+  pt_plcsql_place (xasl, stmt);
+  return xasl;
+}
+
+static XASL_NODE *
+pt_to_plcsql_stmt_inner (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * ret_domain, PT_PLCSQL_LOOP * loops)
 {
   XASL_NODE *xasl, *buf[2];
   PT_PLCSQL_LOOP inner;

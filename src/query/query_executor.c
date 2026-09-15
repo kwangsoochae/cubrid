@@ -429,6 +429,7 @@ static int qexec_clear_regu_value_list (THREAD_ENTRY * thread_p, XASL_NODE * xas
 					bool is_final, bool for_parallel_aptr);
 static void qexec_clear_db_val_list (QPROC_DB_VALUE_LIST list);
 static int qexec_execute_plcsql_stmt (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
+static int qexec_execute_plcsql_stmt_inner (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
 static int qexec_plcsql_set_retval (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
 static int qexec_execute_plcsql_loop (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
 static void qexec_clear_plcsql_turn (THREAD_ENTRY * thread_p, XASL_NODE * body);
@@ -3790,6 +3791,7 @@ qexec_alloc_plcsql_frame (THREAD_ENTRY * thread_p, int locals_cnt, PLCSQL_FRAME 
   db_make_null (&frame->retval);
   frame->sqlcode = 0;
   frame->sqlerrm = NULL;
+  frame->positioned = false;
   frame->call_depth = (caller != NULL) ? caller->call_depth + 1 : 0;
   frame->caller = caller;
 
@@ -29283,6 +29285,37 @@ qexec_plcsql_test (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu, XASL_STATE * x
  */
 static int
 qexec_execute_plcsql_stmt (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state)
+{
+  PLCSQL_FRAME *frame = xasl_state->plcsql_frame;
+  int rc = qexec_execute_plcsql_stmt_inner (thread_p, xasl, xasl_state);
+
+  if (rc == NO_ERROR || frame->positioned)
+    {
+      return rc;
+    }
+
+  /* The statement that failed is the one that knows where it stands, so the place is put on
+   * here and the blocks it travels out through leave it alone. The sentence is the PL engine's
+   * - ExecuteThread writes "\n  (line %d, column %d) %s" - because a body that fails has to
+   * read the same either way the procedure ran. */
+  {
+    char inner[1024], placed[1120];
+    const char *msg = er_msg ();
+
+    strncpy (inner, (msg != NULL) ? msg : "", sizeof (inner) - 1);
+    inner[sizeof (inner) - 1] = '\0';
+
+    snprintf (placed, sizeof (placed), "\n  (line %d, column %d) %s", xasl->proc.plcsql.line,
+	      xasl->proc.plcsql.column, inner);
+    er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_SP_EXECUTE_ERROR, 1, placed);
+    frame->positioned = true;
+  }
+
+  return rc;
+}
+
+static int
+qexec_execute_plcsql_stmt_inner (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state)
 {
   PLCSQL_FRAME *frame = xasl_state->plcsql_frame;
   bool taken;
