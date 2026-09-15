@@ -95,11 +95,26 @@ typedef enum
 } PLCSQL_SIGNAL;
 
 /* One activation of a PL/CSQL procedure. Locals live in slots the compiler numbers. */
+typedef struct plcsql_cursor PLCSQL_CURSOR;
+struct plcsql_cursor
+{
+  xasl_node *query;		/* the plan the declaration carries, recorded when the block runs */
+  bool is_open;			/* between OPEN and CLOSE, which is when the list file is alive */
+  bool scanning;		/* whether scan_id below has been opened on that list file */
+  QFILE_LIST_SCAN_ID scan_id;	/* where the next FETCH reads. It outlives the statement that
+				 * opened it, which is the whole difference from a SELECT ... INTO */
+  int base_slot;		/* the first slot the cursor owns; see PLCSQL_CURSOR_ATTR_* */
+  int cols_cnt;			/* how many columns its query gives back */
+};
+
 typedef struct plcsql_frame PLCSQL_FRAME;
 struct plcsql_frame
 {
   DB_VALUE *locals;
   int locals_cnt;
+
+  PLCSQL_CURSOR *cursors;
+  int cursors_cnt;
 
   PLCSQL_SIGNAL signal;
   int signal_level;		/* how many enclosing loops a labelled EXIT or CONTINUE leaves */
@@ -155,7 +170,8 @@ extern int qexec_clear_xasl_for_parallel_aptr (THREAD_ENTRY * thread_p, xasl_nod
 extern qfile_list_id *qexec_get_xasl_list_id (xasl_node * xasl);
 extern xasl_state *qexec_deep_copy_xasl_state (THREAD_ENTRY * thread_p, xasl_state * xasl_state);
 extern void qexec_free_xasl_state (THREAD_ENTRY * thread_p, xasl_state * xasl_state);
-extern PLCSQL_FRAME *qexec_alloc_plcsql_frame (THREAD_ENTRY * thread_p, int locals_cnt, PLCSQL_FRAME * caller);
+extern PLCSQL_FRAME *qexec_alloc_plcsql_frame (THREAD_ENTRY * thread_p, int locals_cnt, int cursors_cnt,
+					       PLCSQL_FRAME * caller);
 extern void qexec_free_plcsql_frame (THREAD_ENTRY * thread_p, PLCSQL_FRAME * frame);
 extern int qexec_execute_plcsql (THREAD_ENTRY * thread_p, xasl_node * xasl, xasl_state * xstate);
 extern int qexec_call_plcsql (THREAD_ENTRY * thread_p, xasl_node * xasl, DB_VALUE * args, int args_cnt,

@@ -4196,6 +4196,9 @@ stx_build_plcsql_proc (THREAD_ENTRY * thread_p, char *ptr, PLCSQL_PROC_NODE * pl
   ptr = or_unpack_int (ptr, &plcsql_proc->locals_cnt);
   ptr = or_unpack_int (ptr, &plcsql_proc->line);
   ptr = or_unpack_int (ptr, &plcsql_proc->column);
+  ptr = or_unpack_int (ptr, &plcsql_proc->cursors_cnt);
+  ptr = or_unpack_int (ptr, &plcsql_proc->cursor_base_slot);
+  ptr = or_unpack_int (ptr, &plcsql_proc->cursor_cols_cnt);
 
   ptr = or_unpack_int (ptr, &offset);
   if (offset == 0)

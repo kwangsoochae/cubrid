@@ -30149,9 +30149,12 @@ static int pt_plcsql_bind_name (PARSER_CONTEXT * parser, PT_NODE * name, PT_PLCS
 static PT_NODE *pt_plcsql_bind_name_pre (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int *continue_walk);
 static int pt_plcsql_resolve_expr (PARSER_CONTEXT * parser, PT_NODE * expr, PT_PLCSQL_SCOPE * scope);
 static int pt_plcsql_bind_host_vars (PARSER_CONTEXT * parser, PT_NODE * sql, PT_PLCSQL_SCOPE * scope);
+static int pt_plcsql_cursor_attr_slot (PT_NODE * name);
+static int pt_plcsql_bind_cursor (PARSER_CONTEXT * parser, PT_NODE * stmt, PT_PLCSQL_SCOPE * scope);
 static int pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_SCOPE * scope,
 					int *next_slot);
-static int pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCOPE * outer, int *next_slot);
+static int pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCOPE * outer,
+				    int *next_slot, int *next_cursor);
 
 /*
  * pt_plcsql_find_decl () - the declaration a name refers to, innermost scope first
@@ -30200,6 +30203,86 @@ pt_plcsql_find_decl (PT_PLCSQL_SCOPE * scope, const char *name)
 }
 
 /*
+ * pt_plcsql_cursor_attr_slot () - which of the cursor's attribute slots a name asks for
+ *   return: 0 .. PLCSQL_CURSOR_ATTR_CNT - 1
+ *   name(in) : a PT_NAME written with a per cent attribute
+ *
+ * note: the parse tree says which attribute was written and the plan says which slot holds it;
+ *       they are numbered apart so that neither has to know the other's order.
+ */
+static int
+pt_plcsql_cursor_attr_slot (PT_NODE * name)
+{
+  switch (name->info.name.plcsql_cursor_attr)
+    {
+    case PT_SP_CURSOR_ATTR_FOUND:
+      return PLCSQL_CURSOR_ATTR_FOUND;
+    case PT_SP_CURSOR_ATTR_ISOPEN:
+      return PLCSQL_CURSOR_ATTR_ISOPEN;
+    case PT_SP_CURSOR_ATTR_ROWCOUNT:
+      return PLCSQL_CURSOR_ATTR_ROWCOUNT;
+    default:
+      return PLCSQL_CURSOR_ATTR_NOTFOUND;
+    }
+}
+
+/*
+ * pt_plcsql_bind_cursor () - match the name an OPEN or a CLOSE writes to its declaration
+ *   return: NO_ERROR, or ER_FAILED with the error left on the parser
+ *   parser(in) :
+ *   name(in/out) : the PT_NAME the statement wrote; it is given the cursor's number
+ *   scope(in)  : the innermost scope at the point of the statement
+ */
+static int
+pt_plcsql_bind_cursor (PARSER_CONTEXT * parser, PT_NODE * stmt, PT_PLCSQL_SCOPE * scope)
+{
+  PT_NODE *name = stmt->info.sp_stmt.name;
+  PT_NODE *decl = pt_plcsql_find_decl (scope, name->info.name.original);
+
+  /* a body reaches this parser only after the PL engine has accepted it, so a name that is
+   * not a cursor here is not something a user can write - the answer is still an error rather
+   * than an assertion, because what it rests on is another compiler's checking */
+  if (decl == NULL || decl->node_type != PT_SP_STMT || decl->info.sp_stmt.op != PT_SP_CURSOR)
+    {
+      PT_ERRORmf (parser, name, MSGCAT_SET_PARSER_SEMANTIC, MSGCAT_SEMANTIC_IS_NOT_DEFINED, name->info.name.original);
+      return ER_FAILED;
+    }
+
+  name->info.name.plcsql_slot = decl->info.sp_stmt.name->info.name.plcsql_slot;
+  stmt->info.sp_stmt.flags = decl->info.sp_stmt.flags;
+
+  if (stmt->info.sp_stmt.op == PT_SP_FETCH)
+    {
+      /* the columns travel to the FETCH the way the parameters travel to an OPEN, so that
+       * lowering can pair each target with the slot the row lands in */
+      stmt->info.sp_stmt.params = parser_copy_tree_list (parser, decl->info.sp_stmt.decl_list);
+      if (decl->info.sp_stmt.decl_list != NULL && stmt->info.sp_stmt.params == NULL)
+	{
+	  return ER_FAILED;
+	}
+    }
+
+  if (stmt->info.sp_stmt.op == PT_SP_OPEN)
+    {
+      /* the parameters travel to the OPEN so that lowering can pair each argument with the
+       * slot it is written into. They are copied because the declaration keeps its own. */
+      if (pt_length_of_list (stmt->info.sp_stmt.expr) != pt_length_of_list (decl->info.sp_stmt.params))
+	{
+	  PT_ERRORmf (parser, name, MSGCAT_SET_PARSER_SEMANTIC, MSGCAT_SEMANTIC_IS_NOT_DEFINED,
+		      name->info.name.original);
+	  return ER_FAILED;
+	}
+      stmt->info.sp_stmt.params = parser_copy_tree_list (parser, decl->info.sp_stmt.params);
+      if (decl->info.sp_stmt.params != NULL && stmt->info.sp_stmt.params == NULL)
+	{
+	  return ER_FAILED;
+	}
+    }
+
+  return NO_ERROR;
+}
+
+/*
  * pt_plcsql_bind_name () - rewrite one reference into the slot it reads
  *   return: NO_ERROR, or ER_FAILED with the error left on the parser
  *   parser(in) :
@@ -30212,6 +30295,25 @@ pt_plcsql_bind_name (PARSER_CONTEXT * parser, PT_NODE * name, PT_PLCSQL_SCOPE * 
   PT_NODE *decl;
 
   decl = pt_plcsql_find_decl (scope, name->info.name.original);
+
+  if (name->info.name.plcsql_cursor_attr != PT_SP_CURSOR_ATTR_NONE)
+    {
+      if (decl == NULL || decl->node_type != PT_SP_STMT || decl->info.sp_stmt.op != PT_SP_CURSOR)
+	{
+	  PT_ERRORmf (parser, name, MSGCAT_SET_PARSER_SEMANTIC, MSGCAT_SEMANTIC_IS_NOT_DEFINED,
+		      name->info.name.original);
+	  return ER_FAILED;
+	}
+
+      /* the attributes are the first slots the cursor owns, in the order the flags name them */
+      name->info.name.meta_class = PT_PLCSQL_LOCAL;
+      name->info.name.plcsql_slot = decl->info.sp_stmt.flags + pt_plcsql_cursor_attr_slot (name);
+      name->type_enum =
+	(name->info.name.plcsql_cursor_attr == PT_SP_CURSOR_ATTR_ROWCOUNT) ? PT_TYPE_INTEGER : PT_TYPE_LOGICAL;
+      name->data_type = NULL;
+      return NO_ERROR;
+    }
+
   if (decl == NULL)
     {
       PT_ERRORmf (parser, name, MSGCAT_SET_PARSER_SEMANTIC, MSGCAT_SEMANTIC_IS_NOT_DEFINED, name->info.name.original);
@@ -30222,6 +30324,14 @@ pt_plcsql_bind_name (PARSER_CONTEXT * parser, PT_NODE * name, PT_PLCSQL_SCOPE * 
    * for a parameter or a FOR loop variable, each of which is its own declaration */
   if (decl->node_type == PT_SP_STMT)
     {
+      if (decl->info.sp_stmt.op == PT_SP_CURSOR)
+	{
+	  /* the name is declared, but a cursor is not read the way a variable is - only OPEN,
+	   * CLOSE and the attributes name one */
+	  PT_ERRORmf (parser, name, MSGCAT_SET_PARSER_SEMANTIC, MSGCAT_SEMANTIC_IS_NOT_DEFINED,
+		      name->info.name.original);
+	  return ER_FAILED;
+	}
       assert (decl->info.sp_stmt.op == PT_SP_DECL);
       decl = decl->info.sp_stmt.name;
     }
@@ -30430,7 +30540,8 @@ pt_plcsql_take_into_list (PARSER_CONTEXT * parser, PT_NODE * stmt, PT_PLCSQL_SCO
  *   next_slot(in/out) : the next free frame slot
  */
 static int
-pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_SCOPE * scope, int *next_slot)
+pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_SCOPE * scope, int *next_slot,
+			     int *next_cursor)
 {
   PT_NODE *stmt;
   PT_PLCSQL_SCOPE loop_scope;
@@ -30440,7 +30551,7 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
       switch (stmt->info.sp_stmt.op)
 	{
 	case PT_SP_BLOCK:
-	  if (pt_plcsql_resolve_block (parser, stmt, scope, next_slot) != NO_ERROR)
+	  if (pt_plcsql_resolve_block (parser, stmt, scope, next_slot, next_cursor) != NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }
@@ -30456,8 +30567,10 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
 
 	case PT_SP_IF:
 	  if (pt_plcsql_resolve_expr (parser, stmt->info.sp_stmt.expr, scope) != NO_ERROR
-	      || pt_plcsql_resolve_stmt_list (parser, stmt->info.sp_stmt.body, scope, next_slot) != NO_ERROR
-	      || pt_plcsql_resolve_stmt_list (parser, stmt->info.sp_stmt.else_body, scope, next_slot) != NO_ERROR)
+	      || pt_plcsql_resolve_stmt_list (parser, stmt->info.sp_stmt.body, scope, next_slot,
+					      next_cursor) != NO_ERROR
+	      || pt_plcsql_resolve_stmt_list (parser, stmt->info.sp_stmt.else_body, scope, next_slot,
+					      next_cursor) != NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }
@@ -30485,7 +30598,8 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
 	      loop_scope.names->type_enum = PT_TYPE_INTEGER;
 	    }
 
-	  if (pt_plcsql_resolve_stmt_list (parser, stmt->info.sp_stmt.body, &loop_scope, next_slot) != NO_ERROR)
+	  if (pt_plcsql_resolve_stmt_list (parser, stmt->info.sp_stmt.body, &loop_scope, next_slot, next_cursor) !=
+	      NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }
@@ -30522,6 +30636,33 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
 	    }
 	  break;
 
+	case PT_SP_OPEN:
+	  /* the arguments are ordinary expressions of the frame; the cursor's name is not one
+	   * of its values and is matched against the declarations instead */
+	  if (pt_plcsql_resolve_expr (parser, stmt->info.sp_stmt.expr, scope) != NO_ERROR
+	      || pt_plcsql_bind_cursor (parser, stmt, scope) != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
+	  break;
+
+	case PT_SP_CLOSE:
+	  if (pt_plcsql_bind_cursor (parser, stmt, scope) != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
+	  break;
+
+	case PT_SP_FETCH:
+	  /* the targets are names the statement writes, and they are bound the way a name being
+	   * read is - what tells them apart is only which side of the assignment they sit on */
+	  if (pt_plcsql_bind_cursor (parser, stmt, scope) != NO_ERROR
+	      || pt_plcsql_resolve_expr (parser, stmt->info.sp_stmt.expr, scope) != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
+	  break;
+
 	case PT_SP_RAISE:
 	  /* the name is an exception, which is not a value and so binds to no slot */
 	case PT_SP_NULL_STMT:
@@ -30529,6 +30670,7 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
 
 	case PT_SP_HANDLER:
 	  /* reached through the block's EXCEPTION part, never as a statement */
+	case PT_SP_CURSOR:
 	case PT_SP_DECL:
 	default:
 	  /* a declaration is reached through decl_list, never as a statement */
@@ -30550,7 +30692,8 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
  *   next_slot(in/out) : the next free frame slot
  */
 static int
-pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCOPE * outer, int *next_slot)
+pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCOPE * outer, int *next_slot,
+			 int *next_cursor)
 {
   PT_PLCSQL_SCOPE scope;
   PT_NODE *decl;
@@ -30576,6 +30719,69 @@ pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCO
 	  return ER_FAILED;
 	}
 
+      if (decl->info.sp_stmt.op == PT_SP_CURSOR)
+	{
+	  PT_PLCSQL_SCOPE query_scope;
+	  PT_NODE *param, *column, *last;
+
+	  /* a cursor is declared where a variable is but holds no value, so it is numbered in
+	   * its own sequence and takes no slot. It does come into scope here: OPEN and CLOSE
+	   * find it by name the way a reference finds a variable. */
+	  decl->info.sp_stmt.name->info.name.plcsql_slot = (*next_cursor)++;
+
+	  /* its parameters do take slots, because that is how the query reads them: the query
+	   * is compiled like any other written in the body, so a name it cannot resolve as a
+	   * column became a host variable, and a host variable reads a slot. OPEN writes the
+	   * arguments into those slots before running the query. */
+	  for (param = decl->info.sp_stmt.params; param != NULL; param = param->next)
+	    {
+	      param->info.name.meta_class = PT_PLCSQL_LOCAL;
+	      param->info.name.plcsql_slot = (*next_slot)++;
+	    }
+
+	  /* the parameters are in scope for the query and the enclosing block is outside them,
+	   * so the query can read a body variable too */
+	  query_scope.decl_list = NULL;
+	  query_scope.visible = NULL;
+	  query_scope.names = decl->info.sp_stmt.params;
+	  query_scope.outer = &scope;
+	  if (pt_plcsql_bind_host_vars (parser, decl->info.sp_stmt.sql, &query_scope) != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
+
+	  /* the cursor owns a run of slots: its four attributes, then one per column its query
+	   * gives back. Reading c%notfound and reading a fetched column are then both reading a
+	   * local, which is machinery that already exists. The hidden columns get a slot too,
+	   * because what the list file holds is what the row is read out of. */
+	  decl->info.sp_stmt.flags = *next_slot;
+	  *next_slot += PLCSQL_CURSOR_ATTR_CNT;
+
+	  column = pt_get_select_list (parser, decl->info.sp_stmt.sql);
+	  last = NULL;
+	  for (; column != NULL; column = column->next)
+	    {
+	      PT_NODE *slot_name = pt_name (parser, "");
+
+	      if (slot_name == NULL)
+		{
+		  return ER_FAILED;
+		}
+	      slot_name->info.name.meta_class = PT_PLCSQL_LOCAL;
+	      slot_name->info.name.plcsql_slot = (*next_slot)++;
+	      slot_name->type_enum = column->type_enum;
+	      slot_name->data_type = parser_copy_tree (parser, column->data_type);
+	      slot_name->flag.is_hidden_column = column->flag.is_hidden_column;
+
+	      decl->info.sp_stmt.decl_list = (last == NULL)
+		? slot_name : parser_append_node (slot_name, decl->info.sp_stmt.decl_list);
+	      last = slot_name;
+	    }
+
+	  scope.visible = decl;
+	  continue;
+	}
+
       decl->info.sp_stmt.name->info.name.meta_class = PT_PLCSQL_LOCAL;
       decl->info.sp_stmt.name->info.name.plcsql_slot = (*next_slot)++;
       decl->info.sp_stmt.name->type_enum = decl->type_enum;
@@ -30584,7 +30790,7 @@ pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCO
       scope.visible = decl;
     }
 
-  if (pt_plcsql_resolve_stmt_list (parser, block->info.sp_stmt.body, &scope, next_slot) != NO_ERROR)
+  if (pt_plcsql_resolve_stmt_list (parser, block->info.sp_stmt.body, &scope, next_slot, next_cursor) != NO_ERROR)
     {
       return ER_FAILED;
     }
@@ -30593,7 +30799,7 @@ pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCO
    * to them, and what they declare is nothing. */
   for (decl = block->info.sp_stmt.else_body; decl != NULL; decl = decl->next)
     {
-      if (pt_plcsql_resolve_stmt_list (parser, decl->info.sp_stmt.body, &scope, next_slot) != NO_ERROR)
+      if (pt_plcsql_resolve_stmt_list (parser, decl->info.sp_stmt.body, &scope, next_slot, next_cursor) != NO_ERROR)
 	{
 	  return ER_FAILED;
 	}
@@ -30608,12 +30814,14 @@ pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCO
  *   parser(in) :
  *   block(in/out) : the PT_SP_BLOCK sp_parse_body () returned
  *   params(in/out) : the parameters, a PT_NAME list in declared order, NULL when there are none
+ *   cursors_cnt(out) : how many cursors the body declares, counted in their own sequence
  *
  * note: the parameters take the first slots, in order, so the caller can fill them by position
- *       without being told which slot each went to. The body's declarations follow.
+ *       without being told which slot each went to. The body's declarations follow. A cursor
+ *       is numbered apart from the slots because it holds no value.
  */
 int
-pt_plcsql_resolve_locals (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params)
+pt_plcsql_resolve_locals (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params, int *cursors_cnt)
 {
   PT_PLCSQL_SCOPE outer;
   PT_NODE *p;
@@ -30632,7 +30840,8 @@ pt_plcsql_resolve_locals (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * pa
       p->info.name.plcsql_slot = next_slot++;
     }
 
-  if (pt_plcsql_resolve_block (parser, block, (params != NULL) ? &outer : NULL, &next_slot) != NO_ERROR)
+  *cursors_cnt = 0;
+  if (pt_plcsql_resolve_block (parser, block, (params != NULL) ? &outer : NULL, &next_slot, cursors_cnt) != NO_ERROR)
     {
       return -1;
     }
@@ -30663,6 +30872,7 @@ struct pt_plcsql_loop
   PT_PLCSQL_LOOP *outer;
 };
 
+static int pt_plcsql_read_one_sql (PARSER_CONTEXT * parser, PT_NODE * stmt);
 static int pt_plcsql_read_static_sql (PARSER_CONTEXT * parser, PT_NODE * list);
 static PT_NODE *pt_plcsql_type_expr (PARSER_CONTEXT * parser, PT_NODE * expr);
 static REGU_VARIABLE *pt_plcsql_expr_to_regu (PARSER_CONTEXT * parser, PT_NODE ** expr);
@@ -30676,11 +30886,87 @@ static XASL_NODE *pt_to_plcsql_block (PARSER_CONTEXT * parser, PT_NODE * block, 
 				      TP_DOMAIN * ret_domain, PT_PLCSQL_LOOP * loops);
 static XASL_NODE *pt_to_plcsql_stmt_list_block (PARSER_CONTEXT * parser, PT_NODE * list, TP_DOMAIN * ret_domain,
 						PT_PLCSQL_LOOP * loops);
+static int pt_plcsql_cursor_op_flag (PT_SP_STMT_OP op);
+static XASL_NODE *pt_to_plcsql_fetch (PARSER_CONTEXT * parser, XASL_NODE * xasl, PT_NODE * stmt);
+static XASL_NODE *pt_to_plcsql_cursor_decl (PARSER_CONTEXT * parser, PT_NODE * decl);
 static XASL_NODE *pt_plcsql_update_to_xasl (PARSER_CONTEXT * parser, PT_NODE * sql);
 static XASL_NODE *pt_plcsql_delete_to_xasl (PARSER_CONTEXT * parser, PT_NODE * sql);
 static XASL_NODE *pt_plcsql_sql_to_xasl (PARSER_CONTEXT * parser, PT_NODE * sql);
 static XASL_NODE *pt_to_plcsql_sql (PARSER_CONTEXT * parser, PT_NODE * stmt);
 static int pt_plcsql_set_children (PARSER_CONTEXT * parser, XASL_NODE * xasl, XASL_NODE ** buf, int cnt);
+
+/*
+ * pt_plcsql_read_one_sql () - have the SQL parser read one statement a body wrote
+ *   return: NO_ERROR, or ER_FAILED with the reason on the parser
+ *   parser(in) :
+ *   stmt(in/out) : a PT_SP_SQL or a PT_SP_CURSOR; its sql_text is read into its sql
+ *
+ * note: the two are read the same way - a cursor's query is a statement written in the body
+ *       like any other, and what tells them apart is only when it runs.
+ */
+static int
+pt_plcsql_read_one_sql (PARSER_CONTEXT * parser, PT_NODE * stmt)
+{
+  PT_NODE **parsed;
+  char why[512];
+  int saved_static, saved_native;
+
+  saved_static = parser->flag.is_parsing_static_sql;
+  saved_native = parser->flag.is_plcsql_native_exec;
+  parser->flag.is_parsing_static_sql = 1;
+  parser->flag.is_plcsql_native_exec = 1;
+
+  parsed = parser_parse_string_with_escapes (parser, stmt->info.sp_stmt.sql_text, false);
+
+  if (parsed == NULL || *parsed == NULL || pt_has_error (parser))
+    {
+      /* the reason the SQL parser gives names a place in the statement, and the statement
+       * it names is not the one the user called - it is one written inside a routine - so
+       * the text has to come along for the reason to be of any use */
+      parser->flag.is_parsing_static_sql = saved_static;
+      parser->flag.is_plcsql_native_exec = saved_native;
+      snprintf (why, sizeof (why), "the SQL was not read - %s", stmt->info.sp_stmt.sql_text);
+      pt_reset_error (parser);
+      PT_ERRORc (parser, stmt, why);
+      return ER_FAILED;
+    }
+  if ((*parsed)->next != NULL)
+    {
+      /* the text was gathered up to one semicolon, so a second statement can only mean
+       * the gathering and the SQL parser disagree about where the first one ended */
+      parser->flag.is_parsing_static_sql = saved_static;
+      parser->flag.is_plcsql_native_exec = saved_native;
+      PT_INTERNAL_ERROR (parser, "static sql");
+      return ER_FAILED;
+    }
+
+  stmt->info.sp_stmt.sql = pt_compile (parser, *parsed);
+  if (stmt->info.sp_stmt.sql != NULL && !pt_has_error (parser) && !PT_IS_DBLINK_DML_QUERY (stmt->info.sp_stmt.sql))
+    {
+      /* pt_compile () is the semantic check and nothing else. What db_compile_statement ()
+       * does next is what turns a view into the classes underneath it and marks the specs
+       * an UPDATE or a DELETE writes - a plan built without those marks holds no class at
+       * all, and the builder asserts on that rather than reporting it. Remote DML is the
+       * one statement left untranslated, for the reason given at that call. */
+      stmt->info.sp_stmt.sql = mq_translate (parser, stmt->info.sp_stmt.sql);
+      if (stmt->info.sp_stmt.sql != NULL && !pt_has_error (parser))
+	{
+	  (void) pt_class_pre_fetch (parser, stmt->info.sp_stmt.sql);
+	}
+    }
+  parser->flag.is_parsing_static_sql = saved_static;
+  parser->flag.is_plcsql_native_exec = saved_native;
+
+  if (stmt->info.sp_stmt.sql == NULL || pt_has_error (parser))
+    {
+      snprintf (why, sizeof (why), "the SQL was refused - %s", stmt->info.sp_stmt.sql_text);
+      pt_reset_error (parser);
+      PT_ERRORc (parser, stmt, why);
+      return ER_FAILED;
+    }
+
+  return NO_ERROR;
+}
 
 /*
  * pt_plcsql_read_static_sql () - have the SQL parser read the statements the body wrote
@@ -30698,9 +30984,7 @@ static int pt_plcsql_set_children (PARSER_CONTEXT * parser, XASL_NODE * xasl, XA
 static int
 pt_plcsql_read_static_sql (PARSER_CONTEXT * parser, PT_NODE * list)
 {
-  PT_NODE *stmt, **parsed;
-  char why[512];
-  int saved_static, saved_native;
+  PT_NODE *stmt;
 
   for (stmt = list; stmt != NULL; stmt = stmt->next)
     {
@@ -30712,65 +30996,25 @@ pt_plcsql_read_static_sql (PARSER_CONTEXT * parser, PT_NODE * list)
 	   * PL engine's compiler takes sets it on the session and leaves it there for the same
 	   * reason (db_open_buffer_local ()). The second flag says which of the two readers this
 	   * is, which is what keeps an INTO clause on the statement instead of stripping it. */
-	  saved_static = parser->flag.is_parsing_static_sql;
-	  saved_native = parser->flag.is_plcsql_native_exec;
-	  parser->flag.is_parsing_static_sql = 1;
-	  parser->flag.is_plcsql_native_exec = 1;
-
-	  parsed = parser_parse_string_with_escapes (parser, stmt->info.sp_stmt.sql_text, false);
-
-	  if (parsed == NULL || *parsed == NULL || pt_has_error (parser))
+	  if (pt_plcsql_read_one_sql (parser, stmt) != NO_ERROR)
 	    {
-	      /* the reason the SQL parser gives names a place in the statement, and the statement
-	       * it names is not the one the user called - it is one written inside a routine - so
-	       * the text has to come along for the reason to be of any use */
-	      parser->flag.is_parsing_static_sql = saved_static;
-	      parser->flag.is_plcsql_native_exec = saved_native;
-	      snprintf (why, sizeof (why), "the SQL was not read - %s", stmt->info.sp_stmt.sql_text);
-	      pt_reset_error (parser);
-	      PT_ERRORc (parser, stmt, why);
 	      return ER_FAILED;
 	    }
-	  if ((*parsed)->next != NULL)
+	  break;
+
+	case PT_SP_CURSOR:
+	  /* a cursor's query is read here too, so that what OPEN runs is a plan like any other */
+	  if (pt_plcsql_read_one_sql (parser, stmt) != NO_ERROR)
 	    {
-	      /* the text was gathered up to one semicolon, so a second statement can only mean
-	       * the gathering and the SQL parser disagree about where the first one ended */
-	      parser->flag.is_parsing_static_sql = saved_static;
-	      parser->flag.is_plcsql_native_exec = saved_native;
-	      PT_INTERNAL_ERROR (parser, "static sql");
 	      return ER_FAILED;
 	    }
-
-	  stmt->info.sp_stmt.sql = pt_compile (parser, *parsed);
-	  if (stmt->info.sp_stmt.sql != NULL && !pt_has_error (parser)
-	      && !PT_IS_DBLINK_DML_QUERY (stmt->info.sp_stmt.sql))
-	    {
-	      /* pt_compile () is the semantic check and nothing else. What db_compile_statement ()
-	       * does next is what turns a view into the classes underneath it and marks the specs
-	       * an UPDATE or a DELETE writes - a plan built without those marks holds no class at
-	       * all, and the builder asserts on that rather than reporting it. Remote DML is the
-	       * one statement left untranslated, for the reason given at that call. */
-	      stmt->info.sp_stmt.sql = mq_translate (parser, stmt->info.sp_stmt.sql);
-	      if (stmt->info.sp_stmt.sql != NULL && !pt_has_error (parser))
-		{
-		  (void) pt_class_pre_fetch (parser, stmt->info.sp_stmt.sql);
-		}
-	    }
-	  parser->flag.is_parsing_static_sql = saved_static;
-	  parser->flag.is_plcsql_native_exec = saved_native;
-
-	  if (stmt->info.sp_stmt.sql == NULL || pt_has_error (parser))
-	    {
-	      snprintf (why, sizeof (why), "the SQL was refused - %s", stmt->info.sp_stmt.sql_text);
-	      pt_reset_error (parser);
-	      PT_ERRORc (parser, stmt, why);
-	      return ER_FAILED;
-	    }
-
 	  break;
 
 	case PT_SP_BLOCK:
-	  if (pt_plcsql_read_static_sql (parser, stmt->info.sp_stmt.body) != NO_ERROR)
+	  /* a cursor is declared rather than written as a statement, so the declarations are
+	   * walked as well as the body */
+	  if (pt_plcsql_read_static_sql (parser, stmt->info.sp_stmt.decl_list) != NO_ERROR
+	      || pt_plcsql_read_static_sql (parser, stmt->info.sp_stmt.body) != NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }
@@ -31318,6 +31562,18 @@ pt_to_plcsql_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params, 
 	      /* it holds no value, so there is no slot to open */
 	      continue;
 	    }
+
+	  if (decl->info.sp_stmt.op == PT_SP_CURSOR)
+	    {
+	      buf[i] = pt_to_plcsql_cursor_decl (parser, decl);
+	      if (buf[i] == NULL)
+		{
+		  return NULL;
+		}
+	      i++;
+	      continue;
+	    }
+
 	  buf[i] = pt_to_plcsql_open_local (parser, decl);
 	  if (buf[i] == NULL)
 	    {
@@ -31454,6 +31710,135 @@ pt_plcsql_delete_to_xasl (PARSER_CONTEXT * parser, PT_NODE * sql)
   AU_RESTORE (au_save);
 
   return xasl;
+}
+
+/*
+ * pt_plcsql_cursor_op_flag () - which form of cursor node a statement becomes
+ *   return: PLCSQL_CURSOR_*
+ *   op(in) : PT_SP_OPEN, PT_SP_CLOSE or PT_SP_FETCH
+ */
+static int
+pt_plcsql_cursor_op_flag (PT_SP_STMT_OP op)
+{
+  switch (op)
+    {
+    case PT_SP_OPEN:
+      return PLCSQL_CURSOR_OPEN;
+    case PT_SP_FETCH:
+      return PLCSQL_CURSOR_FETCH;
+    default:
+      return PLCSQL_CURSOR_CLOSE;
+    }
+}
+
+/*
+ * pt_to_plcsql_fetch () - the assignments a FETCH's INTO clause asks for
+ *   return: the node it was given, NULL on error
+ *   parser(in) :
+ *   xasl(in/out) : the PLCSQL_OP_CURSOR node being built
+ *   stmt(in)   : the PT_SP_FETCH, its targets in expr and its cursor's columns in params
+ *
+ * note: the row lands in the slots the cursor owns and the targets are assigned from there,
+ *       which is an ordinary assignment and casts the way the declaration asks. Only a column
+ *       the statement can see is paired: a hidden one is in the row because the list file
+ *       holds it, and no target answers to it.
+ */
+static XASL_NODE *
+pt_to_plcsql_fetch (PARSER_CONTEXT * parser, XASL_NODE * xasl, PT_NODE * stmt)
+{
+  XASL_NODE **buf;
+  PT_NODE *target, *column;
+  int cnt = pt_length_of_list (stmt->info.sp_stmt.expr);
+  int i = 0;
+
+  if (cnt == 0)
+    {
+      return xasl;
+    }
+
+  regu_array_alloc (&buf, (size_t) cnt);
+  if (buf == NULL)
+    {
+      return NULL;
+    }
+
+  target = stmt->info.sp_stmt.expr;
+  column = stmt->info.sp_stmt.params;
+  while (target != NULL && column != NULL)
+    {
+      PT_NODE *ref;
+
+      if (column->flag.is_hidden_column)
+	{
+	  column = column->next;
+	  continue;
+	}
+
+      ref = parser_copy_tree (parser, column);
+      if (ref == NULL)
+	{
+	  return NULL;
+	}
+      ref->next = NULL;
+
+      buf[i] = pt_to_plcsql_assign (parser, target->info.name.plcsql_slot, &ref, target, true);
+      if (buf[i] == NULL)
+	{
+	  return NULL;
+	}
+      i++;
+
+      target = target->next;
+      column = column->next;
+    }
+
+  if (target != NULL)
+    {
+      /* more targets than the row has columns the statement can see */
+      return pt_plcsql_refuse (parser, "the FETCH names more targets than the cursor's query has columns");
+    }
+
+  return pt_plcsql_set_children (parser, xasl, buf, i) == NO_ERROR ? xasl : NULL;
+}
+
+/*
+ * pt_to_plcsql_cursor_decl () - the node a cursor's declaration becomes
+ *   return: the XASL node, NULL on error or refusal
+ *   parser(in) :
+ *   decl(in)   : a PT_SP_CURSOR out of a block's declarations
+ *
+ * note: the query's plan hangs here rather than on an OPEN because the cursor is one cursor
+ *       however many places open it, and CLOSE has to let go of what OPEN ran. What running
+ *       this node does is tell the frame that, and nothing else.
+ */
+static XASL_NODE *
+pt_to_plcsql_cursor_decl (PARSER_CONTEXT * parser, PT_NODE * decl)
+{
+  XASL_NODE *xasl, **buf;
+
+  xasl = pt_plcsql_new_node (PLCSQL_OP_CURSOR);
+  if (xasl == NULL)
+    {
+      return NULL;
+    }
+  xasl->proc.plcsql.flags = PLCSQL_CURSOR_DECLARE;
+  xasl->proc.plcsql.target_slot = decl->info.sp_stmt.name->info.name.plcsql_slot;
+  xasl->proc.plcsql.cursor_base_slot = decl->info.sp_stmt.flags;
+  xasl->proc.plcsql.cursor_cols_cnt = pt_length_of_list (decl->info.sp_stmt.decl_list);
+
+  regu_array_alloc (&buf, 1);
+  if (buf == NULL)
+    {
+      return NULL;
+    }
+
+  buf[0] = pt_plcsql_sql_to_xasl (parser, decl->info.sp_stmt.sql);
+  if (buf[0] == NULL)
+    {
+      return NULL;
+    }
+
+  return pt_plcsql_set_children (parser, xasl, buf, 1) == NO_ERROR ? xasl : NULL;
 }
 
 /*
@@ -31668,7 +32053,15 @@ pt_plcsql_loop_levels (PT_PLCSQL_LOOP * loops, PT_NODE * label)
 static void
 pt_plcsql_place (XASL_NODE * xasl, PT_NODE * stmt)
 {
-  PT_NODE *at = (stmt->info.sp_stmt.expr != NULL) ? stmt->info.sp_stmt.expr : stmt;
+  /* expr is where the statement is reported from because for an assignment or a RETURN it is
+   * the expression the statement evaluates, and that is the place the PL engine names. A
+   * cursor statement keeps something else there - the arguments an OPEN passes, the targets a
+   * FETCH writes - and neither is what the statement does, so those are reported from the
+   * statement itself. */
+  bool on_expr = (stmt->info.sp_stmt.expr != NULL
+		  && stmt->info.sp_stmt.op != PT_SP_OPEN
+		  && stmt->info.sp_stmt.op != PT_SP_CLOSE && stmt->info.sp_stmt.op != PT_SP_FETCH);
+  PT_NODE *at = on_expr ? stmt->info.sp_stmt.expr : stmt;
 
   if (xasl != NULL)
     {
@@ -31689,10 +32082,10 @@ pt_to_plcsql_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * ret_doma
 static XASL_NODE *
 pt_to_plcsql_stmt_inner (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * ret_domain, PT_PLCSQL_LOOP * loops)
 {
-  XASL_NODE *xasl, *buf[2];
+  XASL_NODE *xasl, *buf[2], **args;
   PT_PLCSQL_LOOP inner;
-  PT_NODE *call;
-  int form, levels;
+  PT_NODE *call, *arg, *param;
+  int form, levels, cnt, i;
 
   switch (stmt->info.sp_stmt.op)
     {
@@ -31787,6 +32180,62 @@ pt_to_plcsql_stmt_inner (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * re
 	  return NULL;
 	}
       return pt_plcsql_set_children (parser, xasl, buf, 2) == NO_ERROR ? xasl : NULL;
+
+    case PT_SP_OPEN:
+    case PT_SP_CLOSE:
+    case PT_SP_FETCH:
+      xasl = pt_plcsql_new_node (PLCSQL_OP_CURSOR);
+      if (xasl == NULL)
+	{
+	  return NULL;
+	}
+      xasl->proc.plcsql.flags = pt_plcsql_cursor_op_flag (stmt->info.sp_stmt.op);
+      xasl->proc.plcsql.target_slot = stmt->info.sp_stmt.name->info.name.plcsql_slot;
+      xasl->proc.plcsql.cursor_base_slot = stmt->info.sp_stmt.flags;
+
+      if (stmt->info.sp_stmt.op == PT_SP_FETCH)
+	{
+	  /* each target is assigned the column slot the row lands in, so the cast the
+	   * declaration asks for is the one an assignment already makes. A hidden column has
+	   * no target answering to it - it is in the row because the list file holds it. */
+	  return pt_to_plcsql_fetch (parser, xasl, stmt);
+	}
+
+      /* an argument is written into the slot its parameter was given, which is the slot the
+       * query reads, so opening is assigning and then running */
+      cnt = pt_length_of_list (stmt->info.sp_stmt.params);
+      if (cnt == 0)
+	{
+	  return xasl;
+	}
+
+      regu_array_alloc (&args, (size_t) cnt);
+      if (args == NULL)
+	{
+	  return NULL;
+	}
+
+      i = 0;
+      for (arg = stmt->info.sp_stmt.expr, param = stmt->info.sp_stmt.params;
+	   arg != NULL && param != NULL; arg = arg->next, param = param->next)
+	{
+	  PT_NODE *one = parser_copy_tree (parser, arg);
+
+	  if (one == NULL)
+	    {
+	      return NULL;
+	    }
+	  one->next = NULL;
+
+	  args[i] = pt_to_plcsql_assign (parser, param->info.name.plcsql_slot, &one, param, true);
+	  if (args[i] == NULL)
+	    {
+	      return NULL;
+	    }
+	  i++;
+	}
+
+      return pt_plcsql_set_children (parser, xasl, args, cnt) == NO_ERROR ? xasl : NULL;
 
     case PT_SP_LOOP:
       xasl = pt_plcsql_new_node (PLCSQL_OP_LOOP);
@@ -31909,9 +32358,9 @@ pt_to_plcsql_xasl (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params)
 {
   XASL_NODE *xasl;
   TP_DOMAIN *ret_domain = NULL;
-  int locals_cnt;
+  int locals_cnt, cursors_cnt;
 
-  locals_cnt = pt_plcsql_resolve_locals (parser, block, params);
+  locals_cnt = pt_plcsql_resolve_locals (parser, block, params, &cursors_cnt);
   if (locals_cnt < 0)
     {
       return NULL;
@@ -31935,6 +32384,7 @@ pt_to_plcsql_xasl (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params)
     }
 
   xasl->proc.plcsql.locals_cnt = locals_cnt;
+  xasl->proc.plcsql.cursors_cnt = cursors_cnt;
 
   return xasl;
 }
@@ -32169,7 +32619,8 @@ pt_plcsql_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig
       memset (&xasl_Supp_info, 0, sizeof (xasl_Supp_info));
 
       pt_Plcsql_compiling[pt_Plcsql_compile_depth++] = sig->ext.sp.code_oid;
-      if (pt_plcsql_read_static_sql (body_parser, block->info.sp_stmt.body) == NO_ERROR)
+      if (pt_plcsql_read_static_sql (body_parser, block->info.sp_stmt.decl_list) == NO_ERROR
+	  && pt_plcsql_read_static_sql (body_parser, block->info.sp_stmt.body) == NO_ERROR)
 	{
 	  xasl = pt_to_plcsql_xasl (body_parser, block, params);
 	}
