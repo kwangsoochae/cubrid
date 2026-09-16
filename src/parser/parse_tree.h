@@ -1735,6 +1735,11 @@ typedef struct pt_truncate_info PT_TRUNCATE_INFO;
 #define PT_SP_CURSOR_ATTR_ISOPEN	3
 #define PT_SP_CURSOR_ATTR_ROWCOUNT	4
 
+/* which value PL/CSQL keeps a word of its own for this name is; PT_NAME_INFO.plcsql_reserved */
+#define PT_SP_RESERVED_NONE		0
+#define PT_SP_RESERVED_SQLCODE		1
+#define PT_SP_RESERVED_SQLERRM		2
+
 typedef struct pt_sp_stmt_info PT_SP_STMT_INFO;
 typedef struct pt_do_info PT_DO_INFO;
 typedef union pt_statement_info PT_STATEMENT_INFO;
@@ -2711,6 +2716,8 @@ struct pt_name_info
   int plcsql_slot;		/* the frame slot, read only where meta_class is PT_PLCSQL_LOCAL */
   int plcsql_cursor_attr;	/* which attribute of a cursor this name is, PT_SP_CURSOR_ATTR_NONE
 				 * unless it was written as one. The cursor is in original. */
+  int plcsql_reserved;		/* SQLCODE or SQLERRM where the name is one of them, and
+				 * PT_SP_RESERVED_NONE where it is a name the body wrote */
   PT_NODE *default_value;	/* PT_VALUE the default value of the attribute */
   PT_NODE *constant_value;	/* constant value derived from qo_reduce_equality_terms () */
   unsigned int custom_print;

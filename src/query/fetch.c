@@ -4642,9 +4642,9 @@ fetch_execute_plcsql (THREAD_ENTRY * thread_p, SP_TYPE * sp, val_descr * vd, OID
       return ER_FAILED;
     }
 
-  /* the parameters hold the first slots, in declared order, so the arguments go in by position.
-   * They are evaluated in the caller's frame, before this one is the current one. */
-  i = 0;
+  /* the parameters hold the slots after the reserved ones, in declared order, so the arguments
+   * go in by position. They are evaluated in the caller's frame, before this one is current. */
+  i = PLCSQL_RESERVED_SLOTS;
   for (arg = sp->args; arg != NULL; arg = arg->next, i++)
     {
       DB_VALUE *value = NULL;

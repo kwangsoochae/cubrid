@@ -505,8 +505,42 @@ typedef enum
   PLCSQL_OP_RAISE,		/* RAISE, RAISE_APPLICATION_ERROR */
   PLCSQL_OP_CURSOR,		/* OPEN, FETCH, CLOSE, OPEN FOR */
   PLCSQL_OP_CALL,		/* procedure call */
-  PLCSQL_OP_SQL			/* one SQL statement, whose plan is this node's only child */
+  PLCSQL_OP_SQL,		/* one SQL statement, whose plan is this node's only child */
+  PLCSQL_OP_HANDLER		/* one WHEN of a block's EXCEPTION part */
 } PLCSQL_OP;
+
+/* The exceptions PL/CSQL predefines. The order is the reference implementation's own
+ * (SymbolStack.addPredefinedExceptions), and so are the numbers: its SQLCODE constants run 0
+ * to 9 down that same list, so a handler's number and the SQLCODE a body reads are one value.
+ *
+ * With one exception measured: sql_error reads as 5, storage_error's number rather than its
+ * own 6, which is what the reference implementation does in both the natural and the raised
+ * direction. qexec_plcsql_sqlcode () keeps that apart from this list. */
+typedef enum
+{
+  PLCSQL_EXC_CASE_NOT_FOUND = 0,
+  PLCSQL_EXC_CURSOR_ALREADY_OPEN,
+  PLCSQL_EXC_INVALID_CURSOR,
+  PLCSQL_EXC_NO_DATA_FOUND,
+  PLCSQL_EXC_PROGRAM_ERROR,
+  PLCSQL_EXC_STORAGE_ERROR,
+  PLCSQL_EXC_SQL_ERROR,
+  PLCSQL_EXC_TOO_MANY_ROWS,
+  PLCSQL_EXC_VALUE_ERROR,
+  PLCSQL_EXC_ZERO_DIVIDE,
+  PLCSQL_EXC_PREDEFINED_CNT,
+
+  /* One a body declared. They are numbered from here in the order the declarations are read,
+   * which keeps them apart from the predefined ones in the single integer a handler carries. */
+  PLCSQL_EXC_USER_FIRST = 1000
+} PLCSQL_EXC;
+
+/* plcsql_proc_node.flags of a PLCSQL_OP_ASSIGN. The assignments that bind a call's arguments to
+ * their declared types are built at the head of the routine's own block, so they stand among the
+ * children its EXCEPTION part would cover. The reference implementation casts before the body
+ * begins, where nothing the body writes can take the failure, and the flag says which children
+ * those are so that a block leaves them alone. */
+#define PLCSQL_ASSIGN_PARAM	0x01
 
 /* plcsql_proc_node.flags of a PLCSQL_OP_JUMP. A jump with no flag set is the RETURN that leaves
  * the routine; the other two leave loops, as many as plcsql_proc_node.jump_levels says. */
@@ -524,6 +558,14 @@ typedef enum
 
 /* the slots a cursor owns, counted from plcsql_proc_node.cursor_base_slot. The columns of its
  * query follow them, which is why the attributes are numbered first and their count is fixed. */
+/* Every frame opens with these two slots, ahead of the parameters. SQLCODE and SQLERRM are
+ * read the way a local is read and written the way a cursor's attributes are written, so
+ * nothing below the handler has to know they are not ordinary variables. Every body gets them
+ * because what writes them is the handler, which cannot see whether the body reads them. */
+#define PLCSQL_SLOT_SQLCODE		0
+#define PLCSQL_SLOT_SQLERRM		1
+#define PLCSQL_RESERVED_SLOTS		2
+
 #define PLCSQL_CURSOR_ATTR_FOUND	0
 #define PLCSQL_CURSOR_ATTR_NOTFOUND	1
 #define PLCSQL_CURSOR_ATTR_ISOPEN	2
@@ -562,6 +604,13 @@ struct plcsql_proc_node
 				 * attributes and then one per column of its query, so reading an
 				 * attribute and reading a fetched column are both reading a local */
   int cursor_cols_cnt;		/* CURSOR: how many columns its query gives back */
+  int handlers_cnt;		/* BLOCK: how many of the children at the end are handlers, and so zero
+				 * in a block written without an EXCEPTION part - which is what every
+				 * block a new node is born as reads, rather than something each
+				 * builder has to remember to say */
+  int *exc_list;		/* HANDLER: the exceptions this WHEN names */
+  int exc_cnt;			/* HANDLER: how many it names, and zero for WHEN OTHERS, which names
+				 * none and takes whatever reaches it */
   /* An SQL statement inside a procedure is a plain XASL node, not a kind of its own, and
    * hangs here as a child. */
   XASL_NODE **children;

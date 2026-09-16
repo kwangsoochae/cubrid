@@ -62,6 +62,7 @@ static PT_NODE *sp_make_loop (int form, PT_NODE * label, PT_NODE * name, PT_NODE
 			      PT_NODE * body, int line, int column);
 static PT_NODE *sp_make_cursor_op (PT_SP_STMT_OP op, const char *name, PT_NODE * args, int line, int column);
 static PT_NODE *sp_make_cursor_attr (const char *name, int attr);
+static PT_NODE *sp_make_reserved (int which);
 static PT_NODE *sp_make_jump (PT_SP_STMT_OP op, PT_NODE * label, PT_NODE * cond, int line, int column);
 static PT_NODE *sp_make_integer_literal (const char *text);
 static PT_NODE *sp_make_real_literal (const char *text, int line, int column);
@@ -84,7 +85,7 @@ static PT_NODE *sp_make_data_type (PT_TYPE_ENUM type, int precision, int scale);
 }
 
 %token BEGIN_ CONSTANT_ CONTINUE_ DECLARE_ ELSE_ ELSIF_ END_ EXIT_ FOR_ IF_ IN_ LOOP_ NOT_ NULL_ REVERSE_
-%token EXCEPTION_ OTHERS_ RAISE_
+%token EXCEPTION_ OTHERS_ RAISE_ SQLCODE_ SQLERRM_
 %token FALSE_ THEN_ TRUE_ WHEN_ WHILE_
 %token CLOSE_ CURSOR_ FETCH_ INTO_ OPEN_
 %token AS_ AUTHID_ CREATE_ FUNCTION_ OUT_ PROCEDURE_ REPLACE_ RETURN_
@@ -638,7 +639,7 @@ null_stmt
 	;
 
 block_stmt
-	: DECLARE_ decl_list BEGIN_ stmt_list END_ ';'
+	: DECLARE_ decl_list BEGIN_ stmt_list handler_part_opt END_ ';'
 		{
 		  PT_NODE *node = sp_make_stmt (PT_SP_BLOCK, @$.first_line, @$.first_column);
 
@@ -647,10 +648,11 @@ block_stmt
 		      node->info.sp_stmt.flags = PT_SP_BLOCK_NESTED;
 		      node->info.sp_stmt.decl_list = $2;
 		      node->info.sp_stmt.body = $4;
+		      node->info.sp_stmt.else_body = $5;
 		    }
 		  $$ = node;
 		}
-	| BEGIN_ stmt_list END_ ';'
+	| BEGIN_ stmt_list handler_part_opt END_ ';'
 		{
 		  PT_NODE *node = sp_make_stmt (PT_SP_BLOCK, @$.first_line, @$.first_column);
 
@@ -658,6 +660,7 @@ block_stmt
 		    {
 		      node->info.sp_stmt.flags = PT_SP_BLOCK_NESTED;
 		      node->info.sp_stmt.body = $2;
+		      node->info.sp_stmt.else_body = $3;
 		    }
 		  $$ = node;
 		}
@@ -824,6 +827,14 @@ expr
 	| IDENT PERCENT_ROWCOUNT
 		{
 		  $$ = SP_AT (sp_make_cursor_attr ($1, PT_SP_CURSOR_ATTR_ROWCOUNT), @$);
+		}
+	| SQLCODE_
+		{
+		  $$ = SP_AT (sp_make_reserved (PT_SP_RESERVED_SQLCODE), @$);
+		}
+	| SQLERRM_
+		{
+		  $$ = SP_AT (sp_make_reserved (PT_SP_RESERVED_SQLERRM), @$);
 		}
 	| expr OR_ expr
 		{
@@ -1108,6 +1119,28 @@ sp_make_cursor_attr (const char *name, int attr)
   if (node != NULL)
     {
       node->info.name.plcsql_cursor_attr = attr;
+    }
+
+  return node;
+}
+
+/*
+ * sp_make_reserved () - SQLCODE or SQLERRM
+ *   return: the node, NULL when the parser could not allocate one
+ *   which(in) : PT_SP_RESERVED_SQLCODE or PT_SP_RESERVED_SQLERRM
+ *
+ * note: a PT_NAME for the same reason a cursor attribute is one - what it becomes is a frame
+ *       slot, which a handler writes. They are words rather than identifiers so that a body
+ *       cannot declare one or assign to one, which is how the PL engine reads them too.
+ */
+static PT_NODE *
+sp_make_reserved (int which)
+{
+  PT_NODE *node = pt_name (sp_Parser, (which == PT_SP_RESERVED_SQLCODE) ? "sqlcode" : "sqlerrm");
+
+  if (node != NULL)
+    {
+      node->info.name.plcsql_reserved = which;
     }
 
   return node;

@@ -3711,6 +3711,13 @@ xts_process_plcsql_proc (char *ptr, const PLCSQL_PROC_NODE * plcsql_proc)
   ptr = or_pack_int (ptr, plcsql_proc->cursors_cnt);
   ptr = or_pack_int (ptr, plcsql_proc->cursor_base_slot);
   ptr = or_pack_int (ptr, plcsql_proc->cursor_cols_cnt);
+  ptr = or_pack_int (ptr, plcsql_proc->handlers_cnt);
+
+  ptr = or_pack_int (ptr, plcsql_proc->exc_cnt);
+  for (i = 0; i < plcsql_proc->exc_cnt; i++)
+    {
+      ptr = or_pack_int (ptr, plcsql_proc->exc_list[i]);
+    }
 
   offset = xts_save_regu_variable (plcsql_proc->expr);
   if (offset == ER_FAILED)
@@ -6752,6 +6759,9 @@ xts_sizeof_plcsql_proc (const PLCSQL_PROC_NODE * plcsql_proc)
 	   + OR_INT_SIZE	/* cursors_cnt */
 	   + OR_INT_SIZE	/* cursor_base_slot */
 	   + OR_INT_SIZE	/* cursor_cols_cnt */
+	   + OR_INT_SIZE	/* handlers_cnt */
+	   + OR_INT_SIZE	/* exc_cnt */
+	   + (plcsql_proc->exc_cnt * OR_INT_SIZE)	/* exc_list */
 	   + PTR_SIZE		/* expr */
 	   + PTR_SIZE		/* expr2 */
 	   + OR_INT_SIZE	/* children_cnt */
