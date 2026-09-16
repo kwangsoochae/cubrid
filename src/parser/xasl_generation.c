@@ -32609,6 +32609,124 @@ pt_to_plcsql_xasl (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params)
 }
 
 /*
+ * pt_plcsql_count_classes () - how many class entries the body's statements hold between them
+ *   return: the sum, duplicates included
+ *   xasl(in) : a node of the body's plan
+ */
+static int
+pt_plcsql_count_classes (const XASL_NODE * xasl)
+{
+  int i, n = 0;
+
+  if (xasl == NULL)
+    {
+      return 0;
+    }
+  if (xasl->type != PLCSQL_PROC)
+    {
+      /* one statement's own plan, and its builder has already listed what it touches */
+      return xasl->n_oid_list;
+    }
+
+  for (i = 0; i < xasl->proc.plcsql.children_cnt; i++)
+    {
+      n += pt_plcsql_count_classes (xasl->proc.plcsql.children[i]);
+    }
+  return n;
+}
+
+/*
+ * pt_plcsql_gather_classes () - copy the statements' class entries onto the body's plan
+ *   return: void
+ *   xasl(in)   : a node of the body's plan
+ *   root(in/out) : the body's plan, whose arrays are filled and whose n_oid_list grows
+ */
+static void
+pt_plcsql_gather_classes (const XASL_NODE * xasl, XASL_NODE * root)
+{
+  int i, j;
+
+  if (xasl == NULL)
+    {
+      return;
+    }
+  if (xasl->type == PLCSQL_PROC)
+    {
+      for (i = 0; i < xasl->proc.plcsql.children_cnt; i++)
+	{
+	  pt_plcsql_gather_classes (xasl->proc.plcsql.children[i], root);
+	}
+      return;
+    }
+
+  if (XASL_IS_FLAGED (xasl, XASL_INCLUDES_TDE_CLASS))
+    {
+      XASL_SET_FLAG (root, XASL_INCLUDES_TDE_CLASS);
+    }
+
+  for (i = 0; i < xasl->n_oid_list; i++)
+    {
+      for (j = 0; j < root->n_oid_list; j++)
+	{
+	  if (OID_EQ (&root->class_oid_list[j], &xasl->class_oid_list[i]))
+	    {
+	      break;
+	    }
+	}
+      if (j < root->n_oid_list)
+	{
+	  /* two statements touching one class list it once, and the first lock stands - which is
+	   * what pt_spec_to_xasl_class_oid_list () does with a class named twice in one FROM */
+	  continue;
+	}
+
+      root->class_oid_list[root->n_oid_list] = xasl->class_oid_list[i];
+      root->class_locks[root->n_oid_list] = xasl->class_locks[i];
+      root->tcard_list[root->n_oid_list] = xasl->tcard_list[i];
+      root->n_oid_list++;
+    }
+}
+
+/*
+ * pt_plcsql_list_classes () - put the classes the body touches on the body's own plan
+ *   return: void
+ *   xasl(in/out) : the body's plan
+ *
+ * note: each statement written in a body already carries its own list, built the way it is for
+ *       the same statement written on its own. What the body's plan needs is the sum of them,
+ *       because that plan is what the XASL cache files: the list is what the server locks before
+ *       running it, and what the cache drops it by when one of those classes changes. Left off,
+ *       a cached plan would outlive the table it was built against.
+ */
+static void
+pt_plcsql_list_classes (XASL_NODE * xasl)
+{
+  int n;
+
+  if (xasl == NULL)
+    {
+      return;
+    }
+
+  n = pt_plcsql_count_classes (xasl);
+  if (n <= 0)
+    {
+      return;
+    }
+
+  if ((xasl->class_oid_list = regu_oid_array_alloc (n)) == NULL
+      || (xasl->class_locks = regu_int_array_alloc (n)) == NULL
+      || (xasl->tcard_list = regu_int_array_alloc (n)) == NULL)
+    {
+      xasl->n_oid_list = 0;
+      return;
+    }
+
+  xasl->n_oid_list = 0;
+  pt_plcsql_gather_classes (xasl, xasl);
+}
+
+/*
  * pt_plcsql_compile_body () - build the procedure's own plan, if this build can
  *   return: the plan, NULL when the call stays with the PL engine
  *   parser(in) :
@@ -32845,6 +32963,8 @@ pt_plcsql_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig
 	  xasl = pt_to_plcsql_xasl (body_parser, block, params);
 	}
       pt_Plcsql_compile_depth--;
+
+      pt_plcsql_list_classes (xasl);
 
       pt_init_xasl_supp_info ();
       xasl_Supp_info = saved_supp;
