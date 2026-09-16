@@ -638,7 +638,7 @@ null_stmt
 	;
 
 block_stmt
-	: DECLARE_ decl_list BEGIN_ stmt_list END_ ';'
+	: DECLARE_ decl_list BEGIN_ stmt_list handler_part_opt END_ ';'
 		{
 		  PT_NODE *node = sp_make_stmt (PT_SP_BLOCK, @$.first_line, @$.first_column);
 
@@ -647,10 +647,11 @@ block_stmt
 		      node->info.sp_stmt.flags = PT_SP_BLOCK_NESTED;
 		      node->info.sp_stmt.decl_list = $2;
 		      node->info.sp_stmt.body = $4;
+		      node->info.sp_stmt.else_body = $5;
 		    }
 		  $$ = node;
 		}
-	| BEGIN_ stmt_list END_ ';'
+	| BEGIN_ stmt_list handler_part_opt END_ ';'
 		{
 		  PT_NODE *node = sp_make_stmt (PT_SP_BLOCK, @$.first_line, @$.first_column);
 
@@ -658,6 +659,7 @@ block_stmt
 		    {
 		      node->info.sp_stmt.flags = PT_SP_BLOCK_NESTED;
 		      node->info.sp_stmt.body = $2;
+		      node->info.sp_stmt.else_body = $3;
 		    }
 		  $$ = node;
 		}
