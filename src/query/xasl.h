@@ -535,6 +535,13 @@ typedef enum
   PLCSQL_EXC_USER_FIRST = 1000
 } PLCSQL_EXC;
 
+/* plcsql_proc_node.flags of a PLCSQL_OP_ASSIGN. The assignments that bind a call's arguments to
+ * their declared types are built at the head of the routine's own block, so they stand among the
+ * children its EXCEPTION part would cover. The reference implementation casts before the body
+ * begins, where nothing the body writes can take the failure, and the flag says which children
+ * those are so that a block leaves them alone. */
+#define PLCSQL_ASSIGN_PARAM	0x01
+
 /* plcsql_proc_node.flags of a PLCSQL_OP_JUMP. A jump with no flag set is the RETURN that leaves
  * the routine; the other two leave loops, as many as plcsql_proc_node.jump_levels says. */
 #define PLCSQL_JUMP_RETURN	0x00

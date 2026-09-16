@@ -29632,8 +29632,16 @@ qexec_execute_plcsql_stmt_inner (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL
     case PLCSQL_OP_BLOCK:
       for (i = 0; i < xasl->proc.plcsql.children_cnt - xasl->proc.plcsql.handlers_cnt; i++)
 	{
-	  if (qexec_execute_plcsql_stmt (thread_p, xasl->proc.plcsql.children[i], xasl_state) != NO_ERROR)
+	  XASL_NODE *child = xasl->proc.plcsql.children[i];
+
+	  if (qexec_execute_plcsql_stmt (thread_p, child, xasl_state) != NO_ERROR)
 	    {
+	      /* binding an argument to its declared type stands among these children but is not
+	       * of the body, so its failure travels out rather than reaching the handlers */
+	      if (child->proc.plcsql.op == PLCSQL_OP_ASSIGN && (child->proc.plcsql.flags & PLCSQL_ASSIGN_PARAM) != 0)
+		{
+		  return ER_FAILED;
+		}
 	      return qexec_plcsql_handle (thread_p, xasl, xasl_state);
 	    }
 	  if (frame->signal != PLCSQL_SIGNAL_NONE)

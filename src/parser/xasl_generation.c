@@ -31697,6 +31697,7 @@ pt_to_plcsql_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params, 
 	    {
 	      return NULL;
 	    }
+	  buf[i]->proc.plcsql.flags |= PLCSQL_ASSIGN_PARAM;
 	  i++;
 	}
 
