@@ -124,6 +124,8 @@ struct plcsql_frame
 
   int exc;			/* the exception a handler is running on, -1 outside one. A bare RAISE
 				 * reads it: what it re-raises is what the handler caught */
+  char *caught;			/* the sentence of the failure a handler is running on, place and all,
+				 * NULL outside one. A bare RAISE sends it back out as it stands */
   int raising;			/* the exception a RAISE announced, -1 when the failure in hand came
 				 * from the engine instead and the block reads its error code */
   int sqlcode;			/* the manual's 0 - 9, 1000 for a user-defined exception */

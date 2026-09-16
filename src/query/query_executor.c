@@ -430,6 +430,7 @@ static int qexec_clear_regu_value_list (THREAD_ENTRY * thread_p, XASL_NODE * xas
 static void qexec_clear_db_val_list (QPROC_DB_VALUE_LIST list);
 static int qexec_execute_plcsql_stmt (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
 static int qexec_execute_plcsql_stmt_inner (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
+static void qexec_plcsql_place (THREAD_ENTRY * thread_p, PLCSQL_FRAME * frame, XASL_NODE * xasl, const char *msg);
 static int qexec_plcsql_set_retval (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
 static void qexec_set_plcsql_cursor_attrs (PLCSQL_FRAME * frame, PLCSQL_CURSOR * cursor, bool opened);
 static void qexec_close_plcsql_cursor (THREAD_ENTRY * thread_p, PLCSQL_CURSOR * cursor);
@@ -3799,6 +3800,7 @@ qexec_alloc_plcsql_frame (THREAD_ENTRY * thread_p, int locals_cnt, int cursors_c
   frame->signal_level = 0;
   db_make_null (&frame->retval);
   frame->exc = -1;
+  frame->caught = NULL;
   frame->raising = -1;
   frame->sqlcode = 0;
   frame->sqlerrm = NULL;
@@ -3895,6 +3897,10 @@ qexec_free_plcsql_frame (THREAD_ENTRY * thread_p, PLCSQL_FRAME * frame)
   if (frame->placed != NULL)
     {
       db_private_free_and_init (thread_p, frame->placed);
+    }
+  if (frame->caught != NULL)
+    {
+      db_private_free_and_init (thread_p, frame->caught);
     }
 
   db_private_free (thread_p, frame);
@@ -29395,6 +29401,7 @@ static int
 qexec_plcsql_handle (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state)
 {
   PLCSQL_FRAME *frame = xasl_state->plcsql_frame;
+  char *outer_caught;
   int caught, outer_exc, i, j, rc;
 
   if (xasl->proc.plcsql.handlers_cnt == 0)
@@ -29422,20 +29429,24 @@ qexec_plcsql_handle (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xas
 
       /* The handler runs with the failure gone: the error is cleared so that what it does next
        * is not read as still failing, and so is the place, so that a handler that fails names
-       * its own line. Which exception it was stays on the frame, because a bare RAISE inside
-       * sends that one on again. */
+       * its own line. The failure itself is kept whole instead - a bare RAISE inside sends it
+       * back out as it arrived, place and all. */
       outer_exc = frame->exc;
+      outer_caught = frame->caught;
       frame->exc = caught;
       frame->raising = -1;
       frame->positioned = false;
-      if (frame->placed != NULL)
-	{
-	  db_private_free_and_init (thread_p, frame->placed);
-	}
+      frame->caught = frame->placed;
+      frame->placed = NULL;
       er_clear ();
 
       rc = qexec_execute_plcsql_stmt (thread_p, handler->proc.plcsql.children[0], xasl_state);
 
+      if (frame->caught != NULL)
+	{
+	  db_private_free_and_init (thread_p, frame->caught);
+	}
+      frame->caught = outer_caught;
       frame->exc = outer_exc;
       return rc;
     }
@@ -29486,25 +29497,37 @@ qexec_execute_plcsql_stmt (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE
       return rc;
     }
 
-  /* The statement that failed is the one that knows where it stands, so the place is put on
-   * here and the blocks it travels out through leave it alone. The sentence is the PL engine's
-   * - ExecuteThread writes "\n  (line %d, column %d) %s" - because a body that fails has to
-   * read the same either way the procedure ran. */
-  {
-    char inner[1024], placed[1120];
-    const char *msg = er_msg ();
-
-    strncpy (inner, (msg != NULL) ? msg : "", sizeof (inner) - 1);
-    inner[sizeof (inner) - 1] = '\0';
-
-    snprintf (placed, sizeof (placed), "\n  (line %d, column %d) %s", xasl->proc.plcsql.line,
-	      xasl->proc.plcsql.column, inner);
-    er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_SP_EXECUTE_ERROR, 1, placed);
-    frame->positioned = true;
-    frame->placed = db_private_strdup (thread_p, placed);
-  }
+  qexec_plcsql_place (thread_p, frame, xasl, er_msg ());
 
   return rc;
+}
+
+/*
+ * qexec_plcsql_place () - say where the failure in hand happened
+ *   thread_p(in) :
+ *   frame(in/out) : the running frame, which keeps the sentence for the caller to read
+ *   xasl(in)   : the statement that failed
+ *   msg(in)    : the sentence to put the place on
+ *
+ * note: the statement that failed is the one that knows where it stands, so the place is put
+ *       on here and the blocks it travels out through leave it alone. The layout is the PL
+ *       engine's - ExecuteThread writes "\n  (line %d, column %d) %s" - because a body that
+ *       fails has to read the same either way the procedure ran.
+ */
+static void
+qexec_plcsql_place (THREAD_ENTRY * thread_p, PLCSQL_FRAME * frame, XASL_NODE * xasl, const char *msg)
+{
+  char inner[1024], placed[1120];
+
+  /* er_set below writes over what er_msg () points at, so the sentence is copied out first */
+  strncpy (inner, (msg != NULL) ? msg : "", sizeof (inner) - 1);
+  inner[sizeof (inner) - 1] = '\0';
+
+  snprintf (placed, sizeof (placed), "\n  (line %d, column %d) %s", xasl->proc.plcsql.line,
+	    xasl->proc.plcsql.column, inner);
+  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_SP_EXECUTE_ERROR, 1, placed);
+  frame->positioned = true;
+  frame->placed = db_private_strdup (thread_p, placed);
 }
 
 static int
@@ -29547,7 +29570,21 @@ qexec_execute_plcsql_stmt_inner (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL
 	  }
 
 	frame->raising = raised;
-	er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_SP_EXECUTE_ERROR, 1, qexec_plcsql_exc_name (raised));
+
+	if (xasl->proc.plcsql.target_slot < 0 && frame->caught != NULL)
+	  {
+	    /* A bare RAISE sends the failure back out as it arrived, place and all: what the
+	     * reference implementation names is where the exception first came up, not the line
+	     * that sent it on. */
+	    er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_SP_EXECUTE_ERROR, 1, frame->caught);
+	    frame->positioned = true;
+	    frame->placed = db_private_strdup (thread_p, frame->caught);
+	    return ER_FAILED;
+	  }
+
+	/* the place goes on here and not at the wrapper, which reads the sentence back out of
+	 * er_msg () - by then with ER_SP_EXECUTE_ERROR's own words in front of it */
+	qexec_plcsql_place (thread_p, frame, xasl, qexec_plcsql_exc_name (raised));
 	return ER_FAILED;
       }
 
