@@ -431,6 +431,7 @@ static void qexec_clear_db_val_list (QPROC_DB_VALUE_LIST list);
 static int qexec_execute_plcsql_stmt (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
 static int qexec_execute_plcsql_stmt_inner (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
 static void qexec_plcsql_place (THREAD_ENTRY * thread_p, PLCSQL_FRAME * frame, XASL_NODE * xasl, const char *msg);
+static int qexec_plcsql_set_sqlstate (PLCSQL_FRAME * frame, int exc);
 static int qexec_plcsql_set_retval (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
 static void qexec_set_plcsql_cursor_attrs (PLCSQL_FRAME * frame, PLCSQL_CURSOR * cursor, bool opened);
 static void qexec_close_plcsql_cursor (THREAD_ENTRY * thread_p, PLCSQL_CURSOR * cursor);
@@ -3802,8 +3803,6 @@ qexec_alloc_plcsql_frame (THREAD_ENTRY * thread_p, int locals_cnt, int cursors_c
   frame->exc = -1;
   frame->caught = NULL;
   frame->raising = -1;
-  frame->sqlcode = 0;
-  frame->sqlerrm = NULL;
   frame->positioned = false;
   frame->placed = NULL;
   frame->call_depth = (caller != NULL) ? caller->call_depth + 1 : 0;
@@ -3841,6 +3840,13 @@ qexec_alloc_plcsql_frame (THREAD_ENTRY * thread_p, int locals_cnt, int cursors_c
 	{
 	  db_make_null (&frame->locals[i]);
 	}
+    }
+
+  /* what a body reads before anything has failed, and again once every handler is done */
+  if (locals_cnt >= PLCSQL_RESERVED_SLOTS && qexec_plcsql_set_sqlstate (frame, -1) != NO_ERROR)
+    {
+      qexec_free_plcsql_frame (thread_p, frame);
+      return NULL;
     }
 
   return frame;
@@ -3890,10 +3896,6 @@ qexec_free_plcsql_frame (THREAD_ENTRY * thread_p, PLCSQL_FRAME * frame)
       db_private_free_and_init (thread_p, frame->locals);
     }
   pr_clear_value (&frame->retval);
-  if (frame->sqlerrm != NULL)
-    {
-      db_private_free_and_init (thread_p, frame->sqlerrm);
-    }
   if (frame->placed != NULL)
     {
       db_private_free_and_init (thread_p, frame->placed);
@@ -29387,6 +29389,50 @@ qexec_plcsql_exc_name (int exc)
 }
 
 /*
+ * qexec_plcsql_sqlcode () - what SQLCODE shows for an exception
+ *   return: the number a body reads
+ *   exc(in) :
+ *
+ * note: a predefined exception shows its own number, which the manual lists, and every one a
+ *       body declared shows 1000 - the manual says so, and they are told apart from each other
+ *       by the number the plan carries rather than by this one. sql_error is measured at
+ *       storage_error's 5 rather than the 6 the list and the manual both give it; the
+ *       reference implementation is what a body already reads, so 5 is what this gives back.
+ */
+static int
+qexec_plcsql_sqlcode (int exc)
+{
+  if (exc == PLCSQL_EXC_SQL_ERROR)
+    {
+      return PLCSQL_EXC_STORAGE_ERROR;
+    }
+
+  return (exc < PLCSQL_EXC_USER_FIRST) ? exc : 1000;
+}
+
+/*
+ * qexec_plcsql_set_sqlstate () - write the slots SQLCODE and SQLERRM are read out of
+ *   return: NO_ERROR or ER_FAILED
+ *   frame(in/out) :
+ *   exc(in)    : the exception a handler is about to run on, -1 for outside every handler
+ */
+static int
+qexec_plcsql_set_sqlstate (PLCSQL_FRAME * frame, int exc)
+{
+  DB_VALUE *code = &frame->locals[PLCSQL_SLOT_SQLCODE];
+  DB_VALUE *errm = &frame->locals[PLCSQL_SLOT_SQLERRM];
+  const char *msg = (exc < 0) ? "no error" : qexec_plcsql_exc_name (exc);
+
+  assert (frame->locals_cnt >= PLCSQL_RESERVED_SLOTS);
+
+  pr_clear_value (code);
+  pr_clear_value (errm);
+  db_make_int (code, (exc < 0) ? 0 : qexec_plcsql_sqlcode (exc));
+
+  return db_make_string_copy (errm, msg);
+}
+
+/*
  * qexec_plcsql_handle () - give a block's EXCEPTION part the failure in hand
  *   return: NO_ERROR when a handler took it and ran through, ER_FAILED when none did or the
  *           handler itself failed
@@ -29429,8 +29475,8 @@ qexec_plcsql_handle (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xas
 
       /* The handler runs with the failure gone: the error is cleared so that what it does next
        * is not read as still failing, and so is the place, so that a handler that fails names
-       * its own line. The failure itself is kept whole instead - a bare RAISE inside sends it
-       * back out as it arrived, place and all. */
+       * its own line. What the failure was stays on the frame instead - a bare RAISE inside
+       * sends it back out, and SQLCODE and SQLERRM read it. */
       outer_exc = frame->exc;
       outer_caught = frame->caught;
       frame->exc = caught;
@@ -29440,8 +29486,15 @@ qexec_plcsql_handle (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xas
       frame->placed = NULL;
       er_clear ();
 
-      rc = qexec_execute_plcsql_stmt (thread_p, handler->proc.plcsql.children[0], xasl_state);
+      rc = qexec_plcsql_set_sqlstate (frame, caught);
+      if (rc == NO_ERROR)
+	{
+	  rc = qexec_execute_plcsql_stmt (thread_p, handler->proc.plcsql.children[0], xasl_state);
+	}
 
+      /* an inner handler ran on its own exception and the one around it goes back to reading
+       * its own, which is 0 and "no error" once the outermost one is done */
+      (void) qexec_plcsql_set_sqlstate (frame, outer_exc);
       if (frame->caught != NULL)
 	{
 	  db_private_free_and_init (thread_p, frame->caught);
@@ -30255,7 +30308,7 @@ qexec_call_plcsql (THREAD_ENTRY * thread_p, XASL_NODE * xasl, DB_VALUE * args, i
 
   *placed_msg = NULL;
 
-  if (xasl == NULL || xasl->type != PLCSQL_PROC || args_cnt > xasl->proc.plcsql.locals_cnt)
+  if (xasl == NULL || xasl->type != PLCSQL_PROC || args_cnt > xasl->proc.plcsql.locals_cnt - PLCSQL_RESERVED_SLOTS)
     {
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_XASLNODE, 0);
       return ER_FAILED;
@@ -30305,7 +30358,7 @@ qexec_call_plcsql (THREAD_ENTRY * thread_p, XASL_NODE * xasl, DB_VALUE * args, i
       return ER_FAILED;
     }
 
-  /* the parameters hold the first slots, in declared order */
+  /* the parameters hold the slots after the reserved ones, in declared order */
   for (i = 0; i < args_cnt; i++)
     {
       /* the same question the PL engine asks of an argument. Running the routine here instead
@@ -30317,7 +30370,7 @@ qexec_call_plcsql (THREAD_ENTRY * thread_p, XASL_NODE * xasl, DB_VALUE * args, i
 	  error = ER_SP_NOT_SUPPORTED_ARG_TYPE;
 	  break;
 	}
-      if (pr_clone_value (&args[i], &frame->locals[i]) != NO_ERROR)
+      if (pr_clone_value (&args[i], &frame->locals[PLCSQL_RESERVED_SLOTS + i]) != NO_ERROR)
 	{
 	  error = ER_FAILED;
 	  break;

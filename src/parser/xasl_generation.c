@@ -30296,6 +30296,18 @@ pt_plcsql_bind_name (PARSER_CONTEXT * parser, PT_NODE * name, PT_PLCSQL_SCOPE * 
 {
   PT_NODE *decl;
 
+  if (name->info.name.plcsql_reserved != PT_SP_RESERVED_NONE)
+    {
+      /* a word, so there is nothing to look up: the slot is the same one in every frame */
+      bool is_code = (name->info.name.plcsql_reserved == PT_SP_RESERVED_SQLCODE);
+
+      name->info.name.meta_class = PT_PLCSQL_LOCAL;
+      name->info.name.plcsql_slot = is_code ? PLCSQL_SLOT_SQLCODE : PLCSQL_SLOT_SQLERRM;
+      name->type_enum = is_code ? PT_TYPE_INTEGER : PT_TYPE_VARCHAR;
+      name->data_type = NULL;
+      return NO_ERROR;
+    }
+
   decl = pt_plcsql_find_decl (scope, name->info.name.original);
 
   if (name->info.name.plcsql_cursor_attr != PT_SP_CURSOR_ATTR_NONE)
@@ -30908,16 +30920,17 @@ pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCO
  *   params(in/out) : the parameters, a PT_NAME list in declared order, NULL when there are none
  *   cursors_cnt(out) : how many cursors the body declares, counted in their own sequence
  *
- * note: the parameters take the first slots, in order, so the caller can fill them by position
- *       without being told which slot each went to. The body's declarations follow. A cursor
- *       is numbered apart from the slots because it holds no value.
+ * note: the parameters take the slots after the reserved ones, in order, so the caller can
+ *       fill them by position without being told which slot each went to. The body's
+ *       declarations follow. A cursor is numbered apart from the slots because it holds no
+ *       value.
  */
 int
 pt_plcsql_resolve_locals (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params, int *cursors_cnt)
 {
   PT_PLCSQL_SCOPE outer;
   PT_NODE *p;
-  int next_slot = 0, next_exc = 0;
+  int next_slot = PLCSQL_RESERVED_SLOTS, next_exc = 0;
 
   assert (block != NULL && block->node_type == PT_SP_STMT && block->info.sp_stmt.op == PT_SP_BLOCK);
 

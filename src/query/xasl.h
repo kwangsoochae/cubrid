@@ -513,10 +513,9 @@ typedef enum
  * (SymbolStack.addPredefinedExceptions), and so are the numbers: its SQLCODE constants run 0
  * to 9 down that same list, so a handler's number and the SQLCODE a body reads are one value.
  *
- * What a body actually reads does not always follow that, though - a baseline case measures
- * sql_error surfacing as 5, which is storage_error's number rather than its own 6
- * (_01_basic_structure/_03_exception_handler/_06_natural_occurrence, case 14). Whatever makes
- * that happen has not been found, so SQLCODE is not derived from this list yet. */
+ * With one exception measured: sql_error reads as 5, storage_error's number rather than its
+ * own 6, which is what the reference implementation does in both the natural and the raised
+ * direction. qexec_plcsql_sqlcode () keeps that apart from this list. */
 typedef enum
 {
   PLCSQL_EXC_CASE_NOT_FOUND = 0,
@@ -552,6 +551,14 @@ typedef enum
 
 /* the slots a cursor owns, counted from plcsql_proc_node.cursor_base_slot. The columns of its
  * query follow them, which is why the attributes are numbered first and their count is fixed. */
+/* Every frame opens with these two slots, ahead of the parameters. SQLCODE and SQLERRM are
+ * read the way a local is read and written the way a cursor's attributes are written, so
+ * nothing below the handler has to know they are not ordinary variables. Every body gets them
+ * because what writes them is the handler, which cannot see whether the body reads them. */
+#define PLCSQL_SLOT_SQLCODE		0
+#define PLCSQL_SLOT_SQLERRM		1
+#define PLCSQL_RESERVED_SLOTS		2
+
 #define PLCSQL_CURSOR_ATTR_FOUND	0
 #define PLCSQL_CURSOR_ATTR_NOTFOUND	1
 #define PLCSQL_CURSOR_ATTR_ISOPEN	2

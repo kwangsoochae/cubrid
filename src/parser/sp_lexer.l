@@ -99,6 +99,8 @@ static SP_KEYWORD sp_Keywords[] = {
   {"reverse", REVERSE_, PT_TYPE_NONE},
   {"short", TYPE_KEYWORD, PT_TYPE_SMALLINT},
   {"smallint", TYPE_KEYWORD, PT_TYPE_SMALLINT},
+  {"sqlcode", SQLCODE_, PT_TYPE_NONE},
+  {"sqlerrm", SQLERRM_, PT_TYPE_NONE},
   {"string", TYPE_KEYWORD, PT_TYPE_VARCHAR},
   {"then", THEN_, PT_TYPE_NONE},
   {"time", TYPE_KEYWORD, PT_TYPE_TIME},
