@@ -11175,7 +11175,7 @@ cleanup:
 int
 pl_call (const cubpl::pl_signature & sig, const std::string & plan,
 	 const std::vector < std::reference_wrapper < DB_VALUE >> &args, std::vector < DB_VALUE > &out_args,
-	 DB_VALUE & result)
+	 DB_VALUE & result, bool use_cached)
 {
   int req_error = NO_ERROR;
 #if defined(CS_MODE)
@@ -11184,7 +11184,7 @@ pl_call (const cubpl::pl_signature & sig, const std::string & plan,
 
   packing_packer packer;
   cubmem::extensible_block eb;
-  packer.set_buffer_and_pack_all (eb, sig, args, plan);
+  packer.set_buffer_and_pack_all (eb, sig, args, plan, use_cached);
 
   {
     OR_ALIGNED_BUF (OR_INT_SIZE * 3) a_reply;

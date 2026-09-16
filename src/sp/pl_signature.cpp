@@ -20,6 +20,7 @@
 
 #include <new>
 #include "memory_alloc.h"
+#include "oid.h"
 #include "memory_private_allocator.hpp"
 #include "sp_constants.hpp"
 #include "error_manager.h"
@@ -452,5 +453,31 @@ namespace cubpl
 	size += sigs[i].get_packed_size (serializator, size);
       }
     return size;
+  }
+
+  int
+  pl_plan_key (const OID &code_oid, SHA1Hash &sha1, char *text)
+  {
+    char oid_text[64];
+
+    if (OID_ISNULL (&code_oid))
+      {
+	return ER_FAILED;
+      }
+
+    /* the three fields by name rather than the struct's bytes: this hash is matched against one
+     * made in another process, and padding is not part of that agreement */
+    snprintf (oid_text, sizeof (oid_text), "%d|%d|%d", (int) code_oid.pageid, (int) code_oid.slotid,
+	      (int) code_oid.volid);
+    if (SHA1Compute ((const unsigned char *) oid_text, strlen (oid_text), &sha1) != NO_ERROR)
+      {
+	return ER_FAILED;
+      }
+
+    if (text != NULL)
+      {
+	snprintf (text, PL_PLAN_KEY_TEXT_SIZE, "%08x %08x %08x %08x %08x", SHA1_AS_ARGS (&sha1));
+      }
+    return NO_ERROR;
   }
 }

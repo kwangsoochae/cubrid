@@ -33,6 +33,8 @@
 
 #include <vector>
 #include <functional>
+#include <set>
+#include <string>
 #include <chrono>
 #include <ctime>
 #include <iomanip>
@@ -765,6 +767,79 @@ exit_on_error:
   return ER_FAILED;
 }
 
+/* Which procedures this client believes the server already holds a plan for, by the key the
+ * plan is filed under (cubpl::pl_plan_key ()).
+ *
+ * It holds keys, not plans. A key that should not be here costs one refused call and is
+ * dropped; a plan that should not be here would be run. The set is per thread because a
+ * client library may have several, and it is never emptied on purpose - a wrong entry
+ * corrects itself on use, so there is nothing to invalidate from this side.
+ *
+ * Standalone mode does not go through the server's call handler at all, so it keeps building
+ * plans and this stays empty. */
+static thread_local std::set < std::string > jsp_Plan_cached;
+
+static bool
+jsp_is_plan_cached (const char *key)
+{
+#if defined(CS_MODE)
+  return key != NULL && jsp_Plan_cached.find (key) != jsp_Plan_cached.end ();
+#else
+  return false;
+#endif
+}
+
+static void
+jsp_remember_cached_plan (const char *key)
+{
+#if defined(CS_MODE)
+  if (key != NULL)
+    {
+      jsp_Plan_cached.insert (key);
+    }
+#endif
+}
+
+static void
+jsp_forget_cached_plan (const char *key)
+{
+#if defined(CS_MODE)
+  if (key != NULL)
+    {
+      jsp_Plan_cached.erase (key);
+    }
+#endif
+}
+
+/* Drop whatever plan the server holds for this procedure's code, and forget that it held one.
+ *
+ * The cache drops an entry when a class it depends on changes, but the procedure's own body is
+ * not one of those classes - it is a row in a catalog, and rewriting it does not reach that
+ * path. So the only place that knows the plan is stale is the statement that made it stale.
+ *
+ * Doing only half of this would be worse than neither: forgetting on the client while the
+ * server keeps the entry means the next call sends a fresh plan and gets the old one back,
+ * because the plan is filed under a key the new code object may well be given again. */
+static void
+jsp_drop_cached_plan (const OID *code_oid)
+{
+#if defined(CS_MODE)
+  SHA1Hash sha1;
+  char key[PL_PLAN_KEY_TEXT_SIZE];
+
+  if (code_oid == NULL || cubpl::pl_plan_key (*code_oid, sha1, key) != NO_ERROR)
+    {
+      return;
+    }
+
+  jsp_forget_cached_plan (key);
+  if (qmgr_drop_query_plans_by_sha1 (key) != NO_ERROR)
+    {
+      er_clear ();
+    }
+#endif
+}
+
 /*
  * jsp_call_stored_procedure - call java stored procedure in constant folding
  *   return: call jsp failed return error code
@@ -817,11 +892,48 @@ jsp_call_stored_procedure (PARSER_CONTEXT *parser, PT_NODE *statement)
       std::vector <DB_VALUE> out_args;
 
       /* an empty plan means the PL engine takes the call, which is still the common case. It
-       * fails only under pl_native_execution_strict, where refusing to build one is the point. */
-      error = pt_plcsql_plan_stream (&sig, plan);
+       * fails only under pl_native_execution_strict, where refusing to build one is the point.
+       *
+       * Building the plan is what a second call can skip: the server files it under a key it
+       * can make again from the signature, so once it is there the call need carry nothing.
+       * What is remembered here is only that belief, never a plan - a stale belief costs one
+       * round trip and corrects itself, while a stale plan would be read as a live one. */
+      SHA1Hash sha1;
+      char key[PL_PLAN_KEY_TEXT_SIZE];
+      /* No key, no belief to hold: a Java SP has no code object to make one from, and with the
+       * plan cache turned off there is nowhere for a plan to be, so asking for one that cannot
+       * be there would cost every call a refused round trip. */
+      bool has_key = (prm_get_integer_value (PRM_ID_XASL_CACHE_MAX_ENTRIES) > 0
+		      && cubpl::pl_plan_key (sig.ext.sp.code_oid, sha1, key) == NO_ERROR);
+      bool use_cached = has_key && jsp_is_plan_cached (key);
+
+      if (!use_cached)
+	{
+	  error = pt_plcsql_plan_stream (&sig, plan);
+	}
       if (error == NO_ERROR)
 	{
-	  error = pl_call (sig, plan, args, out_args, ret_value);
+	  error = pl_call (sig, plan, args, out_args, ret_value, use_cached);
+
+	  if (error == ER_QPROC_INVALID_XASLNODE && use_cached)
+	    {
+	      /* The entry is gone - something it depends on changed, or the cache was cleaned.
+	       * Forget the belief, build a plan and run the call for real. */
+	      jsp_forget_cached_plan (key);
+	      er_clear ();
+
+	      error = pt_plcsql_plan_stream (&sig, plan);
+	      if (error == NO_ERROR)
+		{
+		  error = pl_call (sig, plan, args, out_args, ret_value, false);
+		}
+	    }
+
+	  if (error == NO_ERROR && has_key && !plan.empty ())
+	    {
+	      /* the plan just went to the server, which files it on the way in */
+	      jsp_remember_cached_plan (key);
+	    }
 	}
       if (error == NO_ERROR)
 	{
@@ -1820,6 +1932,13 @@ drop_stored_procedure_code (const char *name)
       err = er_errid ();
       goto error;
     }
+
+  /* whether this is a DROP or the drop half of a CREATE OR REPLACE, the plan compiled from this
+   * code must not outlive it. Every route that retires a PL/CSQL body passes here.
+   *
+   * The cache is not transactional, so a statement that rolls back after this leaves the plan
+   * gone while the body is still there. That costs one call its plan, and nothing else. */
+  jsp_drop_cached_plan (WS_OID (code_mop));
 
   // TODO: If a unreloadable SP is deleted, mark a flag in PL server to block calling the deleted SP
   err = obj_delete (code_mop);
