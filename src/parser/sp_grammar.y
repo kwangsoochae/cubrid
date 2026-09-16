@@ -59,6 +59,8 @@ static PT_NODE *sp_make_stmt (PT_SP_STMT_OP op, int line, int column);
 static void sp_unbound_char (PT_NODE * dt);
 static PT_NODE *sp_make_loop (int form, PT_NODE * label, PT_NODE * name, PT_NODE * lower, PT_NODE * upper,
 			      PT_NODE * body, int line, int column);
+static PT_NODE *sp_make_cursor_op (PT_SP_STMT_OP op, const char *name, PT_NODE * args, int line, int column);
+static PT_NODE *sp_make_cursor_attr (const char *name, int attr);
 static PT_NODE *sp_make_jump (PT_SP_STMT_OP op, PT_NODE * label, PT_NODE * cond, int line, int column);
 static PT_NODE *sp_make_integer_literal (const char *text);
 static PT_NODE *sp_make_real_literal (const char *text);
@@ -83,9 +85,11 @@ static PT_NODE *sp_make_data_type (PT_TYPE_ENUM type, int precision, int scale);
 %token BEGIN_ CONSTANT_ CONTINUE_ DECLARE_ ELSE_ ELSIF_ END_ EXIT_ FOR_ IF_ IN_ LOOP_ NOT_ NULL_ REVERSE_
 %token EXCEPTION_ OTHERS_ RAISE_
 %token FALSE_ THEN_ TRUE_ WHEN_ WHILE_
+%token CLOSE_ CURSOR_ FETCH_ INTO_ OPEN_
 %token AS_ AUTHID_ CREATE_ FUNCTION_ OUT_ PROCEDURE_ REPLACE_ RETURN_
 %token AND_ DIV_ IS_ MOD_ OR_
 %token ASSIGN DOTDOT CONCAT NE GE LE LABEL_BEGIN LABEL_END
+%token PERCENT_FOUND PERCENT_ISOPEN PERCENT_NOTFOUND PERCENT_ROWCOUNT PERCENT_ROWTYPE PERCENT_TYPE
 
 %token <cptr> IDENT UNSIGNED_INTEGER UNSIGNED_REAL CHAR_STRING SQL_TEXT
 %token <number> TYPE_KEYWORD
@@ -93,8 +97,9 @@ static PT_NODE *sp_make_data_type (PT_TYPE_ENUM type, int precision, int scale);
 %type <node> block decl_list decl_list_opt decl stmt_list stmt if_stmt else_part_opt loop_stmt
 %type <node> assign_stmt block_stmt null_stmt return_stmt return_opt expr expr_list_opt type_spec
 %type <node> call_stmt sp_name arg_list_opt arg_list
-%type <node> jump_stmt label_decl_opt label_opt when_opt
-%type <node> raise_stmt handler_part_opt handler_list handler handler_name_list sql_stmt
+%type <node> jump_stmt label_decl_opt label_opt when_opt sql_stmt
+%type <node> raise_stmt handler_part_opt handler_list handler handler_name_list
+%type <node> cursor_decl cursor_params_opt open_stmt close_stmt fetch_stmt fetch_targets
 %type <node> routine param_list_opt param_list param
 %type <number> constant_opt reverse_opt
 
@@ -346,7 +351,8 @@ decl_list
 
 /* v bigint;   c constant int := 7;   e exception; */
 decl
-	: IDENT EXCEPTION_ ';'
+	: cursor_decl
+	| IDENT EXCEPTION_ ';'
 		{
 		  PT_NODE *node = sp_make_stmt (PT_SP_DECL, @$.first_line, @$.first_column);
 
@@ -370,6 +376,72 @@ decl
 		      node->info.sp_stmt.expr = $4;
 		    }
 		  $$ = node;
+		}
+	;
+
+/* A cursor is declared where a variable is, but it is not one: it holds no value and takes
+ * no frame slot. Its query is gathered the way a statement's is - the lexer starts on SELECT
+ * and reads to the semicolon - so the text arrives here already whole, semicolon included,
+ * and the rule wants no ';' of its own. */
+cursor_decl
+	: CURSOR_ IDENT cursor_params_opt IS_ SQL_TEXT
+		{
+		  PT_NODE *node = sp_make_stmt (PT_SP_CURSOR, @$.first_line, @$.first_column);
+
+		  if (node != NULL)
+		    {
+		      node->info.sp_stmt.name = pt_name (sp_Parser, $2);
+		      node->info.sp_stmt.params = $3;
+		      node->info.sp_stmt.sql_text = $5;
+		    }
+		  $$ = node;
+		}
+	;
+
+cursor_params_opt
+	: /* empty */
+		{
+		  $$ = NULL;
+		}
+	| '(' param_list ')'
+		{
+		  $$ = $2;
+		}
+	;
+
+open_stmt
+	: OPEN_ IDENT ';'
+		{
+		  $$ = sp_make_cursor_op (PT_SP_OPEN, $2, NULL, @$.first_line, @$.first_column);
+		}
+	| OPEN_ IDENT '(' arg_list_opt ')' ';'
+		{
+		  $$ = sp_make_cursor_op (PT_SP_OPEN, $2, $4, @$.first_line, @$.first_column);
+		}
+	;
+
+close_stmt
+	: CLOSE_ IDENT ';'
+		{
+		  $$ = sp_make_cursor_op (PT_SP_CLOSE, $2, NULL, @$.first_line, @$.first_column);
+		}
+	;
+
+fetch_stmt
+	: FETCH_ IDENT INTO_ fetch_targets ';'
+		{
+		  $$ = sp_make_cursor_op (PT_SP_FETCH, $2, $4, @$.first_line, @$.first_column);
+		}
+	;
+
+fetch_targets
+	: IDENT
+		{
+		  $$ = SP_AT (pt_name (sp_Parser, $1), @$);
+		}
+	| fetch_targets ',' IDENT
+		{
+		  $$ = parser_append_node (SP_AT (pt_name (sp_Parser, $3), @$), $1);
 		}
 	;
 
@@ -431,6 +503,9 @@ stmt
 	| return_stmt
 	| jump_stmt
 	| sql_stmt
+	| open_stmt
+	| close_stmt
+	| fetch_stmt
 	| null_stmt
 	;
 
@@ -733,7 +808,23 @@ reverse_opt
 	;
 
 expr
-	: expr OR_ expr
+	: IDENT PERCENT_FOUND
+		{
+		  $$ = SP_AT (sp_make_cursor_attr ($1, PT_SP_CURSOR_ATTR_FOUND), @$);
+		}
+	| IDENT PERCENT_NOTFOUND
+		{
+		  $$ = SP_AT (sp_make_cursor_attr ($1, PT_SP_CURSOR_ATTR_NOTFOUND), @$);
+		}
+	| IDENT PERCENT_ISOPEN
+		{
+		  $$ = SP_AT (sp_make_cursor_attr ($1, PT_SP_CURSOR_ATTR_ISOPEN), @$);
+		}
+	| IDENT PERCENT_ROWCOUNT
+		{
+		  $$ = SP_AT (sp_make_cursor_attr ($1, PT_SP_CURSOR_ATTR_ROWCOUNT), @$);
+		}
+	| expr OR_ expr
 		{
 		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_OR, $1, $3, NULL), @$);
 		}
@@ -971,6 +1062,51 @@ sp_make_loop (int form, PT_NODE * label, PT_NODE * name, PT_NODE * lower, PT_NOD
       node->info.sp_stmt.expr = lower;
       node->info.sp_stmt.expr2 = upper;
       node->info.sp_stmt.body = body;
+    }
+
+  return node;
+}
+
+/*
+ * sp_make_cursor_op () - one OPEN or CLOSE node
+ *   return: the node, NULL when the parser could not allocate one
+ *   op(in)   : PT_SP_OPEN or PT_SP_CLOSE
+ *   name(in) : the cursor's name as written
+ *   args(in) : the arguments an OPEN passes, NULL for CLOSE and for an OPEN written without any
+ *   line(in), column(in) : where the statement was written
+ */
+static PT_NODE *
+sp_make_cursor_op (PT_SP_STMT_OP op, const char *name, PT_NODE * args, int line, int column)
+{
+  PT_NODE *node = sp_make_stmt (op, line, column);
+
+  if (node != NULL)
+    {
+      node->info.sp_stmt.name = pt_name (sp_Parser, name);
+      node->info.sp_stmt.expr = args;
+    }
+
+  return node;
+}
+
+/*
+ * sp_make_cursor_attr () - one per cent attribute written on a cursor
+ *   return: the node, NULL when the parser could not allocate one
+ *   name(in) : the cursor's name as written
+ *   attr(in) : which attribute, PT_SP_CURSOR_ATTR_*
+ *
+ * note: it is a PT_NAME rather than an expression because what it becomes is a frame slot -
+ *       the cursor keeps one per attribute and FETCH writes them, so reading one is reading
+ *       a local and needs nothing of its own below here.
+ */
+static PT_NODE *
+sp_make_cursor_attr (const char *name, int attr)
+{
+  PT_NODE *node = pt_name (sp_Parser, name);
+
+  if (node != NULL)
+    {
+      node->info.name.plcsql_cursor_attr = attr;
     }
 
   return node;
