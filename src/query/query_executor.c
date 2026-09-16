@@ -431,7 +431,7 @@ static void qexec_clear_db_val_list (QPROC_DB_VALUE_LIST list);
 static int qexec_execute_plcsql_stmt (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
 static int qexec_execute_plcsql_stmt_inner (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
 static void qexec_plcsql_place (THREAD_ENTRY * thread_p, PLCSQL_FRAME * frame, XASL_NODE * xasl, const char *msg);
-static int qexec_plcsql_set_sqlstate (PLCSQL_FRAME * frame, int exc);
+static int qexec_plcsql_set_sqlstate (PLCSQL_FRAME * frame, int exc, const char *msg);
 static int qexec_plcsql_set_retval (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
 static void qexec_set_plcsql_cursor_attrs (PLCSQL_FRAME * frame, PLCSQL_CURSOR * cursor, bool opened);
 static void qexec_close_plcsql_cursor (THREAD_ENTRY * thread_p, PLCSQL_CURSOR * cursor);
@@ -3805,6 +3805,7 @@ qexec_alloc_plcsql_frame (THREAD_ENTRY * thread_p, int locals_cnt, int cursors_c
   frame->raising = -1;
   frame->positioned = false;
   frame->placed = NULL;
+  frame->msg = NULL;
   frame->call_depth = (caller != NULL) ? caller->call_depth + 1 : 0;
   frame->caller = caller;
 
@@ -3843,7 +3844,7 @@ qexec_alloc_plcsql_frame (THREAD_ENTRY * thread_p, int locals_cnt, int cursors_c
     }
 
   /* what a body reads before anything has failed, and again once every handler is done */
-  if (locals_cnt >= PLCSQL_RESERVED_SLOTS && qexec_plcsql_set_sqlstate (frame, -1) != NO_ERROR)
+  if (locals_cnt >= PLCSQL_RESERVED_SLOTS && qexec_plcsql_set_sqlstate (frame, -1, NULL) != NO_ERROR)
     {
       qexec_free_plcsql_frame (thread_p, frame);
       return NULL;
@@ -3899,6 +3900,10 @@ qexec_free_plcsql_frame (THREAD_ENTRY * thread_p, PLCSQL_FRAME * frame)
   if (frame->placed != NULL)
     {
       db_private_free_and_init (thread_p, frame->placed);
+    }
+  if (frame->msg != NULL)
+    {
+      db_private_free_and_init (thread_p, frame->msg);
     }
   if (frame->caught != NULL)
     {
@@ -29341,9 +29346,9 @@ qexec_plcsql_test (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu, XASL_STATE * x
  *   return: a PLCSQL_EXC, and PLCSQL_EXC_VALUE_ERROR for anything not named here
  *   err(in)    : what er_errid () gave
  *
- * note: this is only for a failure that named no exception on its way out - a RAISE, a SQL
- *       statement and a SELECT ... INTO all do, because the error code cannot tell them
- *       apart. The reference implementation does not decide by error code alone either: it
+ * note: this is only for a failure that named no exception on its way out. A RAISE, a SQL
+ *       statement, a cursor operation and a SELECT ... INTO all name their own, because the
+ *       error code cannot tell them apart. The reference implementation does not decide by error code alone either: it
  *       runs built-in functions through a query, so a built-in that fails raises SQL_ERROR
  *       where the same failure in a native expression is an invalid value. What is listed
  *       below is measured against it rather than derived.
@@ -29358,6 +29363,11 @@ qexec_plcsql_exc_of_error (int err)
 
     case ER_OUT_OF_VIRTUAL_MEMORY:
       return PLCSQL_EXC_STORAGE_ERROR;
+
+    case ER_QSTR_TONUM_FORMAT_MISMATCH:
+      /* the one built-in a baseline case pins. The rest of that family is unmeasured and is
+       * left to read as an invalid value rather than guessed at. */
+      return PLCSQL_EXC_SQL_ERROR;
 
     default:
       return PLCSQL_EXC_VALUE_ERROR;
@@ -29415,13 +29425,14 @@ qexec_plcsql_sqlcode (int exc)
  *   return: NO_ERROR or ER_FAILED
  *   frame(in/out) :
  *   exc(in)    : the exception a handler is about to run on, -1 for outside every handler
+ *   msg(in)    : what the failure said, which is what SQLERRM answers with. NULL falls back to
+ *                the exception's own wording, for a caller that has no sentence to hand over
  */
 static int
-qexec_plcsql_set_sqlstate (PLCSQL_FRAME * frame, int exc)
+qexec_plcsql_set_sqlstate (PLCSQL_FRAME * frame, int exc, const char *msg)
 {
   DB_VALUE *code = &frame->locals[PLCSQL_SLOT_SQLCODE];
   DB_VALUE *errm = &frame->locals[PLCSQL_SLOT_SQLERRM];
-  const char *msg = (exc < 0) ? "no error" : qexec_plcsql_exc_name (exc);
 
   assert (frame->locals_cnt >= PLCSQL_RESERVED_SLOTS);
 
@@ -29429,7 +29440,7 @@ qexec_plcsql_set_sqlstate (PLCSQL_FRAME * frame, int exc)
   pr_clear_value (errm);
   db_make_int (code, (exc < 0) ? 0 : qexec_plcsql_sqlcode (exc));
 
-  return db_make_string_copy (errm, msg);
+  return db_make_string_copy (errm, (exc < 0) ? "no error" : (msg != NULL) ? msg : qexec_plcsql_exc_name (exc));
 }
 
 /*
@@ -29447,7 +29458,7 @@ static int
 qexec_plcsql_handle (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state)
 {
   PLCSQL_FRAME *frame = xasl_state->plcsql_frame;
-  char *outer_caught;
+  char *outer_caught, *outer_msg;
   int caught, outer_exc, i, j, rc;
 
   if (xasl->proc.plcsql.handlers_cnt == 0)
@@ -29479,6 +29490,9 @@ qexec_plcsql_handle (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xas
        * sends it back out, and SQLCODE and SQLERRM read it. */
       outer_exc = frame->exc;
       outer_caught = frame->caught;
+      /* what the handler around this one was reading, taken from the slot rather than kept in
+       * step with it: the slot is where SQLERRM lives and there is nowhere else it can drift to */
+      outer_msg = db_private_strdup (thread_p, db_get_string (&frame->locals[PLCSQL_SLOT_SQLERRM]));
       frame->exc = caught;
       frame->raising = -1;
       frame->positioned = false;
@@ -29486,7 +29500,7 @@ qexec_plcsql_handle (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xas
       frame->placed = NULL;
       er_clear ();
 
-      rc = qexec_plcsql_set_sqlstate (frame, caught);
+      rc = qexec_plcsql_set_sqlstate (frame, caught, frame->msg);
       if (rc == NO_ERROR)
 	{
 	  rc = qexec_execute_plcsql_stmt (thread_p, handler->proc.plcsql.children[0], xasl_state);
@@ -29494,7 +29508,11 @@ qexec_plcsql_handle (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xas
 
       /* an inner handler ran on its own exception and the one around it goes back to reading
        * its own, which is 0 and "no error" once the outermost one is done */
-      (void) qexec_plcsql_set_sqlstate (frame, outer_exc);
+      (void) qexec_plcsql_set_sqlstate (frame, outer_exc, outer_msg);
+      if (outer_msg != NULL)
+	{
+	  db_private_free_and_init (thread_p, outer_msg);
+	}
       if (frame->caught != NULL)
 	{
 	  db_private_free_and_init (thread_p, frame->caught);
@@ -29547,6 +29565,11 @@ qexec_execute_plcsql_stmt (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE
        * The PL engine names no place for those either, so the sentence goes out on its own,
        * and the flag keeps an enclosing block from offering its place in exchange. */
       frame->positioned = true;
+      if (frame->msg != NULL)
+	{
+	  db_private_free_and_init (thread_p, frame->msg);
+	}
+      frame->msg = db_private_strdup (thread_p, er_msg ());
       return rc;
     }
 
@@ -29581,6 +29604,13 @@ qexec_plcsql_place (THREAD_ENTRY * thread_p, PLCSQL_FRAME * frame, XASL_NODE * x
   er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_SP_EXECUTE_ERROR, 1, placed);
   frame->positioned = true;
   frame->placed = db_private_strdup (thread_p, placed);
+
+  /* SQLERRM answers with this rather than with the placed sentence, so it is kept apart */
+  if (frame->msg != NULL)
+    {
+      db_private_free_and_init (thread_p, frame->msg);
+    }
+  frame->msg = db_private_strdup (thread_p, inner);
 }
 
 static int
@@ -29632,6 +29662,13 @@ qexec_execute_plcsql_stmt_inner (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL
 	    er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_SP_EXECUTE_ERROR, 1, frame->caught);
 	    frame->positioned = true;
 	    frame->placed = db_private_strdup (thread_p, frame->caught);
+	    /* what SQLERRM was showing goes on too, so a handler further out reads the sentence
+	     * of the failure that started this rather than this RAISE's own */
+	    if (frame->msg != NULL)
+	      {
+		db_private_free_and_init (thread_p, frame->msg);
+	      }
+	    frame->msg = db_private_strdup (thread_p, db_get_string (&frame->locals[PLCSQL_SLOT_SQLERRM]));
 	    return ER_FAILED;
 	  }
 
@@ -29922,6 +29959,9 @@ qexec_plcsql_cursor (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xas
 	   * CURSOR_ALREADY_OPEN with, and it is a different sentence for each thing that was
 	   * tried - the exception's own default message names none of them. Plain text rather
 	   * than the sentence a caller sees, for the reason the INTO clause's two are. */
+	  /* which exception a cursor operation failed as is its own answer, the same way a
+	   * SELECT ... INTO names the two it can end in: the error codes do not tell them apart */
+	  xasl_state->plcsql_frame->raising = PLCSQL_EXC_CURSOR_ALREADY_OPEN;
 	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_PT_ERROR, 1, "cursor already open");
 	  return ER_FAILED;
 	}
@@ -29946,6 +29986,7 @@ qexec_plcsql_cursor (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xas
     case PLCSQL_CURSOR_FETCH:
       if (!cursor->is_open)
 	{
+	  xasl_state->plcsql_frame->raising = PLCSQL_EXC_INVALID_CURSOR;
 	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_PT_ERROR, 1, "tried to fetch values with an unopened cursor");
 	  return ER_FAILED;
 	}
@@ -29954,6 +29995,7 @@ qexec_plcsql_cursor (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xas
     case PLCSQL_CURSOR_CLOSE:
       if (!cursor->is_open)
 	{
+	  xasl_state->plcsql_frame->raising = PLCSQL_EXC_INVALID_CURSOR;
 	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_PT_ERROR, 1, "tried to close an unopened cursor");
 	  return ER_FAILED;
 	}

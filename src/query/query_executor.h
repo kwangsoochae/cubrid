@@ -133,6 +133,9 @@ struct plcsql_frame
 				 * it travels out through must not name themselves instead */
   char *placed;			/* the sentence that named the place, kept bare for a caller that has
 				 * to raise the error again */
+  char *msg;			/* the same sentence without the place, which is what SQLERRM shows:
+				 * the reference implementation answers with what the failure said,
+				 * and only a RAISE makes that the exception's own wording */
 
   int call_depth;
   PLCSQL_FRAME *caller;
