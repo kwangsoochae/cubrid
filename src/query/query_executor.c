@@ -29364,6 +29364,13 @@ qexec_plcsql_exc_of_error (int err)
     case ER_OUT_OF_VIRTUAL_MEMORY:
       return PLCSQL_EXC_STORAGE_ERROR;
 
+    case ER_SP_EXECUTE_ERROR:
+      /* a routine this one called failed and its error already carries that routine's own
+       * wrapper. The reference implementation answers SQL_ERROR for a call that failed, the
+       * same as for a statement, whether the call was written as one or stands in an
+       * expression - the error code is what both shapes have in common. */
+      return PLCSQL_EXC_SQL_ERROR;
+
     case ER_QSTR_TONUM_FORMAT_MISMATCH:
       /* the one built-in a baseline case pins. The rest of that family is unmeasured and is
        * left to read as an invalid value rather than guessed at. */
