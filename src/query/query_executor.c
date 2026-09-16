@@ -3798,6 +3798,8 @@ qexec_alloc_plcsql_frame (THREAD_ENTRY * thread_p, int locals_cnt, int cursors_c
   frame->signal = PLCSQL_SIGNAL_NONE;
   frame->signal_level = 0;
   db_make_null (&frame->retval);
+  frame->exc = -1;
+  frame->raising = -1;
   frame->sqlcode = 0;
   frame->sqlerrm = NULL;
   frame->positioned = false;
@@ -29327,6 +29329,121 @@ qexec_plcsql_test (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu, XASL_STATE * x
 }
 
 /*
+ * qexec_plcsql_exc_of_error () - which exception an engine error arrives as
+ *   return: a PLCSQL_EXC, and PLCSQL_EXC_VALUE_ERROR for anything not named here
+ *   err(in)    : what er_errid () gave
+ *
+ * note: this is only for a failure that named no exception on its way out - a RAISE, a SQL
+ *       statement and a SELECT ... INTO all do, because the error code cannot tell them
+ *       apart. The reference implementation does not decide by error code alone either: it
+ *       runs built-in functions through a query, so a built-in that fails raises SQL_ERROR
+ *       where the same failure in a native expression is an invalid value. What is listed
+ *       below is measured against it rather than derived.
+ */
+static int
+qexec_plcsql_exc_of_error (int err)
+{
+  switch (err)
+    {
+    case ER_QPROC_ZERO_DIVIDE:
+      return PLCSQL_EXC_ZERO_DIVIDE;
+
+    case ER_OUT_OF_VIRTUAL_MEMORY:
+      return PLCSQL_EXC_STORAGE_ERROR;
+
+    default:
+      return PLCSQL_EXC_VALUE_ERROR;
+    }
+}
+
+/*
+ * qexec_plcsql_exc_name () - the sentence an exception is raised with
+ *   return: the sentence, which is the reference implementation's own wording
+ *   exc(in) :
+ */
+static const char *
+qexec_plcsql_exc_name (int exc)
+{
+  static const char *const msgs[] = {
+    "case not found", "cursor already open", "invalid cursor", "no data found",
+    "internal server error", "storage error", "SQL error", "too many rows", "value error",
+    "division by zero"
+  };
+
+  if (exc >= 0 && exc < PLCSQL_EXC_PREDEFINED_CNT)
+    {
+      return msgs[exc];
+    }
+
+  /* every exception a body declared reads the same, which is what the reference implementation
+   * says for one: the name it was declared with does not reach the sentence */
+  return "user defined exception";
+}
+
+/*
+ * qexec_plcsql_handle () - give a block's EXCEPTION part the failure in hand
+ *   return: NO_ERROR when a handler took it and ran through, ER_FAILED when none did or the
+ *           handler itself failed
+ *   thread_p(in) :
+ *   xasl(in)   : the PLCSQL_OP_BLOCK whose statements failed
+ *   xasl_state(in) :
+ *
+ * note: a block with no EXCEPTION part has nothing here to do, and the failure travels on the
+ *       way it did before handlers existed.
+ */
+static int
+qexec_plcsql_handle (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state)
+{
+  PLCSQL_FRAME *frame = xasl_state->plcsql_frame;
+  int caught, outer_exc, i, j, rc;
+
+  if (xasl->proc.plcsql.handlers_cnt == 0)
+    {
+      return ER_FAILED;
+    }
+
+  /* what failed said which exception it is, where it could: a RAISE names one, and a SQL
+   * statement marks its own. What is left arrived as an engine error and is read from that. */
+  caught = (frame->raising >= 0) ? frame->raising : qexec_plcsql_exc_of_error (er_errid ());
+
+  for (i = xasl->proc.plcsql.children_cnt - xasl->proc.plcsql.handlers_cnt; i < xasl->proc.plcsql.children_cnt; i++)
+    {
+      XASL_NODE *handler = xasl->proc.plcsql.children[i];
+      bool takes = (handler->proc.plcsql.exc_cnt == 0);	/* WHEN OTHERS takes whatever reaches it */
+
+      for (j = 0; !takes && j < handler->proc.plcsql.exc_cnt; j++)
+	{
+	  takes = (handler->proc.plcsql.exc_list[j] == caught);
+	}
+      if (!takes)
+	{
+	  continue;
+	}
+
+      /* The handler runs with the failure gone: the error is cleared so that what it does next
+       * is not read as still failing, and so is the place, so that a handler that fails names
+       * its own line. Which exception it was stays on the frame, because a bare RAISE inside
+       * sends that one on again. */
+      outer_exc = frame->exc;
+      frame->exc = caught;
+      frame->raising = -1;
+      frame->positioned = false;
+      if (frame->placed != NULL)
+	{
+	  db_private_free_and_init (thread_p, frame->placed);
+	}
+      er_clear ();
+
+      rc = qexec_execute_plcsql_stmt (thread_p, handler->proc.plcsql.children[0], xasl_state);
+
+      frame->exc = outer_exc;
+      return rc;
+    }
+
+  return ER_FAILED;
+}
+
+/*
  * qexec_execute_plcsql_stmt () - run one procedural statement
  *   return: NO_ERROR or ER_FAILED
  *   thread_p(in) :
@@ -29339,7 +29456,22 @@ qexec_execute_plcsql_stmt (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE
   PLCSQL_FRAME *frame = xasl_state->plcsql_frame;
   int rc = qexec_execute_plcsql_stmt_inner (thread_p, xasl, xasl_state);
 
-  if (rc == NO_ERROR || frame->positioned)
+  if (rc == NO_ERROR)
+    {
+      return rc;
+    }
+
+  /* Which exception this is has to be read before the wrapper below replaces the error with
+   * its own: what the code says is gone by then, and every failure would look alike. The
+   * statement that failed may have named one already - a RAISE and a SQL statement both do.
+   * It is read ahead of the returns below as well, because a failure already placed, or with
+   * nowhere to point at, is still a failure a handler may take. */
+  if (frame->raising < 0)
+    {
+      frame->raising = qexec_plcsql_exc_of_error (er_errid ());
+    }
+
+  if (frame->positioned)
     {
       return rc;
     }
@@ -29385,11 +29517,11 @@ qexec_execute_plcsql_stmt_inner (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL
   switch (xasl->proc.plcsql.op)
     {
     case PLCSQL_OP_BLOCK:
-      for (i = 0; i < xasl->proc.plcsql.children_cnt; i++)
+      for (i = 0; i < xasl->proc.plcsql.children_cnt - xasl->proc.plcsql.handlers_cnt; i++)
 	{
 	  if (qexec_execute_plcsql_stmt (thread_p, xasl->proc.plcsql.children[i], xasl_state) != NO_ERROR)
 	    {
-	      return ER_FAILED;
+	      return qexec_plcsql_handle (thread_p, xasl, xasl_state);
 	    }
 	  if (frame->signal != PLCSQL_SIGNAL_NONE)
 	    {
@@ -29397,6 +29529,27 @@ qexec_execute_plcsql_stmt_inner (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL
 	    }
 	}
       return NO_ERROR;
+
+    case PLCSQL_OP_RAISE:
+      /* A RAISE is a failure like any other: what tells the block which handler to look for is
+       * the number, and what the error carries is the sentence. A bare one names nothing and
+       * sends on what the handler it stands in caught. */
+      {
+	int raised = (xasl->proc.plcsql.target_slot >= 0) ? xasl->proc.plcsql.target_slot : frame->exc;
+
+	if (raised < 0)
+	  {
+	    /* CREATE refuses a bare RAISE outside a handler, so this is reporting another
+	     * compiler's checking rather than checking for the first time */
+	    er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_SP_EXECUTE_ERROR, 1,
+		    "a RAISE that names no exception stands outside a handler");
+	    return ER_FAILED;
+	  }
+
+	frame->raising = raised;
+	er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_SP_EXECUTE_ERROR, 1, qexec_plcsql_exc_name (raised));
+	return ER_FAILED;
+      }
 
     case PLCSQL_OP_JUMP:
       if (xasl->proc.plcsql.flags != PLCSQL_JUMP_RETURN)
@@ -29454,10 +29607,21 @@ qexec_execute_plcsql_stmt_inner (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL
       return qexec_execute_plcsql_loop (thread_p, xasl, xasl_state);
 
     case PLCSQL_OP_SQL:
-      return qexec_plcsql_sql (thread_p, xasl, xasl_state);
-
     case PLCSQL_OP_CURSOR:
-      return qexec_plcsql_cursor (thread_p, xasl, xasl_state);
+      {
+	/* Whatever goes wrong running SQL is a SQL_ERROR, which is the reference implementation's
+	 * answer too: it runs a body's SQL over a connection and hands back what that failed
+	 * with. The statement says so itself rather than the block reading it out of an error
+	 * code, because the same code means something else in an expression. */
+	int rc = (xasl->proc.plcsql.op == PLCSQL_OP_SQL)
+	  ? qexec_plcsql_sql (thread_p, xasl, xasl_state) : qexec_plcsql_cursor (thread_p, xasl, xasl_state);
+
+	if (rc != NO_ERROR && frame->raising < 0)
+	  {
+	    frame->raising = PLCSQL_EXC_SQL_ERROR;
+	  }
+	return rc;
+      }
 
     case PLCSQL_OP_CALL:
       {
@@ -29799,6 +29963,9 @@ qexec_plcsql_read_into (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * 
 
   if (qfile_scan_list_next (thread_p, &scan_id, &tuple_record, PEEK) != S_SUCCESS)
     {
+      /* how many rows came back is this statement's own answer, so it names the exception
+       * rather than letting the block read SQL_ERROR out of the error it leaves behind */
+      xasl_state->plcsql_frame->raising = PLCSQL_EXC_NO_DATA_FOUND;
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_PT_ERROR, 1, "no data found");
       error = ER_FAILED;
       goto end;
@@ -29849,6 +30016,7 @@ qexec_plcsql_read_into (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * 
 
   if (qfile_scan_list_next (thread_p, &scan_id, &tuple_record, PEEK) == S_SUCCESS)
     {
+      xasl_state->plcsql_frame->raising = PLCSQL_EXC_TOO_MANY_ROWS;
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_PT_ERROR, 1, "too many rows");
       error = ER_FAILED;
     }

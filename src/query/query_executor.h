@@ -122,6 +122,10 @@ struct plcsql_frame
   DB_VALUE retval;		/* what a RETURN left for the caller to read; NULL until one runs,
 				 * which is also what a function that falls off its end gives back */
 
+  int exc;			/* the exception a handler is running on, -1 outside one. A bare RAISE
+				 * reads it: what it re-raises is what the handler caught */
+  int raising;			/* the exception a RAISE announced, -1 when the failure in hand came
+				 * from the engine instead and the block reads its error code */
   int sqlcode;			/* the manual's 0 - 9, 1000 for a user-defined exception */
   char *sqlerrm;
 

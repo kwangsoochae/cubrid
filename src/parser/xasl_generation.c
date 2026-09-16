@@ -30151,10 +30151,12 @@ static int pt_plcsql_resolve_expr (PARSER_CONTEXT * parser, PT_NODE * expr, PT_P
 static int pt_plcsql_bind_host_vars (PARSER_CONTEXT * parser, PT_NODE * sql, PT_PLCSQL_SCOPE * scope);
 static int pt_plcsql_cursor_attr_slot (PT_NODE * name);
 static int pt_plcsql_bind_cursor (PARSER_CONTEXT * parser, PT_NODE * stmt, PT_PLCSQL_SCOPE * scope);
+static int pt_plcsql_exc_number (const char *name);
+static int pt_plcsql_bind_exception (PARSER_CONTEXT * parser, PT_NODE * name, PT_PLCSQL_SCOPE * scope);
 static int pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_SCOPE * scope,
-					int *next_slot);
+					int *next_slot, int *next_cursor, int *next_exc);
 static int pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCOPE * outer,
-				    int *next_slot, int *next_cursor);
+				    int *next_slot, int *next_cursor, int *next_exc);
 
 /*
  * pt_plcsql_find_decl () - the declaration a name refers to, innermost scope first
@@ -30532,6 +30534,73 @@ pt_plcsql_take_into_list (PARSER_CONTEXT * parser, PT_NODE * stmt, PT_PLCSQL_SCO
 }
 
 /*
+ * pt_plcsql_exc_number () - the number a predefined exception goes by
+ *   return: the number, -1 when the name is not one of them
+ *   name(in) :
+ *
+ * note: the order is the manual's, and the reference implementation keeps the same list
+ *       (SymbolStack.addPredefinedExceptions). $APP_ERROR is left out because nothing raises
+ *       it yet - RAISE_APPLICATION_ERROR is its own task.
+ */
+static int
+pt_plcsql_exc_number (const char *name)
+{
+  static const char *const names[] = {
+    "case_not_found", "cursor_already_open", "invalid_cursor", "no_data_found", "program_error",
+    "storage_error", "sql_error", "too_many_rows", "value_error", "zero_divide"
+  };
+  int i;
+
+  for (i = 0; i < (int) (sizeof (names) / sizeof (names[0])); i++)
+    {
+      if (intl_identifier_casecmp (name, names[i]) == 0)
+	{
+	  return i;
+	}
+    }
+
+  return -1;
+}
+
+/*
+ * pt_plcsql_bind_exception () - give a name that stands for an exception its number
+ *   return: NO_ERROR or ER_FAILED
+ *   parser(in) :
+ *   name(in/out) : the PT_NAME a handler or a RAISE wrote
+ *   scope(in)  :
+ *
+ * note: the number rides in plcsql_slot, which an exception leaves free because it holds no
+ *       value - the same place a cursor keeps its own number.
+ */
+static int
+pt_plcsql_bind_exception (PARSER_CONTEXT * parser, PT_NODE * name, PT_PLCSQL_SCOPE * scope)
+{
+  PT_NODE *decl;
+  int predefined;
+
+  /* a declaration wins over a predefined name of the same spelling, which is what the
+   * reference implementation does: its declarations are pushed over the predefined ones */
+  decl = pt_plcsql_find_decl (scope, name->info.name.original);
+  if (decl != NULL && decl->node_type == PT_SP_STMT && (decl->info.sp_stmt.flags & PT_SP_DECL_EXCEPTION))
+    {
+      name->info.name.plcsql_slot = decl->info.sp_stmt.name->info.name.plcsql_slot;
+      return NO_ERROR;
+    }
+
+  predefined = pt_plcsql_exc_number (name->info.name.original);
+  if (predefined >= 0)
+    {
+      name->info.name.plcsql_slot = predefined;
+      return NO_ERROR;
+    }
+
+  /* a name that is neither is not something the PL engine's compiler would have accepted, so
+   * this is reporting another compiler's checking rather than checking for the first time */
+  PT_ERRORmf (parser, name, MSGCAT_SET_PARSER_SEMANTIC, MSGCAT_SEMANTIC_IS_NOT_DEFINED, name->info.name.original);
+  return ER_FAILED;
+}
+
+/*
  * pt_plcsql_resolve_stmt_list () - resolve a statement list in one scope
  *   return: NO_ERROR or ER_FAILED
  *   parser(in) :
@@ -30541,7 +30610,7 @@ pt_plcsql_take_into_list (PARSER_CONTEXT * parser, PT_NODE * stmt, PT_PLCSQL_SCO
  */
 static int
 pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_SCOPE * scope, int *next_slot,
-			     int *next_cursor)
+			     int *next_cursor, int *next_exc)
 {
   PT_NODE *stmt;
   PT_PLCSQL_SCOPE loop_scope;
@@ -30551,7 +30620,7 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
       switch (stmt->info.sp_stmt.op)
 	{
 	case PT_SP_BLOCK:
-	  if (pt_plcsql_resolve_block (parser, stmt, scope, next_slot, next_cursor) != NO_ERROR)
+	  if (pt_plcsql_resolve_block (parser, stmt, scope, next_slot, next_cursor, next_exc) != NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }
@@ -30567,10 +30636,10 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
 
 	case PT_SP_IF:
 	  if (pt_plcsql_resolve_expr (parser, stmt->info.sp_stmt.expr, scope) != NO_ERROR
-	      || pt_plcsql_resolve_stmt_list (parser, stmt->info.sp_stmt.body, scope, next_slot,
-					      next_cursor) != NO_ERROR
-	      || pt_plcsql_resolve_stmt_list (parser, stmt->info.sp_stmt.else_body, scope, next_slot,
-					      next_cursor) != NO_ERROR)
+	      || pt_plcsql_resolve_stmt_list (parser, stmt->info.sp_stmt.body, scope, next_slot, next_cursor,
+					      next_exc) != NO_ERROR
+	      || pt_plcsql_resolve_stmt_list (parser, stmt->info.sp_stmt.else_body, scope, next_slot, next_cursor,
+					      next_exc) != NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }
@@ -30598,8 +30667,8 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
 	      loop_scope.names->type_enum = PT_TYPE_INTEGER;
 	    }
 
-	  if (pt_plcsql_resolve_stmt_list (parser, stmt->info.sp_stmt.body, &loop_scope, next_slot, next_cursor) !=
-	      NO_ERROR)
+	  if (pt_plcsql_resolve_stmt_list (parser, stmt->info.sp_stmt.body, &loop_scope, next_slot, next_cursor,
+					   next_exc) != NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }
@@ -30664,7 +30733,15 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
 	  break;
 
 	case PT_SP_RAISE:
-	  /* the name is an exception, which is not a value and so binds to no slot */
+	  /* the name is an exception, not a value, so what it binds to is a number and not a
+	   * slot. A bare RAISE names nothing and re-raises whatever the handler caught. */
+	  if (stmt->info.sp_stmt.name != NULL
+	      && pt_plcsql_bind_exception (parser, stmt->info.sp_stmt.name, scope) != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
+	  break;
+
 	case PT_SP_NULL_STMT:
 	  break;
 
@@ -30693,7 +30770,7 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
  */
 static int
 pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCOPE * outer, int *next_slot,
-			 int *next_cursor)
+			 int *next_cursor, int *next_exc)
 {
   PT_PLCSQL_SCOPE scope;
   PT_NODE *decl;
@@ -30708,7 +30785,10 @@ pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCO
       if (decl->info.sp_stmt.flags & PT_SP_DECL_EXCEPTION)
 	{
 	  /* an exception names no value, so it takes no frame slot. It still enters the scope,
-	   * because a handler and a RAISE name it the way an expression names a variable */
+	   * because a handler and a RAISE name it the way an expression names a variable, and it
+	   * is numbered in its own sequence - from PLCSQL_EXC_USER_FIRST, which keeps it apart
+	   * from a predefined one in the single integer a handler carries */
+	  decl->info.sp_stmt.name->info.name.plcsql_slot = PLCSQL_EXC_USER_FIRST + (*next_exc)++;
 	  scope.visible = decl;
 	  continue;
 	}
@@ -30790,7 +30870,8 @@ pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCO
       scope.visible = decl;
     }
 
-  if (pt_plcsql_resolve_stmt_list (parser, block->info.sp_stmt.body, &scope, next_slot, next_cursor) != NO_ERROR)
+  if (pt_plcsql_resolve_stmt_list (parser, block->info.sp_stmt.body, &scope, next_slot, next_cursor, next_exc)
+      != NO_ERROR)
     {
       return ER_FAILED;
     }
@@ -30799,7 +30880,18 @@ pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCO
    * to them, and what they declare is nothing. */
   for (decl = block->info.sp_stmt.else_body; decl != NULL; decl = decl->next)
     {
-      if (pt_plcsql_resolve_stmt_list (parser, decl->info.sp_stmt.body, &scope, next_slot, next_cursor) != NO_ERROR)
+      PT_NODE *caught;
+
+      for (caught = decl->info.sp_stmt.name; caught != NULL; caught = caught->next)
+	{
+	  if (pt_plcsql_bind_exception (parser, caught, &scope) != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
+	}
+
+      if (pt_plcsql_resolve_stmt_list (parser, decl->info.sp_stmt.body, &scope, next_slot, next_cursor, next_exc)
+	  != NO_ERROR)
 	{
 	  return ER_FAILED;
 	}
@@ -30825,7 +30917,7 @@ pt_plcsql_resolve_locals (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * pa
 {
   PT_PLCSQL_SCOPE outer;
   PT_NODE *p;
-  int next_slot = 0;
+  int next_slot = 0, next_exc = 0;
 
   assert (block != NULL && block->node_type == PT_SP_STMT && block->info.sp_stmt.op == PT_SP_BLOCK);
 
@@ -30841,7 +30933,8 @@ pt_plcsql_resolve_locals (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * pa
     }
 
   *cursors_cnt = 0;
-  if (pt_plcsql_resolve_block (parser, block, (params != NULL) ? &outer : NULL, &next_slot, cursors_cnt) != NO_ERROR)
+  if (pt_plcsql_resolve_block (parser, block, (params != NULL) ? &outer : NULL, &next_slot, cursors_cnt, &next_exc)
+      != NO_ERROR)
     {
       return -1;
     }
@@ -30874,6 +30967,7 @@ struct pt_plcsql_loop
 
 static int pt_plcsql_read_one_sql (PARSER_CONTEXT * parser, PT_NODE * stmt);
 static int pt_plcsql_read_static_sql (PARSER_CONTEXT * parser, PT_NODE * list);
+static int pt_plcsql_read_outer_handlers (PARSER_CONTEXT * parser, PT_NODE * block);
 static PT_NODE *pt_plcsql_type_expr (PARSER_CONTEXT * parser, PT_NODE * expr);
 static REGU_VARIABLE *pt_plcsql_expr_to_regu (PARSER_CONTEXT * parser, PT_NODE ** expr);
 static XASL_NODE *pt_plcsql_refuse (PARSER_CONTEXT * parser, const char *reason);
@@ -30884,6 +30978,8 @@ static XASL_NODE *pt_to_plcsql_stmt_inner (PARSER_CONTEXT * parser, PT_NODE * st
 static void pt_plcsql_place (XASL_NODE * xasl, PT_NODE * stmt);
 static XASL_NODE *pt_to_plcsql_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params,
 				      TP_DOMAIN * ret_domain, PT_PLCSQL_LOOP * loops);
+static XASL_NODE *pt_to_plcsql_handler (PARSER_CONTEXT * parser, PT_NODE * handler, TP_DOMAIN * ret_domain,
+					PT_PLCSQL_LOOP * loops);
 static XASL_NODE *pt_to_plcsql_stmt_list_block (PARSER_CONTEXT * parser, PT_NODE * list, TP_DOMAIN * ret_domain,
 						PT_PLCSQL_LOOP * loops);
 static int pt_plcsql_cursor_op_flag (PT_SP_STMT_OP op);
@@ -30969,6 +31065,31 @@ pt_plcsql_read_one_sql (PARSER_CONTEXT * parser, PT_NODE * stmt)
 }
 
 /*
+ * pt_plcsql_read_outer_handlers () - read the SQL a routine's own EXCEPTION part holds
+ *   return: NO_ERROR or ER_FAILED
+ *   parser(in) :
+ *   block(in)  : the routine's outermost block
+ *
+ * note: an inner block is reached as a statement and takes its handlers with it. The outermost
+ *       one is not a statement of anything, so what walks it is the entry point, by hand.
+ */
+static int
+pt_plcsql_read_outer_handlers (PARSER_CONTEXT * parser, PT_NODE * block)
+{
+  PT_NODE *handler;
+
+  for (handler = block->info.sp_stmt.else_body; handler != NULL; handler = handler->next)
+    {
+      if (pt_plcsql_read_static_sql (parser, handler->info.sp_stmt.body) != NO_ERROR)
+	{
+	  return ER_FAILED;
+	}
+    }
+
+  return NO_ERROR;
+}
+
+/*
  * pt_plcsql_read_static_sql () - have the SQL parser read the statements the body wrote
  *   return: NO_ERROR, or ER_FAILED with the reason on the parser
  *   parser(in) :
@@ -31011,13 +31132,24 @@ pt_plcsql_read_static_sql (PARSER_CONTEXT * parser, PT_NODE * list)
 	  break;
 
 	case PT_SP_BLOCK:
-	  /* a cursor is declared rather than written as a statement, so the declarations are
-	   * walked as well as the body */
-	  if (pt_plcsql_read_static_sql (parser, stmt->info.sp_stmt.decl_list) != NO_ERROR
-	      || pt_plcsql_read_static_sql (parser, stmt->info.sp_stmt.body) != NO_ERROR)
-	    {
-	      return ER_FAILED;
-	    }
+	  {
+	    PT_NODE *handler;
+
+	    /* a cursor is declared rather than written as a statement, so the declarations are
+	     * walked as well as the body, and so is what each handler holds */
+	    if (pt_plcsql_read_static_sql (parser, stmt->info.sp_stmt.decl_list) != NO_ERROR
+		|| pt_plcsql_read_static_sql (parser, stmt->info.sp_stmt.body) != NO_ERROR)
+	      {
+		return ER_FAILED;
+	      }
+	    for (handler = stmt->info.sp_stmt.else_body; handler != NULL; handler = handler->next)
+	      {
+		if (pt_plcsql_read_static_sql (parser, handler->info.sp_stmt.body) != NO_ERROR)
+		  {
+		    return ER_FAILED;
+		  }
+	      }
+	  }
 	  break;
 
 	case PT_SP_IF:
@@ -31490,16 +31622,8 @@ pt_to_plcsql_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params, 
 		    PT_PLCSQL_LOOP * loops)
 {
   XASL_NODE *xasl, **buf = NULL;
-  PT_NODE *decl, *stmt, *param;
-  int cnt = 0, i = 0;
-
-  if (block->info.sp_stmt.else_body != NULL)
-    {
-      /* The grammar takes the EXCEPTION part so that the coverage meter can count the bodies
-       * that have one, but nothing runs a handler yet. Dropping it would be worse than
-       * refusing: the body would run to the end with its errors unhandled. */
-      return pt_plcsql_refuse (parser, "the body has an exception handler");
-    }
+  PT_NODE *decl, *stmt, *param, *handler;
+  int cnt = 0, i = 0, handlers_cnt = 0;
 
   xasl = pt_plcsql_new_node (PLCSQL_OP_BLOCK);
   if (xasl == NULL)
@@ -31525,6 +31649,14 @@ pt_to_plcsql_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params, 
 	  cnt++;
 	}
     }
+
+  /* the handlers are children too, placed after the statements, so that running a block is
+   * still a walk from 0 and how many to stop short of is one number */
+  for (handler = block->info.sp_stmt.else_body; handler != NULL; handler = handler->next)
+    {
+      handlers_cnt++;
+    }
+  cnt += handlers_cnt;
 
   if (cnt > 0)
     {
@@ -31596,9 +31728,72 @@ pt_to_plcsql_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params, 
 	    }
 	  i++;
 	}
+
+      for (handler = block->info.sp_stmt.else_body; handler != NULL; handler = handler->next)
+	{
+	  buf[i] = pt_to_plcsql_handler (parser, handler, ret_domain, loops);
+	  if (buf[i] == NULL)
+	    {
+	      return NULL;
+	    }
+	  i++;
+	}
     }
 
+  xasl->proc.plcsql.handlers_cnt = handlers_cnt;
+
   return pt_plcsql_set_children (parser, xasl, buf, cnt) == NO_ERROR ? xasl : NULL;
+}
+
+/*
+ * pt_to_plcsql_handler () - one WHEN of a block's EXCEPTION part
+ *   return: the node, NULL on error
+ *   parser(in) :
+ *   handler(in) : a PT_SP_HANDLER
+ *   ret_domain(in) : what a RETURN inside it casts to, NULL in a procedure
+ *   loops(in)  : the loops the block stands inside. A handler's statements stand there too, so
+ *                an EXIT written in one leaves the loop the block is in
+ */
+static XASL_NODE *
+pt_to_plcsql_handler (PARSER_CONTEXT * parser, PT_NODE * handler, TP_DOMAIN * ret_domain, PT_PLCSQL_LOOP * loops)
+{
+  XASL_NODE *xasl, *buf[1];
+  PT_NODE *caught;
+  int cnt = 0, i = 0;
+
+  xasl = pt_plcsql_new_node (PLCSQL_OP_HANDLER);
+  if (xasl == NULL)
+    {
+      return NULL;
+    }
+  pt_plcsql_place (xasl, handler);
+
+  /* WHEN OTHERS names none and takes whatever reaches it, which is the empty list */
+  for (caught = handler->info.sp_stmt.name; caught != NULL; caught = caught->next)
+    {
+      cnt++;
+    }
+  if (cnt > 0)
+    {
+      regu_array_alloc (&xasl->proc.plcsql.exc_list, (size_t) cnt);
+      if (xasl->proc.plcsql.exc_list == NULL)
+	{
+	  return NULL;
+	}
+      for (caught = handler->info.sp_stmt.name; caught != NULL; caught = caught->next)
+	{
+	  xasl->proc.plcsql.exc_list[i++] = caught->info.name.plcsql_slot;
+	}
+    }
+  xasl->proc.plcsql.exc_cnt = cnt;
+
+  buf[0] = pt_to_plcsql_stmt_list_block (parser, handler->info.sp_stmt.body, ret_domain, loops);
+  if (buf[0] == NULL)
+    {
+      return NULL;
+    }
+
+  return pt_plcsql_set_children (parser, xasl, buf, 1) == NO_ERROR ? xasl : NULL;
 }
 
 /*
@@ -32328,10 +32523,20 @@ pt_to_plcsql_stmt_inner (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * re
       return pt_to_plcsql_sql (parser, stmt);
 
     case PT_SP_RAISE:
-      /* The grammar takes RAISE so that the coverage meter can count the bodies that use it,
-       * but nothing runs it yet. Refusing here rather than dropping it is the whole point: a
-       * body that raises would otherwise run to the end as if it had not. */
-      return pt_plcsql_refuse (parser, "the body raises an exception");
+      xasl = pt_plcsql_new_node (PLCSQL_OP_RAISE);
+      if (xasl == NULL)
+	{
+	  return NULL;
+	}
+      pt_plcsql_place (xasl, stmt);
+
+      /* A bare RAISE re-raises what the handler it stands in caught, and says so by naming
+       * nothing: the slot stays at the -1 a new node is born with. */
+      if (stmt->info.sp_stmt.name != NULL)
+	{
+	  xasl->proc.plcsql.target_slot = stmt->info.sp_stmt.name->info.name.plcsql_slot;
+	}
+      return xasl;
 
     case PT_SP_HANDLER:
       /* reached through the block's EXCEPTION part, never as a statement */
@@ -32620,7 +32825,8 @@ pt_plcsql_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig
 
       pt_Plcsql_compiling[pt_Plcsql_compile_depth++] = sig->ext.sp.code_oid;
       if (pt_plcsql_read_static_sql (body_parser, block->info.sp_stmt.decl_list) == NO_ERROR
-	  && pt_plcsql_read_static_sql (body_parser, block->info.sp_stmt.body) == NO_ERROR)
+	  && pt_plcsql_read_static_sql (body_parser, block->info.sp_stmt.body) == NO_ERROR
+	  && pt_plcsql_read_outer_handlers (body_parser, block) == NO_ERROR)
 	{
 	  xasl = pt_to_plcsql_xasl (body_parser, block, params);
 	}
