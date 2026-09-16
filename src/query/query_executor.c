@@ -29344,6 +29344,16 @@ qexec_execute_plcsql_stmt (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE
       return rc;
     }
 
+  if (xasl->proc.plcsql.line == 0)
+    {
+      /* A node the grammar did not read off the body has nowhere to point at - the casts that
+       * bind a call's arguments to the declared parameter types are built here, not written.
+       * The PL engine names no place for those either, so the sentence goes out on its own,
+       * and the flag keeps an enclosing block from offering its place in exchange. */
+      frame->positioned = true;
+      return rc;
+    }
+
   /* The statement that failed is the one that knows where it stands, so the place is put on
    * here and the blocks it travels out through leave it alone. The sentence is the PL engine's
    * - ExecuteThread writes "\n  (line %d, column %d) %s" - because a body that fails has to

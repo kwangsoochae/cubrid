@@ -39,6 +39,7 @@
 
 #include "parser.h"
 #include "parse_tree.h"
+#include "parser_message.h"
 #include "sp_parse.h"
 
 /* The parser the nodes are allocated on, and the tree the driver hands back. Both belong
@@ -63,7 +64,7 @@ static PT_NODE *sp_make_cursor_op (PT_SP_STMT_OP op, const char *name, PT_NODE *
 static PT_NODE *sp_make_cursor_attr (const char *name, int attr);
 static PT_NODE *sp_make_jump (PT_SP_STMT_OP op, PT_NODE * label, PT_NODE * cond, int line, int column);
 static PT_NODE *sp_make_integer_literal (const char *text);
-static PT_NODE *sp_make_real_literal (const char *text);
+static PT_NODE *sp_make_real_literal (const char *text, int line, int column);
 static PT_NODE *sp_make_null_literal (void);
 static PT_NODE *sp_make_boolean_literal (bool value);
 static PT_NODE *sp_make_typed_literal (PT_TYPE_ENUM type, const char *text);
@@ -941,7 +942,7 @@ expr
 		}
 	| UNSIGNED_REAL
 		{
-		  $$ = SP_AT (sp_make_real_literal ($1), @$);
+		  $$ = sp_make_real_literal ($1, @$.first_line, @$.first_column);
 		}
 	| CHAR_STRING
 		{
@@ -1302,11 +1303,12 @@ sp_make_integer_literal (const char *text)
  * sp_make_real_literal () -
  *   return: a PT_VALUE node, NULL when the parser could not allocate one
  *   text(in) : the number as written
+ *   line(in) / column(in) : where it was written, for the error below to point at
  */
 static PT_NODE *
-sp_make_real_literal (const char *text)
+sp_make_real_literal (const char *text, int line, int column)
 {
-  PT_NODE *val = parser_new_node (sp_Parser, PT_VALUE);
+  PT_NODE *val = sp_at (parser_new_node (sp_Parser, PT_VALUE), line, column);
 
   if (val == NULL)
     {
@@ -1317,8 +1319,21 @@ sp_make_real_literal (const char *text)
 
   if (strchr (text, 'e') != NULL || strchr (text, 'E') != NULL)
     {
+      double d;
+
+      /* the SQL grammar's own reading of a number too large to hold, down to the sentence:
+       * without the check strtod () hands back an infinity and the body goes on computing
+       * with it, which no CUBRID type has a value for */
+      errno = 0;
+      d = strtod (text, NULL);
+      if (errno == ERANGE)
+	{
+	  PT_ERRORmf2 (sp_Parser, val, MSGCAT_SET_PARSER_SYNTAX, MSGCAT_SYNTAX_FLT_DBL_OVERFLOW, text,
+		       pt_show_type_enum (PT_TYPE_DOUBLE));
+	}
+
       val->type_enum = PT_TYPE_DOUBLE;
-      val->info.value.data_value.d = strtod (text, NULL);
+      val->info.value.data_value.d = d;
     }
   else
     {
