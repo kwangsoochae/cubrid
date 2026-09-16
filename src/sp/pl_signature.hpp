@@ -24,7 +24,6 @@
 #define _PL_SIGNATURE_HPP_
 
 #include "packable_object.hpp"
-#include "sha1.h"
 #include "thread_compat.hpp"
 
 enum PL_TYPE
@@ -129,23 +128,13 @@ namespace cubpl
     ~pl_signature_array () override;
   };
 
-  /* the text form of a plan key, as xcache_remove_by_sha1 () spells it */
-#define PL_PLAN_KEY_TEXT_SIZE 45
-
-  /* pl_plan_key () - the XASL cache key for a PL/CSQL procedure's plan
-   *   return: NO_ERROR, or ER_FAILED when this procedure has no plan to key - a Java SP carries
-   *           no code object. No error is raised: having no plan to file is not a failure
-   *   code_oid(in) : the stored code the plan was compiled from
-   *   sha1(out)    : the key itself
-   *   text(out)    : the same key spelled for xcache_remove_by_sha1 (); PL_PLAN_KEY_TEXT_SIZE
-   *                  bytes, or NULL when the caller only wants the hash
-   *
-   * note: the key is the code object, not the name at the call site. The same procedure can be
-   *       called written qualified or not, and each spelling would file a plan of its own; worse,
-   *       the statement that replaces a body knows only the canonical name, so it could not find
-   *       the other spellings to drop them.
-   */
-  int pl_plan_key (const OID &code_oid, SHA1Hash &sha1, char *text);
+  /* what a call asks be done with the procedure's plan */
+  enum pl_plan_cache_op
+  {
+    PL_PLAN_NO_CACHE = 0,	/* the plan travels with the call and is not filed */
+    PL_PLAN_FILE,		/* the plan travels with the call and is filed under its key */
+    PL_PLAN_USE_FILED		/* no plan travels; the one filed under the key runs */
+  };
 }
 
 using PL_SIGNATURE_TYPE = cubpl::pl_signature;

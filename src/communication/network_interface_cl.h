@@ -403,12 +403,16 @@ EXPORT_IMPORT extern int plcsql_transfer_file (const PLCSQL_COMPILE_REQUEST & co
 /* plan: the procedure's own XASL stream when the client could build one, empty otherwise. The
  * server runs it itself in that case instead of handing the call to the PL engine.
  *
- * use_cached: the caller believes the server already holds this procedure's plan, so it left
- * the plan out rather than build one. A wrong belief comes back as ER_QPROC_INVALID_XASLNODE
- * and the caller is expected to build a plan and call again. */
+ * plan_op: what to do with the plan (cubpl::pl_plan_cache_op). PL_PLAN_USE_FILED leaves the plan
+ * out because the caller believes the server already holds it; a wrong belief comes back as
+ * ER_QPROC_INVALID_XASLNODE and the caller is expected to build a plan and call again.
+ *
+ * plan_key: the text the plan is filed under. The caller builds it because part of it - the user
+ * and the session parameters the plan was built against - is the caller's own state. */
 EXPORT_IMPORT extern int pl_call (const cubpl::pl_signature & sig, const std::string & plan,
 				  const std::vector < std::reference_wrapper < DB_VALUE >> &args,
-				  std::vector < DB_VALUE > &out_args, DB_VALUE & result, bool use_cached = false);
+				  std::vector < DB_VALUE > &out_args, DB_VALUE & result,
+				  int plan_op = cubpl::PL_PLAN_NO_CACHE, const std::string & plan_key = std::string ());
 
 /* memmon */
 extern int mmon_get_server_info (MMON_SERVER_INFO & server_info);

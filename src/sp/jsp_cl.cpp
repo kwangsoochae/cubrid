@@ -767,8 +767,64 @@ exit_on_error:
   return ER_FAILED;
 }
 
+/* jsp_plan_key () - the text a procedure's plan is filed under
+ *   return: true when there is a plan to file; false for a routine that has no stored code,
+ *           which is a Java SP
+ *   code_oid(in) : the stored code the plan is compiled from
+ *   key(out)     : the text
+ *
+ * note: what the key has to separate is anything the plan is built against, because a plan
+ *       filed under a key is handed to whoever asks with that key.
+ *
+ *         - the code object, not the name at the call site. The same procedure can be called
+ *           written qualified or not, and each spelling would file a plan of its own.
+ *         - the user. An unqualified name in the body resolves against the caller, so two
+ *           users compile two different plans from one body.
+ *         - the session parameters a plan is built against, the ones a query string already
+ *           carries for the same reason (parser_print_tree ()).
+ *
+ *       A statement's key ends with the last two for exactly this, and is spelled the same way
+ *       here so that a plan dump reads alike.
+ */
+static bool
+jsp_plan_key (const OID *code_oid, std::string &key)
+{
+#if defined(CS_MODE)
+  char buf[64];
+  OID *user_oid;
+
+  key.clear ();
+  if (code_oid == NULL || OID_ISNULL (code_oid))
+    {
+      return false;
+    }
+
+  snprintf (buf, sizeof (buf), "plcsql code=%d|%d|%d", (int) code_oid->volid, (int) code_oid->pageid,
+	    (int) code_oid->slotid);
+  key.assign (buf);
+
+  char *prm = sysprm_print_parameters_for_qry_string ();
+  if (prm != NULL)
+    {
+      key.append ("?").append (prm);
+      free_and_init (prm);
+    }
+
+  user_oid = ws_identifier (db_get_user ());
+  if (user_oid != NULL)
+    {
+      snprintf (buf, sizeof (buf), "user=%d|%d|%d", user_oid->volid, user_oid->pageid, user_oid->slotid);
+      key.append (buf);
+    }
+  return true;
+#else
+  key.clear ();
+  return false;
+#endif
+}
+
 /* Which procedures this client believes the server already holds a plan for, by the key the
- * plan is filed under (cubpl::pl_plan_key ()).
+ * plan is filed under.
  *
  * It holds keys, not plans. A key that should not be here costs one refused call and is
  * dropped; a plan that should not be here would be run. The set is per thread because a
@@ -780,20 +836,20 @@ exit_on_error:
 static thread_local std::set < std::string > jsp_Plan_cached;
 
 static bool
-jsp_is_plan_cached (const char *key)
+jsp_is_plan_cached (const std::string &key)
 {
 #if defined(CS_MODE)
-  return key != NULL && jsp_Plan_cached.find (key) != jsp_Plan_cached.end ();
+  return !key.empty () && jsp_Plan_cached.find (key) != jsp_Plan_cached.end ();
 #else
   return false;
 #endif
 }
 
 static void
-jsp_remember_cached_plan (const char *key)
+jsp_remember_cached_plan (const std::string &key)
 {
 #if defined(CS_MODE)
-  if (key != NULL)
+  if (!key.empty ())
     {
       jsp_Plan_cached.insert (key);
     }
@@ -801,39 +857,39 @@ jsp_remember_cached_plan (const char *key)
 }
 
 static void
-jsp_forget_cached_plan (const char *key)
+jsp_forget_cached_plan (const std::string &key)
 {
 #if defined(CS_MODE)
-  if (key != NULL)
+  if (!key.empty ())
     {
       jsp_Plan_cached.erase (key);
     }
 #endif
 }
 
-/* Drop whatever plan the server holds for this procedure's code, and forget that it held one.
+/* Drop whatever plans the server holds for this procedure's code.
  *
  * The cache drops an entry when a class it depends on changes, but the procedure's own body is
  * not one of those classes - it is a row in a catalog, and rewriting it does not reach that
  * path. So the only place that knows the plan is stale is the statement that made it stale.
  *
- * Doing only half of this would be worse than neither: forgetting on the client while the
- * server keeps the entry means the next call sends a fresh plan and gets the old one back,
- * because the plan is filed under a key the new code object may well be given again. */
+ * Plans, not plan: the key separates users and session parameters, so one body can have several
+ * filed at once and none of the others is nameable from here. What is nameable is the code
+ * object itself, which every one of those plans carries among the objects it depends on.
+ *
+ * The belief this client holds is left alone. It corrects itself on use - the call that finds
+ * the entry gone is told so and sends a plan - and the keys of other sessions are not ours to
+ * guess anyway. */
 static void
 jsp_drop_cached_plan (const OID *code_oid)
 {
 #if defined(CS_MODE)
-  SHA1Hash sha1;
-  char key[PL_PLAN_KEY_TEXT_SIZE];
-
-  if (code_oid == NULL || cubpl::pl_plan_key (*code_oid, sha1, key) != NO_ERROR)
+  if (code_oid == NULL || OID_ISNULL (code_oid))
     {
       return;
     }
 
-  jsp_forget_cached_plan (key);
-  if (qmgr_drop_query_plans_by_sha1 (key) != NO_ERROR)
+  if (synonym_remove_xasl_by_oid ((OID *) code_oid) != NO_ERROR)
     {
       er_clear ();
     }
@@ -894,42 +950,52 @@ jsp_call_stored_procedure (PARSER_CONTEXT *parser, PT_NODE *statement)
       /* an empty plan means the PL engine takes the call, which is still the common case. It
        * fails only under pl_native_execution_strict, where refusing to build one is the point.
        *
-       * Building the plan is what a second call can skip: the server files it under a key it
-       * can make again from the signature, so once it is there the call need carry nothing.
+       * Building the plan is what a second call can skip: the server files it under the key the
+       * call carries, so once it is there a call need carry no plan at all.
        * What is remembered here is only that belief, never a plan - a stale belief costs one
-       * round trip and corrects itself, while a stale plan would be read as a live one. */
-      SHA1Hash sha1;
-      char key[PL_PLAN_KEY_TEXT_SIZE];
+       * round trip and corrects itself, while a stale plan would be read as a live one.
+       *
+       * A plan that copied another routine's body is not filed at all. Nothing would tell it
+       * when that routine is rewritten: it is filed under the routine it belongs to, and the
+       * statement that rewrites the other one has no way to reach the plans that copied it. */
+      std::string key;
       /* No key, no belief to hold: a Java SP has no code object to make one from, and with the
        * plan cache turned off there is nowhere for a plan to be, so asking for one that cannot
        * be there would cost every call a refused round trip. */
       bool has_key = (prm_get_integer_value (PRM_ID_XASL_CACHE_MAX_ENTRIES) > 0
-		      && cubpl::pl_plan_key (sig.ext.sp.code_oid, sha1, key) == NO_ERROR);
-      bool use_cached = has_key && jsp_is_plan_cached (key);
+		      && jsp_plan_key (&sig.ext.sp.code_oid, key));
+      bool cacheable = false;
+      int plan_op = cubpl::PL_PLAN_NO_CACHE;
 
-      if (!use_cached)
+      if (has_key && jsp_is_plan_cached (key))
 	{
-	  error = pt_plcsql_plan_stream (&sig, plan);
+	  plan_op = cubpl::PL_PLAN_USE_FILED;
+	}
+      else
+	{
+	  error = pt_plcsql_plan_stream (&sig, plan, &cacheable);
+	  plan_op = (has_key && cacheable) ? cubpl::PL_PLAN_FILE : cubpl::PL_PLAN_NO_CACHE;
 	}
       if (error == NO_ERROR)
 	{
-	  error = pl_call (sig, plan, args, out_args, ret_value, use_cached);
+	  error = pl_call (sig, plan, args, out_args, ret_value, plan_op, key);
 
-	  if (error == ER_QPROC_INVALID_XASLNODE && use_cached)
+	  if (error == ER_QPROC_INVALID_XASLNODE && plan_op == cubpl::PL_PLAN_USE_FILED)
 	    {
 	      /* The entry is gone - something it depends on changed, or the cache was cleaned.
 	       * Forget the belief, build a plan and run the call for real. */
 	      jsp_forget_cached_plan (key);
 	      er_clear ();
 
-	      error = pt_plcsql_plan_stream (&sig, plan);
+	      error = pt_plcsql_plan_stream (&sig, plan, &cacheable);
+	      plan_op = (has_key && cacheable) ? cubpl::PL_PLAN_FILE : cubpl::PL_PLAN_NO_CACHE;
 	      if (error == NO_ERROR)
 		{
-		  error = pl_call (sig, plan, args, out_args, ret_value, false);
+		  error = pl_call (sig, plan, args, out_args, ret_value, plan_op, key);
 		}
 	    }
 
-	  if (error == NO_ERROR && has_key && !plan.empty ())
+	  if (error == NO_ERROR && plan_op == cubpl::PL_PLAN_FILE && !plan.empty ())
 	    {
 	      /* the plan just went to the server, which files it on the way in */
 	      jsp_remember_cached_plan (key);

@@ -32638,7 +32638,7 @@ pt_plcsql_count_classes (const XASL_NODE * xasl)
 /*
  * pt_plcsql_gather_classes () - copy the statements' class entries onto the body's plan
  *   return: void
- *   xasl(in)   : a node of the body's plan
+ *   xasl(in)     : a node of the body's plan
  *   root(in/out) : the body's plan, whose arrays are filled and whose n_oid_list grows
  */
 static void
@@ -32688,18 +32688,23 @@ pt_plcsql_gather_classes (const XASL_NODE * xasl, XASL_NODE * root)
 }
 
 /*
- * pt_plcsql_list_classes () - put the classes the body touches on the body's own plan
+ * pt_plcsql_list_classes () - list what the body depends on, on the body's own plan
  *   return: void
  *   xasl(in/out) : the body's plan
+ *   code_oid(in) : the stored code this body was read from
  *
- * note: each statement written in a body already carries its own list, built the way it is for
- *       the same statement written on its own. What the body's plan needs is the sum of them,
+ * note: each statement written in a body already carries its own class list, built the way it is
+ *       for the same statement written on its own. What the body's plan needs is the sum of them,
  *       because that plan is what the XASL cache files: the list is what the server locks before
  *       running it, and what the cache drops it by when one of those classes changes. Left off,
  *       a cached plan would outlive the table it was built against.
+ *
+ *       The code object goes on the same list, and it is what the statement that rewrites this
+ *       body drops the plan by. It is not a class, so it is listed the way a serial is - no lock
+ *       to take and no cardinality to ask the catalog for.
  */
 static void
-pt_plcsql_list_classes (XASL_NODE * xasl)
+pt_plcsql_list_classes (XASL_NODE * xasl, const OID * code_oid)
 {
   int n;
 
@@ -32708,11 +32713,8 @@ pt_plcsql_list_classes (XASL_NODE * xasl)
       return;
     }
 
-  n = pt_plcsql_count_classes (xasl);
-  if (n <= 0)
-    {
-      return;
-    }
+  /* one more than the statements hold between them, for the code object */
+  n = pt_plcsql_count_classes (xasl) + 1;
 
   if ((xasl->class_oid_list = regu_oid_array_alloc (n)) == NULL
       || (xasl->class_locks = regu_int_array_alloc (n)) == NULL
@@ -32724,6 +32726,14 @@ pt_plcsql_list_classes (XASL_NODE * xasl)
 
   xasl->n_oid_list = 0;
   pt_plcsql_gather_classes (xasl, xasl);
+
+  if (code_oid != NULL && !OID_ISNULL (code_oid))
+    {
+      xasl->class_oid_list[xasl->n_oid_list] = *code_oid;
+      xasl->class_locks[xasl->n_oid_list] = (int) NULL_LOCK;
+      xasl->tcard_list[xasl->n_oid_list] = XASL_CLASS_NO_TCARD;
+      xasl->n_oid_list++;
+    }
 }
 
 /*
@@ -32737,17 +32747,34 @@ pt_plcsql_list_classes (XASL_NODE * xasl)
  *       the grammar takes only part of the language yet - and a
  *       call that cannot be built here simply goes the way it went before.
  */
+/* The routines pt_plcsql_compile_body () is inside, outermost first. Lowering a call compiles the
+ * callee, so a routine already on this stack would compile forever; it is refused instead, and
+ * the procedure that called it goes to the PL engine whole. The stack is bounded because a call
+ * site carries a copy of its callee's plan, so a chain of them multiplies what is shipped. */
+#define PT_PLCSQL_MAX_COMPILE_DEPTH 8
+static OID pt_Plcsql_compiling[PT_PLCSQL_MAX_COMPILE_DEPTH];
+static int pt_Plcsql_compile_depth = 0;
+
+/* how many other routines' bodies went into the plan being built. A plan that holds a copy of
+ * another routine's body is only as current as that body, and nothing tells it when the other
+ * routine is rewritten - the plan is filed under the routine it belongs to, not under the ones
+ * it copied. So the caller is told, and does not file such a plan. */
+static int pt_Plcsql_nested_bodies = 0;
+
 /*
  * pt_plcsql_plan_stream () - the procedure's plan as a stream, for a CALL to carry to the server
  *   return: NO_ERROR; the stream is empty when this build cannot run the procedure natively
- *   sig(in)    : the signature of the call
- *   plan(out)  : the packed plan, empty when the call stays with the PL engine
+ *   sig(in)       : the signature of the call
+ *   plan(out)     : the packed plan, empty when the call stays with the PL engine
+ *   cacheable(out): false when another routine's body was copied into this plan, which makes it
+ *                   stale as soon as that routine is rewritten. NULL when the caller has no use
+ *                   for the answer
  *
  * note: a CALL does not go through query compilation, so there is no plan for the procedure to
  *       ride along on and nothing has opened the packing buffer. Both are done here.
  */
 int
-pt_plcsql_plan_stream (const cubpl::pl_signature * sig, std::string & plan)
+pt_plcsql_plan_stream (const cubpl::pl_signature * sig, std::string & plan, bool * cacheable)
 {
   PARSER_CONTEXT *parser;
   XASL_NODE *xasl;
@@ -32755,6 +32782,7 @@ pt_plcsql_plan_stream (const cubpl::pl_signature * sig, std::string & plan)
   bool refused;
 
   plan.clear ();
+  pt_Plcsql_nested_bodies = 0;
 
   parser = parser_create_parser ();
   if (parser == NULL)
@@ -32788,16 +32816,12 @@ pt_plcsql_plan_stream (const cubpl::pl_signature * sig, std::string & plan)
     }
   parser_free_parser (parser);
 
+  if (cacheable != NULL)
+    {
+      *cacheable = (pt_Plcsql_nested_bodies == 0);
+    }
   return refused ? ER_FAILED : NO_ERROR;
 }
-
-/* The routines pt_plcsql_compile_body () is inside, outermost first. Lowering a call compiles the
- * callee, so a routine already on this stack would compile forever; it is refused instead, and
- * the procedure that called it goes to the PL engine whole. The stack is bounded because a call
- * site carries a copy of its callee's plan, so a chain of them multiplies what is shipped. */
-#define PT_PLCSQL_MAX_COMPILE_DEPTH 8
-static OID pt_Plcsql_compiling[PT_PLCSQL_MAX_COMPILE_DEPTH];
-static int pt_Plcsql_compile_depth = 0;
 
 /*
  * pt_plcsql_compiling_body () - is a PL/CSQL body being lowered right now?
@@ -32955,6 +32979,10 @@ pt_plcsql_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig
       saved_supp = xasl_Supp_info;
       memset (&xasl_Supp_info, 0, sizeof (xasl_Supp_info));
 
+      if (pt_Plcsql_compile_depth > 0)
+	{
+	  pt_Plcsql_nested_bodies++;
+	}
       pt_Plcsql_compiling[pt_Plcsql_compile_depth++] = sig->ext.sp.code_oid;
       if (pt_plcsql_read_static_sql (body_parser, block->info.sp_stmt.decl_list) == NO_ERROR
 	  && pt_plcsql_read_static_sql (body_parser, block->info.sp_stmt.body) == NO_ERROR
@@ -32964,7 +32992,7 @@ pt_plcsql_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig
 	}
       pt_Plcsql_compile_depth--;
 
-      pt_plcsql_list_classes (xasl);
+      pt_plcsql_list_classes (xasl, &sig->ext.sp.code_oid);
 
       pt_init_xasl_supp_info ();
       xasl_Supp_info = saved_supp;
