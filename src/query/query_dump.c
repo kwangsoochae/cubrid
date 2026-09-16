@@ -1659,6 +1659,8 @@ qdump_plcsql_op_string (PLCSQL_OP op)
       return "CALL";
     case PLCSQL_OP_SQL:
       return "SQL";
+    case PLCSQL_OP_HANDLER:
+      return "HANDLER";
     default:
       assert (false);
       return "";

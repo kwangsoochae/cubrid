@@ -4199,6 +4199,25 @@ stx_build_plcsql_proc (THREAD_ENTRY * thread_p, char *ptr, PLCSQL_PROC_NODE * pl
   ptr = or_unpack_int (ptr, &plcsql_proc->cursors_cnt);
   ptr = or_unpack_int (ptr, &plcsql_proc->cursor_base_slot);
   ptr = or_unpack_int (ptr, &plcsql_proc->cursor_cols_cnt);
+  ptr = or_unpack_int (ptr, &plcsql_proc->handlers_cnt);
+
+  ptr = or_unpack_int (ptr, &plcsql_proc->exc_cnt);
+  if (plcsql_proc->exc_cnt > 0)
+    {
+      plcsql_proc->exc_list = (int *) stx_alloc_struct (thread_p, sizeof (int) * plcsql_proc->exc_cnt);
+      if (plcsql_proc->exc_list == NULL)
+	{
+	  goto error;
+	}
+      for (i = 0; i < plcsql_proc->exc_cnt; i++)
+	{
+	  ptr = or_unpack_int (ptr, &plcsql_proc->exc_list[i]);
+	}
+    }
+  else
+    {
+      plcsql_proc->exc_list = NULL;
+    }
 
   ptr = or_unpack_int (ptr, &offset);
   if (offset == 0)
