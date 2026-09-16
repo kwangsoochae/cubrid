@@ -127,6 +127,24 @@ static int sp_token_start_line;
  * bookkeeping of its own and a start condition added later is covered without being
  * touched - csql_lexer.l reaches every one of its own states the same way. */
 #define YY_USER_ACTION	{ sp_yy_user_action (); }
+
+/* flex's own output trips -Werror in a release build. csql_lexer.l carries the same
+ * block and says why; this one exists because every generated scanner needs it. */
+#if defined(__GNUC__) || defined(__clang__)
+  #define BEGIN_SUPPRESS_WARNING_BISON_FLEX                \
+    _Pragma("GCC diagnostic push")                         \
+    _Pragma("GCC diagnostic ignored \"-Wsign-compare\"")   \
+    _Pragma("GCC diagnostic ignored \"-Wredundant-decls\"")\
+    _Pragma("GCC diagnostic ignored \"-Wimplicit-fallthrough=\"")
+
+  #define END_SUPPRESS_WARNING_BISON_FLEX                  \
+    _Pragma("GCC diagnostic pop")
+#else
+  #define BEGIN_SUPPRESS_WARNING_BISON_FLEX
+  #define END_SUPPRESS_WARNING_BISON_FLEX
+#endif
+
+BEGIN_SUPPRESS_WARNING_BISON_FLEX
 %}
 
 %option noyywrap
@@ -238,6 +256,8 @@ real		{digit}+"."{digit}+([eE][+-]?{digit}+)?|"."{digit}+([eE][+-]?{digit}+)?|{d
 .			{ return yytext[0]; }
 
 %%
+
+END_SUPPRESS_WARNING_BISON_FLEX
 
 /*
  * sp_yy_user_action () - place the token flex has just matched
