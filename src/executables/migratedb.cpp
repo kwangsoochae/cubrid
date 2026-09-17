@@ -118,13 +118,17 @@ struct class_plan
   long unresolved_refs = 0;
   long old_repr_rows = 0;	/* written under a representation the target no longer has */
   long skipped_bigone = 0;
+  long overflow_rows = 0;	/* rows put back together out of an overflow file */
   long skipped_relocation = 0;
   long relocated_rows = 0;	/* rows that had moved off the page they started on */
 };
 
 static MIGRATE_SRC_FORMAT g_src_format;
-/* a second page, so a relocation can be followed while the walk still holds its own */
+/* a second page, so a relocation or an overflow chain can be read while the walk holds its own */
 static char *g_scratch_page = NULL;
+/* grows to the largest row that had to be put back together out of its overflow pages */
+static char *g_ovf_buf = NULL;
+static int g_ovf_buf_size = 0;
 static THREAD_ENTRY *g_thread_p = NULL;
 static std::unordered_map<uint64_t, OID> g_oid_map;
 static bool g_remap_oids = false;     /* plan mode resolves references; a single-class run cannot */
@@ -460,9 +464,14 @@ pass1_record (char *rec, int reclen, int rec_type, const OID *src_oid, void *arg
 
   if (rec_type == REC_BIGONE)
     {
-      /* the row lives in an overflow file this tool does not read yet */
-      cp.skipped_bigone++;
-      return NO_ERROR;
+      /* the row is not in the heap; its slot addresses the overflow file holding it */
+      if (migrate_heap_read_overflow (rec, reclen, g_scratch_page, &g_ovf_buf, &g_ovf_buf_size, &rec, &reclen)
+	  != NO_ERROR)
+	{
+	  cp.skipped_bigone++;
+	  return NO_ERROR;
+	}
+      cp.overflow_rows++;
     }
   if (rec_type == REC_RELOCATION)
     {
@@ -592,6 +601,14 @@ pass2_record (char *rec, int reclen, int rec_type, const OID *src_oid, void *arg
   if (rec_type == REC_RELOCATION)
     {
       if (migrate_heap_follow_relocation (rec, reclen, g_scratch_page, &rec, &reclen) != NO_ERROR)
+	{
+	  return NO_ERROR;
+	}
+    }
+  else if (rec_type == REC_BIGONE)
+    {
+      if (migrate_heap_read_overflow (rec, reclen, g_scratch_page, &g_ovf_buf, &g_ovf_buf_size, &rec, &reclen)
+	  != NO_ERROR)
 	{
 	  return NO_ERROR;
 	}
@@ -911,7 +928,7 @@ migratedb (UTIL_FUNCTION_ARG *arg)
 
   /* ---- report ---- */
   long t_read = 0, t_ins = 0, t_fix = 0, t_err = 0, t_unres = 0, t_big = 0, t_rel = 0, n_skipped = 0;
-  long t_oldrepr = 0, t_reloc = 0;
+  long t_oldrepr = 0, t_reloc = 0, t_ovf = 0;
   for (const class_plan &cp : plan)
     {
       t_read += cp.rows_read;
@@ -920,6 +937,7 @@ migratedb (UTIL_FUNCTION_ARG *arg)
       t_err += cp.read_errors + cp.transform_errors + cp.insert_errors + cp.update_errors;
       t_unres += cp.unresolved_refs;
       t_big += cp.skipped_bigone;
+      t_ovf += cp.overflow_rows;
       t_rel += cp.skipped_relocation;
       t_reloc += cp.relocated_rows;
       n_skipped += cp.skipped ? 1 : 0;
@@ -934,7 +952,7 @@ migratedb (UTIL_FUNCTION_ARG *arg)
   printf ("unresolved refs   : %ld\n", t_unres);
   printf ("errors            : %ld\n", t_err);
   printf ("other record shape : %ld\n", t_oldrepr);
-  printf ("skipped REC_BIGONE: %ld\n", t_big);
+  printf ("overflow rows     : %ld assembled, %ld unreadable\n", t_ovf, t_big);
   printf ("relocated rows    : %ld followed, %ld unreadable\n", t_reloc, t_rel);
   printf ("elapsed           : %.3f s\n", secs);
 

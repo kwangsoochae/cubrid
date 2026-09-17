@@ -179,6 +179,18 @@ extern int migrate_heap_follow_relocation (char *reloc_rec, int reloc_len, char 
 					   char **out_rec, int *out_len);
 
 /*
+ * Assemble a REC_BIGONE row out of the overflow file it points at.
+ *
+ * A row too big for a page is not in the heap at all: its slot holds the address of an overflow
+ * file, whose pages carry the row split across them and chained by next_vpid, the first one also
+ * carrying the total length. The pieces have to be put back together before the row can be read.
+ *
+ * buf / buf_size is a buffer the caller owns and this grows as needed; out_rec points into it.
+ */
+extern int migrate_heap_read_overflow (char *bigone_rec, int reclen, char *scratch_iopage,
+				       char **buf, int *buf_size, char **out_rec, int *out_len);
+
+/*
  * Rebuild the source's record shape for a class from the target class's representation.  What
  * moved between fixed and variable storage is the only thing that differs, and the order inside
  * each group follows rules the two releases share, so the shape can be computed rather than

@@ -670,6 +670,94 @@ migrate_heap_follow_relocation (char *reloc_rec, int reloc_len, char *scratch_io
 }
 
 /*
+ * The two overflow page shapes. Both are identical in the releases checked so far, so they are
+ * spelled out here rather than kept in MIGRATE_SRC_FORMAT; if one ever differs, that is where
+ * the difference belongs.
+ *
+ *   first page   VPID next_vpid; int length;  char data[]   -- length is the whole row
+ *   later pages  VPID next_vpid;              char data[]
+ */
+#define MIGRATE_OVF_FIRST_DATA_OFFSET ((int) (sizeof (VPID) + sizeof (int)))
+#define MIGRATE_OVF_REST_DATA_OFFSET  ((int) sizeof (VPID))
+
+int
+migrate_heap_read_overflow (char *bigone_rec, int reclen, char *scratch_iopage,
+			    char **buf, int *buf_size, char **out_rec, int *out_len)
+{
+  OID ovf_oid;
+  VPID next;
+  char *page;
+  int total, got = 0;
+  int db_page_size = migrate_heap_db_page_size ();
+
+  if (reclen < OR_OID_SIZE)
+    {
+      return ER_FAILED;
+    }
+  COPY_OID (&ovf_oid, (OID *) bigone_rec);
+
+  next.volid = ovf_oid.volid;
+  next.pageid = ovf_oid.pageid;
+
+  page = migrate_heap_read_page (next.volid, next.pageid, scratch_iopage);
+  if (page == NULL)
+    {
+      return ER_FAILED;
+    }
+  memcpy (&total, page + sizeof (VPID), sizeof (total));
+  if (total <= 0)
+    {
+      return ER_FAILED;
+    }
+
+  if (*buf_size < total)
+    {
+      char *grown = (char *) realloc (*buf, total);
+
+      if (grown == NULL)
+	{
+	  return ER_FAILED;
+	}
+      *buf = grown;
+      *buf_size = total;
+    }
+
+  int offset = MIGRATE_OVF_FIRST_DATA_OFFSET;
+  for (;;)
+    {
+      int on_page = db_page_size - offset;
+      int take = (total - got < on_page) ? (total - got) : on_page;
+
+      if (take > 0)
+	{
+	  memcpy (*buf + got, page + offset, take);
+	  got += take;
+	}
+      if (got >= total)
+	{
+	  break;
+	}
+
+      memcpy (&next, page + 0, sizeof (VPID));
+      if (next.pageid == NULL_PAGEID)
+	{
+	  /* the chain ended before the length promised by the first page */
+	  return ER_FAILED;
+	}
+      page = migrate_heap_read_page (next.volid, next.pageid, scratch_iopage);
+      if (page == NULL)
+	{
+	  return ER_FAILED;
+	}
+      offset = MIGRATE_OVF_REST_DATA_OFFSET;
+    }
+
+  *out_rec = *buf;
+  *out_len = total;
+  return NO_ERROR;
+}
+
+/*
  * Does this record actually have the shape the layout describes?
  *
  * A record carries the representation it was written under, but representation ids are not
