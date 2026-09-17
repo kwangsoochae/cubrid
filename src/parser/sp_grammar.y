@@ -353,9 +353,27 @@ decl_list
 		}
 	;
 
-/* v bigint;   c constant int := 7;   e exception; */
+/* v bigint;   c constant int := 7;   e exception;   procedure p as begin ... end; */
 decl
 	: cursor_decl
+	| routine_kind IDENT param_list_opt return_opt as_or_is block
+		{
+		  /* A local routine is declared where a variable is, and its body is an ordinary
+		   * block - which is what makes the rule recursive, because a block has a
+		   * declaration part of its own. The header is spelled the same way the top-level
+		   * one is, so which kind it is reads off ret_type rather than the keyword. */
+		  PT_NODE *node = sp_make_stmt (PT_SP_DECL, @$.first_line, @$.first_column);
+
+		  if (node)
+		    {
+		      node->info.sp_stmt.name = SP_AT (pt_name (sp_Parser, $2), @2);
+		      node->info.sp_stmt.flags = PT_SP_DECL_ROUTINE;
+		      node->info.sp_stmt.params = $3;
+		      node->info.sp_stmt.ret_type = $4;
+		      node->info.sp_stmt.body = $6;
+		    }
+		  $$ = node;
+		}
 	| IDENT EXCEPTION_ ';'
 		{
 		  PT_NODE *node = sp_make_stmt (PT_SP_DECL, @$.first_line, @$.first_column);

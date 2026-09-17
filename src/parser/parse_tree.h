@@ -3444,6 +3444,8 @@ typedef enum
 #define PT_SP_DECL_EXCEPTION 0x20	/* e EXCEPTION; - a declaration that names an exception rather
 					 * than a variable, so it has no type and no initial value */
 #define PT_SP_HANDLER_OTHERS 0x40	/* WHEN OTHERS, which names no exception and catches the rest */
+#define PT_SP_DECL_ROUTINE   0x80	/* a declaration that names a local procedure or function: its
+					 * header is in params and ret_type and its body in body */
 
 struct pt_sp_stmt_info
 {

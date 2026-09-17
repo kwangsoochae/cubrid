@@ -30144,6 +30144,7 @@ struct pt_plcsql_resolve_arg
   int error;
 };
 
+static XASL_NODE *pt_plcsql_refuse (PARSER_CONTEXT * parser, const char *reason);
 static PT_NODE *pt_plcsql_find_decl (PT_PLCSQL_SCOPE * scope, const char *name);
 static int pt_plcsql_bind_name (PARSER_CONTEXT * parser, PT_NODE * name, PT_PLCSQL_SCOPE * scope);
 static PT_NODE *pt_plcsql_bind_name_pre (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int *continue_walk);
@@ -30794,6 +30795,14 @@ pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCO
 
   for (decl = scope.decl_list; decl != NULL; decl = decl->next)
     {
+      if (decl->info.sp_stmt.flags & PT_SP_DECL_ROUTINE)
+	{
+	  /* the grammar reads one and the rest of the way is not built yet. Naming it here is
+	   * what tells a strict sweep this apart from a body the grammar could not read at all. */
+	  (void) pt_plcsql_refuse (parser, "the declaration part holds a local procedure or function");
+	  return ER_FAILED;
+	}
+
       if (decl->info.sp_stmt.flags & PT_SP_DECL_EXCEPTION)
 	{
 	  /* an exception names no value, so it takes no frame slot. It still enters the scope,
@@ -30983,7 +30992,6 @@ static int pt_plcsql_read_static_sql (PARSER_CONTEXT * parser, PT_NODE * list);
 static int pt_plcsql_read_outer_handlers (PARSER_CONTEXT * parser, PT_NODE * block);
 static PT_NODE *pt_plcsql_type_expr (PARSER_CONTEXT * parser, PT_NODE * expr);
 static REGU_VARIABLE *pt_plcsql_expr_to_regu (PARSER_CONTEXT * parser, PT_NODE ** expr);
-static XASL_NODE *pt_plcsql_refuse (PARSER_CONTEXT * parser, const char *reason);
 static XASL_NODE *pt_to_plcsql_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * ret_domain,
 				     PT_PLCSQL_LOOP * loops);
 static XASL_NODE *pt_to_plcsql_stmt_inner (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * ret_domain,
