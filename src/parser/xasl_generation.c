@@ -30349,6 +30349,17 @@ pt_plcsql_bind_name (PARSER_CONTEXT * parser, PT_NODE * name, PT_PLCSQL_SCOPE * 
       return ER_FAILED;
     }
 
+  if (decl->node_type == PT_SP_STMT && (decl->info.sp_stmt.flags & PT_SP_DECL_ROUTINE) != 0)
+    {
+      /* A local function taking no argument is called by writing its name, with no parentheses
+       * to tell it from a variable - so this is a call and not a reference, and a call standing
+       * in an expression is not lowered yet. What a routine's name carries is its number among
+       * the frame's routines, which is not a slot: reading it as one would quietly serve
+       * whatever that slot holds rather than failing. */
+      (void) pt_plcsql_refuse (parser, "an expression calls a local function");
+      return ER_FAILED;
+    }
+
   /* pt_plcsql_find_decl () answers with a PT_SP_STMT for a declaration and with a bare PT_NAME
    * for a parameter or a FOR loop variable, each of which is its own declaration */
   if (decl->node_type == PT_SP_STMT)
