@@ -85,6 +85,7 @@
 #include "dbtype.h"
 #include "thread_manager.hpp"	// for thread_get_thread_entry_info
 #include "compile_context.h"
+#include "sha1.h"
 #include "load_session.hpp"
 #include "session.h"
 #include "xasl.h"
@@ -11206,7 +11207,9 @@ spl_call (THREAD_ENTRY *thread_p, unsigned int rid, char *request, int reqlen)
   cubpl::pl_signature sig;
   std::vector < DB_VALUE > args;
   std::string plan;
-  unpacker.unpack_all (sig, args, plan);
+  int plan_op = cubpl::PL_PLAN_NO_CACHE;
+  std::string plan_key;
+  unpacker.unpack_all (sig, args, plan, plan_op, plan_key);
 
   std::vector < std::reference_wrapper < DB_VALUE >> ref_args (args.begin (), args.end ());
 
@@ -11216,13 +11219,119 @@ spl_call (THREAD_ENTRY *thread_p, unsigned int rid, char *request, int reqlen)
   std::vector < DB_VALUE > no_out_args;
   char *placed_msg = NULL;
 
-  if (!plan.empty ())
+  if (plan_op == cubpl::PL_PLAN_USE_FILED && plan.empty ())
+    {
+      /* The client left the plan out because it believes this procedure's plan is already
+       * cached, which is the whole point - building one is what costs.
+       *
+       * A miss is not an error in the call, it is an error in that belief: the entry may have
+       * been dropped because something it depends on changed. Saying so lets the client build
+       * a plan and come back, the way a statement re-prepares on ER_QPROC_INVALID_XASLNODE. */
+      XASL_CACHE_ENTRY *xcache_entry = NULL;
+      XASL_CLONE xclone = XASL_CLONE_INITIALIZER;
+      SHA1Hash sha1;
+
+      if (plan_key.empty ()
+	  || SHA1Compute ((const unsigned char *) plan_key.c_str (), plan_key.size (), &sha1) != NO_ERROR)
+	{
+	  er_clear ();
+	  error_code = ER_QPROC_INVALID_XASLNODE;
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, error_code, 0);
+	}
+      /* Ask for it the way executing a statement does. What comes back is a clone to run, not
+       * the entry's own stream - that buffer belongs to the cache and unpacking it here reads
+       * memory the cache never promised.
+       *
+       * A statement looks its entry up by the whole XASL_ID, so that the plan it runs is the one
+       * it prepared and built host variable positions against. A call has nothing of the sort:
+       * anything the plan was built against is in the key already, so any entry still under it
+       * is a plan this call can run. The SHA-1 is the whole lookup. */
+      else if (xcache_find_sha1_for_execute (thread_p, &sha1, &xcache_entry, &xclone) != NO_ERROR
+	       || xcache_entry == NULL || xclone.xasl == NULL)
+	{
+	  er_clear ();
+	  error_code = ER_QPROC_INVALID_XASLNODE;
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, error_code, 0);
+	  if (xcache_entry != NULL)
+	    {
+	      xcache_retire_clone (thread_p, xcache_entry, &xclone);
+	      xcache_unfix (thread_p, xcache_entry);
+	    }
+	}
+      else
+	{
+	  error_code = qexec_call_plcsql (thread_p, xclone.xasl, args.data (), (int) args.size (), &ret_value,
+					  &placed_msg);
+	  xcache_retire_clone (thread_p, xcache_entry, &xclone);
+	  xcache_unfix (thread_p, xcache_entry);
+	}
+    }
+  else if (!plan.empty ())
     {
       /* the client built the procedure's own plan, so the server runs it here. What a function
        * returns goes back in the same ret_value the PL engine fills, and the reply is packed
        * the same way either way. */
       XASL_NODE *xasl = NULL;
       XASL_UNPACK_INFO *unpack_info = NULL;
+
+      /* File the plan in the XASL cache under the key the call carries. A CALL carries its plan
+       * instead of looking one up (do_prepare_statement has no case for PT_METHOD_CALL), so this
+       * is where the plan and the objects it depends on arrive together: xqmgr_prepare_query
+       * unpacks that list out of the same stream, and the list is what later drops the entry
+       * when one of those objects changes.
+       *
+       * The key alone is enough to find it again. A procedure's plan does not vary with its
+       * arguments - the plan is built from pl_signature, whose pl_arg carries counts, modes and
+       * types but no values, and the values travel beside the plan to fill frame slots.
+       *
+       * Failing to cache is not failing the call. The plan in hand still runs.
+       *
+       * With the cache off there is nowhere to file it. A client does not ask for a statement to
+       * be prepared either in that case (db_vdb.c), and asking anyway trips xqmgr_prepare_query
+       * on the entry that never comes back. */
+      if (plan_op == cubpl::PL_PLAN_FILE && sig.name != NULL && !plan_key.empty ()
+	  && prm_get_integer_value (PRM_ID_XASL_CACHE_MAX_ENTRIES) > 0)
+	{
+	  COMPILE_CONTEXT context;
+	  XASL_STREAM cache_stream;
+	  XASL_ID cached_id;
+
+	  memset (&context, 0, sizeof (context));
+	  memset (&cache_stream, 0, sizeof (cache_stream));
+	  XASL_ID_SET_NULL (&cached_id);
+
+	  /* the key goes in the hashed field, as a statement's own key text does, and the name in
+	   * the one a plan dump shows beside it */
+	  context.sql_hash_text = (char *) plan_key.c_str ();
+	  context.sql_user_text = sig.name;
+	  context.sql_user_text_len = (int) strlen (sig.name);
+	  if (SHA1Compute ((const unsigned char *) plan_key.c_str (), plan_key.size (), &context.sha1) == NO_ERROR)
+	    {
+	      /* The cache keeps the buffer it is given and frees it when the entry goes, so what it
+	       * gets cannot be the plan string's own storage - that dies with this call. On the way
+	       * out the buffer is NULL if the cache took it, and ours to free if it did not. */
+	      cache_stream.buffer = (char *) malloc (plan.size ());
+	      if (cache_stream.buffer != NULL)
+		{
+		  std::memcpy (cache_stream.buffer, plan.data (), plan.size ());
+		  cache_stream.xasl_id = &cached_id;
+		  cache_stream.buffer_size = (int) plan.size ();
+
+		  if (xqmgr_prepare_query (thread_p, &context, &cache_stream) != NO_ERROR)
+		    {
+		      er_clear ();
+		    }
+		  if (cache_stream.buffer != NULL)
+		    {
+		      free_and_init (cache_stream.buffer);
+		    }
+		}
+	    }
+	  else
+	    {
+	      er_clear ();
+	    }
+	}
 
       error_code = stx_map_stream_to_xasl (thread_p, &xasl, false, (char *) plan.data (), (int) plan.size (),
 					   &unpack_info);
@@ -11275,8 +11384,12 @@ spl_call (THREAD_ENTRY *thread_p, unsigned int rid, char *request, int reqlen)
 	  err_msg.assign (er_msg ());
 	}
 
+      /* A missing cache entry is not the procedure failing, it is the answer to a client that left
+       * the plan out. Wrapping it would put it behind ER_SP_EXECUTE_ERROR, where the client could
+       * no longer tell it apart from a body that raised, and the plan would never be sent again. */
       if (error_code !=
-	  ER_SM_INVALID_METHOD_ENV)	/* FIXME: error possibly occured in builtin method, It should be handled at CAS */
+	  ER_SM_INVALID_METHOD_ENV	/* FIXME: error possibly occured in builtin method, It should be handled at CAS */
+	  && error_code != ER_QPROC_INVALID_XASLNODE)
 	{
 	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_SP_EXECUTE_ERROR, 1, err_msg.c_str ());
 	}

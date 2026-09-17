@@ -127,6 +127,14 @@ namespace cubpl
     pl_signature_array (int num);
     ~pl_signature_array () override;
   };
+
+  /* what a call asks be done with the procedure's plan */
+  enum pl_plan_cache_op
+  {
+    PL_PLAN_NO_CACHE = 0,	/* the plan travels with the call and is not filed */
+    PL_PLAN_FILE,		/* the plan travels with the call and is filed under its key */
+    PL_PLAN_USE_FILED		/* no plan travels; the one filed under the key runs */
+  };
 }
 
 using PL_SIGNATURE_TYPE = cubpl::pl_signature;

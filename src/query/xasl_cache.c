@@ -956,83 +956,25 @@ xcache_find_sha1 (THREAD_ENTRY * thread_p, const SHA1Hash * sha1, const XASL_CAC
 }
 
 /*
- * xcache_find_xasl_id_for_execute () - Find XASL cache entry by XASL_ID. Besides matching SHA-1, we have to match
- *                                      time_stored.
+ * xcache_lock_and_load_clone () - Lock every object the entry depends on, confirm the entry survived the
+ *                                 locking, and hand out a clone of its XASL tree to run.
  *
- * return	      : NO_ERROR.
- * thread_p (in)      : Thread entry.
- * xid (in)	      : XASL_ID.
- * xcache_entry (out) : XASL cache entry if found.
- * xclone (out)	      : XASL_CLONE (obtained from cache or loaded).
+ * return	         : NO_ERROR.
+ * thread_p (in)         : Thread entry.
+ * xid (in)	         : XASL_ID the entry was found with.
+ * xcache_entry (in/out) : XASL cache entry; unfixed and set to NULL if it did not survive.
+ * xclone (out)	         : XASL_CLONE (obtained from cache or loaded).
  */
-int
-xcache_find_xasl_id_for_execute (THREAD_ENTRY * thread_p, const XASL_ID * xid, XASL_CACHE_ENTRY ** xcache_entry,
-				 XASL_CLONE * xclone)
+static int
+xcache_lock_and_load_clone (THREAD_ENTRY * thread_p, const XASL_ID * xid, XASL_CACHE_ENTRY ** xcache_entry,
+			    XASL_CLONE * xclone)
 {
   int error_code = NO_ERROR;
   HL_HEAPID save_heapid = 0;
   int oid_index;
   int lock_result;
   bool use_xasl_clone = false;
-  xasl_cache_rt_check_result recompile_due_to_threshold = XASL_CACHE_RECOMPILE_NOT_NEEDED;
   XASL_ID prev_xid;
-
-  assert (xid != NULL);
-  assert (xcache_entry != NULL && *xcache_entry == NULL);
-  assert (xclone != NULL);
-
-  error_code = xcache_find_sha1 (thread_p, &xid->sha1, XASL_CACHE_SEARCH_FOR_EXECUTE, xcache_entry,
-				 &recompile_due_to_threshold);
-  if (error_code != NO_ERROR)
-    {
-      ASSERT_ERROR ();
-      return error_code;
-    }
-  if (*xcache_entry == NULL)
-    {
-      /* No entry was found. */
-      if (recompile_due_to_threshold == XASL_CACHE_RECOMPILE_EXECUTE)
-	{
-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_XASLNODE_RECOMPILE_REQUESTED, 0);
-	  perfmon_inc_stat (thread_p, PSTAT_PC_NUM_INVALID_XASL_ID);
-	  return ER_QPROC_XASLNODE_RECOMPILE_REQUESTED;
-	}
-      return NO_ERROR;
-    }
-  if ((*xcache_entry)->xasl_id.time_stored.sec != xid->time_stored.sec
-      || (*xcache_entry)->xasl_id.time_stored.usec != xid->time_stored.usec)
-    {
-      /* We don't know if this XASL cache entry is good for us. We need to restart by recompiling. */
-      xcache_log ("could not get cache entry because time_stored mismatch \n"
-		  XCACHE_LOG_ENTRY_TEXT ("entry")
-		  XCACHE_LOG_XASL_ID_TEXT ("lookup xasl_id")
-		  XCACHE_LOG_TRAN_TEXT,
-		  XCACHE_LOG_ENTRY_ARGS (*xcache_entry),
-		  XCACHE_LOG_XASL_ID_ARGS (xid), XCACHE_LOG_TRAN_ARGS (thread_p));
-      xcache_unfix (thread_p, *xcache_entry);
-      *xcache_entry = NULL;
-
-      /* TODO:
-       * The one reason we cannot accept this cache entry is because one of the referenced classes might have suffered
-       * a schema change. Or maybe a serial may have been altered, although I am not sure this can actually affect our
-       * plan.
-       * Instead of using time_stored, we could find another way to identify if an XASL cache entry is still usable.
-       * Something that could detect if classes have been modified (and maybe serials).
-       */
-
-      return NO_ERROR;
-    }
-  else
-    {
-      xcache_log ("found cache entry by xasl_id: \n"
-		  XCACHE_LOG_ENTRY_TEXT ("entry")
-		  XCACHE_LOG_XASL_ID_TEXT ("lookup xasl_id")
-		  XCACHE_LOG_TRAN_TEXT,
-		  XCACHE_LOG_ENTRY_ARGS (*xcache_entry),
-		  XCACHE_LOG_XASL_ID_ARGS (xid), XCACHE_LOG_TRAN_ARGS (thread_p));
-    }
-
-  assert ((*xcache_entry) != NULL);
 
   /* set xasl_id to tdes before getting locks */
   int tran_index = LOG_FIND_THREAD_TRAN_INDEX (thread_p);
@@ -1176,6 +1118,129 @@ error:
     }
 
   return error_code;
+}
+
+/*
+ * xcache_find_xasl_id_for_execute () - Find XASL cache entry by XASL_ID. Besides matching SHA-1, we have to match
+ *                                      time_stored.
+ *
+ * return	      : NO_ERROR.
+ * thread_p (in)      : Thread entry.
+ * xid (in)	      : XASL_ID.
+ * xcache_entry (out) : XASL cache entry if found.
+ * xclone (out)	      : XASL_CLONE (obtained from cache or loaded).
+ */
+int
+xcache_find_xasl_id_for_execute (THREAD_ENTRY * thread_p, const XASL_ID * xid, XASL_CACHE_ENTRY ** xcache_entry,
+				 XASL_CLONE * xclone)
+{
+  int error_code = NO_ERROR;
+  xasl_cache_rt_check_result recompile_due_to_threshold = XASL_CACHE_RECOMPILE_NOT_NEEDED;
+
+  assert (xid != NULL);
+  assert (xcache_entry != NULL && *xcache_entry == NULL);
+  assert (xclone != NULL);
+
+  error_code = xcache_find_sha1 (thread_p, &xid->sha1, XASL_CACHE_SEARCH_FOR_EXECUTE, xcache_entry,
+				 &recompile_due_to_threshold);
+  if (error_code != NO_ERROR)
+    {
+      ASSERT_ERROR ();
+      return error_code;
+    }
+  if (*xcache_entry == NULL)
+    {
+      /* No entry was found. */
+      if (recompile_due_to_threshold == XASL_CACHE_RECOMPILE_EXECUTE)
+	{
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_XASLNODE_RECOMPILE_REQUESTED, 0);
+	  perfmon_inc_stat (thread_p, PSTAT_PC_NUM_INVALID_XASL_ID);
+	  return ER_QPROC_XASLNODE_RECOMPILE_REQUESTED;
+	}
+      return NO_ERROR;
+    }
+  if ((*xcache_entry)->xasl_id.time_stored.sec != xid->time_stored.sec
+      || (*xcache_entry)->xasl_id.time_stored.usec != xid->time_stored.usec)
+    {
+      /* We don't know if this XASL cache entry is good for us. We need to restart by recompiling. */
+      xcache_log ("could not get cache entry because time_stored mismatch \n"
+		  XCACHE_LOG_ENTRY_TEXT ("entry")
+		  XCACHE_LOG_XASL_ID_TEXT ("lookup xasl_id")
+		  XCACHE_LOG_TRAN_TEXT,
+		  XCACHE_LOG_ENTRY_ARGS (*xcache_entry),
+		  XCACHE_LOG_XASL_ID_ARGS (xid), XCACHE_LOG_TRAN_ARGS (thread_p));
+      xcache_unfix (thread_p, *xcache_entry);
+      *xcache_entry = NULL;
+
+      /* TODO:
+       * The one reason we cannot accept this cache entry is because one of the referenced classes might have suffered
+       * a schema change. Or maybe a serial may have been altered, although I am not sure this can actually affect our
+       * plan.
+       * Instead of using time_stored, we could find another way to identify if an XASL cache entry is still usable.
+       * Something that could detect if classes have been modified (and maybe serials).
+       */
+
+      return NO_ERROR;
+    }
+  else
+    {
+      xcache_log ("found cache entry by xasl_id: \n"
+		  XCACHE_LOG_ENTRY_TEXT ("entry")
+		  XCACHE_LOG_XASL_ID_TEXT ("lookup xasl_id")
+		  XCACHE_LOG_TRAN_TEXT,
+		  XCACHE_LOG_ENTRY_ARGS (*xcache_entry),
+		  XCACHE_LOG_XASL_ID_ARGS (xid), XCACHE_LOG_TRAN_ARGS (thread_p));
+    }
+
+  assert ((*xcache_entry) != NULL);
+
+  return xcache_lock_and_load_clone (thread_p, xid, xcache_entry, xclone);
+}
+
+/*
+ * xcache_find_sha1_for_execute () - Find an XASL cache entry by SHA-1 alone and hand out a clone to run.
+ *
+ * return	      : NO_ERROR.
+ * thread_p (in)      : Thread entry.
+ * sha1 (in)	      : SHA-1 the entry was filed under.
+ * xcache_entry (out) : XASL cache entry if found.
+ * xclone (out)	      : XASL_CLONE (obtained from cache or loaded).
+ *
+ * Note: xcache_find_xasl_id_for_execute () also matches time_stored, because its caller prepared one
+ *       particular plan and holds state built against it. A caller that keeps no such state - it only
+ *       wants whatever valid plan is filed under this SHA-1 - has nothing to match, so it comes here.
+ *       A miss leaves *xcache_entry NULL and is not an error; the caller is expected to supply a plan.
+ */
+int
+xcache_find_sha1_for_execute (THREAD_ENTRY * thread_p, const SHA1Hash * sha1, XASL_CACHE_ENTRY ** xcache_entry,
+			      XASL_CLONE * xclone)
+{
+  int error_code = NO_ERROR;
+  xasl_cache_rt_check_result recompile_due_to_threshold = XASL_CACHE_RECOMPILE_NOT_NEEDED;
+  XASL_ID xid;
+
+  assert (sha1 != NULL);
+  assert (xcache_entry != NULL && *xcache_entry == NULL);
+  assert (xclone != NULL);
+
+  error_code = xcache_find_sha1 (thread_p, sha1, XASL_CACHE_SEARCH_FOR_EXECUTE, xcache_entry,
+				 &recompile_due_to_threshold);
+  if (error_code != NO_ERROR)
+    {
+      ASSERT_ERROR ();
+      return error_code;
+    }
+  if (*xcache_entry == NULL)
+    {
+      /* Either no entry, or one that asked to be recompiled. Both read as "supply a plan". */
+      return NO_ERROR;
+    }
+
+  /* Take a copy: the entry can be unfixed below, and the lookup key outlives it. */
+  XASL_ID_SET_NULL (&xid);
+  XASL_ID_COPY (&xid, &(*xcache_entry)->xasl_id);
+
+  return xcache_lock_and_load_clone (thread_p, &xid, xcache_entry, xclone);
 }
 
 /*
