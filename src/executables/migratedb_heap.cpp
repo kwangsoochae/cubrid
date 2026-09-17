@@ -29,6 +29,11 @@
 #include <unistd.h>
 
 #include "error_code.h"
+#include "object_representation.h"
+#include "object_primitive.h"
+#include "intl_support.h"
+#include "dbtype.h"
+#include "memory_alloc.h"
 
 #include <cmath>
 #include <climits>
@@ -44,8 +49,11 @@ static const DB_TYPE mv_11_4[] = { DB_TYPE_CHAR, DB_TYPE_NCHAR_DEPRECATED, DB_TY
 
 static const MIGRATE_SRC_FORMAT migrate_Known_formats[] =
 {
-  /* release  compat  io  log  prefix  reserved  next_vpid  moved_to_variable        n */
-  {"11.4", 11.4f, 0, 0, 32, 40, 16, mv_11_4, (int) (sizeof (mv_11_4) / sizeof (mv_11_4[0]))},
+  /* release compat io log prefix reserved next_vpid moved_to_variable n numeric_disk_size
+   *
+   * 11.4's fixed NUMERIC is DB_NUMERIC_BUF_SIZE, which was 2 * sizeof (double) there and is 17 here.
+   */
+  {"11.4", 11.4f, 0, 0, 32, 40, 16, mv_11_4, (int) (sizeof (mv_11_4) / sizeof (mv_11_4[0])), 16},
 };
 
 static const int migrate_Known_format_count =
@@ -358,4 +366,376 @@ migrate_heap_walk (int hfid_volid, PAGEID hpgid, MIGRATE_HEAP_RECORD_FN fn, void
 
   free (iopage);
   return error;
+}
+
+/*
+ * STR_SIZE is file-local to object_primitive.c; the fixed width of a CHAR in the source is the
+ * same expression there, so it is repeated rather than reached for.
+ */
+#define MIGRATE_STR_SIZE(prec, codeset) \
+  (((codeset) == INTL_CODESET_RAW_BITS) ? (((prec) + 7) / 8) : INTL_CODESET_MULT (codeset) * (prec))
+
+static bool
+migrate_src_type_moved (const MIGRATE_SRC_FORMAT *fmt, DB_TYPE type)
+{
+  for (int i = 0; i < fmt->n_moved_to_variable; i++)
+    {
+      if (fmt->moved_to_variable[i] == type)
+	{
+	  return true;
+	}
+    }
+  return false;
+}
+
+/* was this attribute stored in the fixed block by the source? */
+static bool
+migrate_src_is_fixed (const MIGRATE_SRC_FORMAT *fmt, TP_DOMAIN *domain)
+{
+  if (migrate_src_type_moved (fmt, TP_DOMAIN_TYPE (domain)))
+    {
+      return true;
+    }
+  return domain->type->variable_p == 0;
+}
+
+/*
+ * Width of a fixed attribute in the source's encoding.  It is tp_domain_disk_size () except for
+ * the types that moved: this release sizes them the variable way, and NUMERIC also changed the
+ * constant it uses.
+ */
+static int
+migrate_src_fixed_disk_size (const MIGRATE_SRC_FORMAT *fmt, TP_DOMAIN *domain)
+{
+  switch (TP_DOMAIN_TYPE (domain))
+    {
+    case DB_TYPE_NUMERIC:
+      return fmt->numeric_disk_size;
+
+    case DB_TYPE_CHAR:
+    case DB_TYPE_NCHAR_DEPRECATED:
+      if (domain->precision == TP_FLOATING_PRECISION_VALUE)
+	{
+	  return -1;
+	}
+      return MIGRATE_STR_SIZE (domain->precision, TP_DOMAIN_CODESET (domain));
+
+    default:
+      return tp_domain_disk_size (domain);
+    }
+}
+
+void
+migrate_src_layout_free (MIGRATE_SRC_LAYOUT *layout)
+{
+  free (layout->attrs);
+  layout->attrs = NULL;
+  layout->n_attrs = layout->n_fixed = layout->n_variable = layout->fixed_length = 0;
+}
+
+int
+migrate_src_layout_build (const MIGRATE_SRC_FORMAT *fmt, HEAP_CACHE_ATTRINFO *attr_info,
+			  MIGRATE_SRC_LAYOUT *layout)
+{
+  int n = attr_info->num_values;
+  int n_fixed = 0, n_var = 0;
+  int offset = 0;
+  MIGRATE_SRC_ATTR *fixed, *variable;
+
+  memset (layout, 0, sizeof (*layout));
+  if (n <= 0)
+    {
+      return ER_FAILED;
+    }
+
+  layout->attrs = (MIGRATE_SRC_ATTR *) calloc (n, sizeof (MIGRATE_SRC_ATTR));
+  fixed = (MIGRATE_SRC_ATTR *) calloc (n, sizeof (MIGRATE_SRC_ATTR));
+  variable = (MIGRATE_SRC_ATTR *) calloc (n, sizeof (MIGRATE_SRC_ATTR));
+  if (layout->attrs == NULL || fixed == NULL || variable == NULL)
+    {
+      free (fixed);
+      free (variable);
+      migrate_src_layout_free (layout);
+      return ER_FAILED;
+    }
+  layout->n_attrs = n;
+
+  /*
+   * The target's attributes come in its own storage order, fixed first.  Splitting them by the
+   * source's rule keeps the relative order inside each group, and that is the order the source
+   * had as well: both releases append to the variable list in the same sequence.
+   */
+  for (int i = 0; i < n; i++)
+    {
+      OR_ATTRIBUTE *att = attr_info->values[i].last_attrepr;
+      MIGRATE_SRC_ATTR a;
+
+      a.id = att->id;
+      a.def_order = att->def_order;
+      a.value_index = i;
+      a.domain = att->domain;
+      a.is_fixed = migrate_src_is_fixed (fmt, att->domain);
+      a.location = 0;
+      a.disk_size = 0;
+
+      if (a.is_fixed)
+	{
+	  a.disk_size = migrate_src_fixed_disk_size (fmt, att->domain);
+	  if (a.disk_size < 0)
+	    {
+	      /* a floating-precision CHAR was never fixed; nothing here can place it */
+	      free (fixed);
+	      free (variable);
+	      migrate_src_layout_free (layout);
+	      return ER_FAILED;
+	    }
+	  fixed[n_fixed++] = a;
+	}
+      else
+	{
+	  variable[n_var++] = a;
+	}
+    }
+
+  /*
+   * The source ordered its fixed block by descending alignment, ties broken by smaller disk
+   * size -- order_atts_by_alignment () in schema_manager.c.
+   *
+   * It takes the first of equals, so what settles a full tie is the order the attributes sat in
+   * its own list, and that order cannot be recovered here: it depends on how the class was built.
+   * A class defined in one CREATE TABLE ends up with the reverse of its column order, while one
+   * grown by ALTER ADD ends up in the order the columns were added, and the target -- always
+   * rebuilt as CREATE plus one ALTER ADD -- matches neither reliably. Two fixed attributes with
+   * the same alignment and the same width are therefore left as ambiguous rather than guessed at.
+   */
+  for (int i = 1; i < n_fixed; i++)
+    {
+      MIGRATE_SRC_ATTR key = fixed[i];
+      int key_align = key.domain->type->alignment;
+      int j = i - 1;
+
+      while (j >= 0)
+	{
+	  int j_align = fixed[j].domain->type->alignment;
+
+	  if (! (key_align > j_align || (key_align == j_align && key.disk_size < fixed[j].disk_size)))
+	    {
+	      break;
+	    }
+	  fixed[j + 1] = fixed[j];
+	  j--;
+	}
+      fixed[j + 1] = key;
+    }
+
+  for (int i = 0; i < n_fixed; i++)
+    {
+      fixed[i].location = offset;
+      offset += fixed[i].disk_size;
+      layout->attrs[i] = fixed[i];
+    }
+  for (int i = 0; i < n_var; i++)
+    {
+      variable[i].location = i;
+      layout->attrs[n_fixed + i] = variable[i];
+    }
+
+  free (fixed);
+  free (variable);
+
+  /* a full tie leaves the source's order unknowable; say so rather than pick one */
+  layout->order_ambiguous = false;
+  for (int i = 1; i < n_fixed; i++)
+    {
+      if (layout->attrs[i].domain->type->alignment == layout->attrs[i - 1].domain->type->alignment
+	  && layout->attrs[i].disk_size == layout->attrs[i - 1].disk_size)
+	{
+	  layout->order_ambiguous = true;
+	  break;
+	}
+    }
+
+  layout->n_fixed = n_fixed;
+  layout->n_variable = n_var;
+  layout->fixed_length = DB_ATT_ALIGN (offset);
+  return NO_ERROR;
+}
+
+/* read one value in the source's encoding; only the types that moved differ from this release */
+static int
+migrate_src_readval (const MIGRATE_SRC_FORMAT *fmt, char *ptr, int size, TP_DOMAIN *domain, DB_VALUE *value)
+{
+  switch (TP_DOMAIN_TYPE (domain))
+    {
+    case DB_TYPE_NUMERIC:
+    {
+      /*
+       * The source holds the unscaled value as a big-endian two's complement integer, sign and
+       * all, in fmt->numeric_disk_size bytes with nothing in front of it.  This release keeps the
+       * magnitude right-aligned in a DB_NUMERIC_BUF_SIZE buffer and carries the sign beside it,
+       * so a negative value has to be negated on the way across.
+       */
+      unsigned char mag[DB_NUMERIC_BUF_SIZE];
+      int n = fmt->numeric_disk_size;
+      bool is_negative;
+
+      if (n <= 0 || n > DB_NUMERIC_BUF_SIZE)
+	{
+	  return ER_FAILED;
+	}
+
+      is_negative = (((unsigned char *) ptr)[0] & 0x80) != 0;
+
+      memset (mag, 0, sizeof (mag));
+      memcpy (mag + (DB_NUMERIC_BUF_SIZE - n), ptr, n);
+
+      if (is_negative)
+	{
+	  int carry = 1;
+
+	  for (int i = DB_NUMERIC_BUF_SIZE - 1; i >= 0; i--)
+	    {
+	      int b = (unsigned char) (~mag[i]) + carry;
+	      mag[i] = (unsigned char) (b & 0xFF);
+	      carry = b >> 8;
+	    }
+	  /* the sign extension inverted to 0xFF..., which the add above carried away */
+	  for (int i = 0; i < DB_NUMERIC_BUF_SIZE - n; i++)
+	    {
+	      mag[i] = 0;
+	    }
+	}
+
+      db_make_numeric (value, (DB_C_NUMERIC) mag, domain->precision, domain->scale, DB_NUMERIC_BUF_SIZE,
+		       is_negative, false);
+      value->need_clear = false;
+      return NO_ERROR;
+    }
+
+    case DB_TYPE_CHAR:
+    case DB_TYPE_NCHAR_DEPRECATED:
+    {
+      /* the whole precision sits on disk, blank padded; the value keeps the characters it holds */
+      int str_length = 0;
+
+      intl_char_size ((unsigned char *) ptr, domain->precision, TP_DOMAIN_CODESET (domain), &str_length);
+      if (str_length == 0)
+	{
+	  str_length = size;
+	}
+      db_make_char (value, domain->precision, ptr, str_length, TP_DOMAIN_CODESET (domain),
+		    TP_DOMAIN_COLLATION (domain));
+      value->need_clear = false;
+      return NO_ERROR;
+    }
+
+    default:
+    {
+      OR_BUF buf;
+
+      or_init (&buf, ptr, size);
+      return domain->type->data_readval (&buf, value, domain, size, false, NULL, 0);
+    }
+    }
+}
+
+/*
+ * Does this record actually have the shape the layout describes?
+ *
+ * A record carries the representation it was written under, but representation ids are not
+ * comparable across databases -- replaying the schema can number them differently, and it does
+ * for inherited classes. What is comparable is the shape itself: the first variable value sits
+ * exactly after the variable table, the fixed block and the bound bits, so that offset pins down
+ * both the number of variable attributes and the width of the fixed block. A record written under
+ * some other representation fails this, which is what stops it from being decoded into
+ * plausible-looking nonsense.
+ */
+int
+migrate_src_layout_matches (const MIGRATE_SRC_LAYOUT *layout, char *rec, int reclen)
+{
+  int hdr = OR_HEADER_SIZE (rec);
+  int offset_size = OR_GET_OFFSET_SIZE (rec);
+  int var_table_size = OR_VAR_TABLE_SIZE_INTERNAL (layout->n_variable, offset_size);
+  int bound_bytes = 0;
+  int expected;
+
+  if (OR_GET_BOUND_BIT_FLAG (rec))
+    {
+      bound_bytes = OR_BOUND_BIT_BYTES (layout->n_fixed);
+    }
+  expected = var_table_size + layout->fixed_length + bound_bytes;
+
+  if (layout->n_variable > 0)
+    {
+      char *var_table = rec + hdr;
+      int first = OR_VAR_TABLE_ELEMENT_OFFSET_INTERNAL (var_table, 0, offset_size);
+
+      return (first == expected) ? NO_ERROR : ER_FAILED;
+    }
+
+  /* with no variable attributes the record is just the header, the fixed block and the bits */
+  return (hdr + expected <= reclen) ? NO_ERROR : ER_FAILED;
+}
+
+int
+migrate_src_read_record (const MIGRATE_SRC_FORMAT *fmt, const MIGRATE_SRC_LAYOUT *layout,
+			 char *rec, int reclen, HEAP_CACHE_ATTRINFO *attr_info)
+{
+  int hdr = OR_HEADER_SIZE (rec);
+  int offset_size = OR_GET_OFFSET_SIZE (rec);
+  char *var_table = rec + hdr;
+  int fixed_start = hdr + OR_VAR_TABLE_SIZE_INTERNAL (layout->n_variable, offset_size);
+  char *bound_bits = NULL;
+
+  if (OR_GET_BOUND_BIT_FLAG (rec))
+    {
+      bound_bits = rec + fixed_start + layout->fixed_length;
+    }
+
+  for (int i = 0; i < layout->n_attrs; i++)
+    {
+      const MIGRATE_SRC_ATTR *a = &layout->attrs[i];
+      DB_VALUE *value = &attr_info->values[a->value_index].dbvalue;
+
+      pr_clear_value (value);
+      db_make_null (value);
+      attr_info->values[a->value_index].state = HEAP_READ_ATTRVALUE;
+
+      if (a->is_fixed)
+	{
+	  /* i is the storage order, and the bound bits are indexed the same way */
+	  if (bound_bits != NULL && !OR_GET_BOUND_BIT (bound_bits, i))
+	    {
+	      continue;
+	    }
+	  if (fixed_start + a->location + a->disk_size > reclen)
+	    {
+	      return ER_FAILED;
+	    }
+	  if (migrate_src_readval (fmt, rec + fixed_start + a->location, a->disk_size, a->domain, value) != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
+	}
+      else
+	{
+	  int off = hdr + OR_VAR_TABLE_ELEMENT_OFFSET_INTERNAL (var_table, a->location, offset_size);
+	  int len = OR_VAR_TABLE_ELEMENT_LENGTH_INTERNAL (var_table, a->location, offset_size);
+
+	  if (len == 0)
+	    {
+	      continue;		/* an empty slot in the variable table is a NULL */
+	    }
+	  if (off < 0 || len < 0 || off + len > reclen)
+	    {
+	      return ER_FAILED;
+	    }
+	  if (migrate_src_readval (fmt, rec + off, len, a->domain, value) != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
+	}
+    }
+
+  return NO_ERROR;
 }

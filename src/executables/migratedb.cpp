@@ -102,7 +102,9 @@ struct class_plan
   std::vector<int> obj_values;
   std::vector<ATTR_ID> obj_attrids;
 
-  bool layout_changed = false;
+  bool layout_changed = false;	/* the source laid this class out differently */
+  MIGRATE_SRC_LAYOUT src_layout;	/* built only when it did */
+  REPR_ID repr_id = NULL_REPRID;	/* the one representation this class can be read with */
   bool has_lob = false;
   bool skipped = false;
 
@@ -114,6 +116,7 @@ struct class_plan
   long insert_errors = 0;
   long update_errors = 0;
   long unresolved_refs = 0;
+  long old_repr_rows = 0;	/* written under a representation the target no longer has */
   long skipped_bigone = 0;
   long skipped_relocation = 0;
 };
@@ -261,6 +264,7 @@ check_class (class_plan &cp)
 
   cp.layout_changed = (moved > 0);
   cp.has_lob = (lobs > 0);
+  cp.repr_id = cp.attr_info.last_classrepr->id;
 
   if (lobs > 0)
     {
@@ -272,13 +276,29 @@ check_class (class_plan &cp)
 	      g_remap_oids ? "a second pass will remap them" : "nothing here remaps them");
     }
 
+  /*
+   * The layout is rebuilt for every class, not only the ones that moved: even when the shape is
+   * unchanged it is what each record is checked against before being decoded.
+   */
+  if (migrate_src_layout_build (&g_src_format, &cp.attr_info, &cp.src_layout) != NO_ERROR)
+    {
+      printf ("  REFUSING: cannot rebuild the source's record shape for this class\n");
+      return false;
+    }
   if (moved > 0)
     {
-      printf ("  %s: storage class changed between 11.4 and guava\n", g_force ? "WARNING" : "REFUSING");
-      if (!g_force)
+      if (cp.src_layout.order_ambiguous)
 	{
-	  return false;
+	  printf ("  %s: two fixed attributes share an alignment and a width, so the order the\n"
+		  "  source put them in cannot be recovered from here\n", g_force ? "WARNING" : "REFUSING");
+	  if (!g_force)
+	    {
+	      return false;
+	    }
 	}
+      printf ("  reading with the %s layout: %d fixed (%d bytes), %d variable\n",
+	      g_src_format.release, cp.src_layout.n_fixed, cp.src_layout.fixed_length,
+	      cp.src_layout.n_variable);
     }
   if (!cp.obj_values.empty () && !g_remap_oids)
     {
@@ -404,6 +424,30 @@ remap_value (DB_VALUE *v, long &unresolved)
   return false;
 }
 
+/*
+ * Decode one source record into the class's attribute info.  Classes the source laid out the
+ * same way go through the engine's own reader; the rest are read with the source's shape.
+ */
+static int
+migrate_read_record (class_plan &cp, char *rec, int reclen, RECDES *src)
+{
+  /*
+   * A record written under some other representation -- a class the source ALTERed -- would
+   * decode into plausible-looking nonsense rather than an error, so its shape is checked first.
+   */
+  if (migrate_src_layout_matches (&cp.src_layout, rec, reclen) != NO_ERROR)
+    {
+      cp.old_repr_rows++;
+      return ER_FAILED;
+    }
+
+  if (cp.layout_changed)
+    {
+      return migrate_src_read_record (&g_src_format, &cp.src_layout, rec, reclen, &cp.attr_info);
+    }
+  return heap_attrinfo_read_dbvalues_without_oid (g_thread_p, src, &cp.attr_info);
+}
+
 /* ------------------------------------------------------------------ pass 1: insert */
 
 static int
@@ -437,14 +481,17 @@ pass1_record (char *rec, int reclen, int rec_type, const OID *src_oid, void *arg
   src.type = (INT16) rec_type;
 
   heap_attrinfo_clear_dbvalues (&cp.attr_info);
-  if (heap_attrinfo_read_dbvalues_without_oid (g_thread_p, &src, &cp.attr_info) != NO_ERROR)
+  if (migrate_read_record (cp, rec, reclen, &src) != NO_ERROR)
     {
-      if (cp.read_errors < 5)
+      if (cp.old_repr_rows == 0 && cp.read_errors < 5)
 	{
-	  fprintf (stderr, "%s: read_dbvalues failed on row %ld: %s\n",
+	  fprintf (stderr, "%s: read failed on row %ld: %s\n",
 		   cp.classname.c_str (), cp.rows_read, db_error_string (3));
 	}
-      cp.read_errors++;
+      if (migrate_src_layout_matches (&cp.src_layout, rec, reclen) == NO_ERROR)
+	{
+	  cp.read_errors++;
+	}
       er_clear ();
       return NO_ERROR;
     }
@@ -551,7 +598,7 @@ pass2_record (char *rec, int reclen, int rec_type, const OID *src_oid, void *arg
   src.type = (INT16) rec_type;
 
   heap_attrinfo_clear_dbvalues (&cp.attr_info);
-  if (heap_attrinfo_read_dbvalues_without_oid (g_thread_p, &src, &cp.attr_info) != NO_ERROR)
+  if (migrate_read_record (cp, rec, reclen, &src) != NO_ERROR)
     {
       cp.read_errors++;
       er_clear ();
@@ -789,6 +836,11 @@ migratedb (UTIL_FUNCTION_ARG *arg)
       heap_attrinfo_end (g_thread_p, &cp.attr_info);
       printf ("  read %ld, inserted %ld (BIGONE %ld, RELOC %ld skipped)\n",
 	      cp.rows_read, cp.rows_inserted, cp.skipped_bigone, cp.skipped_relocation);
+      if (cp.old_repr_rows > 0)
+	{
+	  printf ("  %ld row(s) were written under an older representation and were not read\n",
+		  cp.old_repr_rows);
+	}
     }
   if (!g_dry_run)
     {
@@ -835,6 +887,7 @@ migratedb (UTIL_FUNCTION_ARG *arg)
 
   /* ---- report ---- */
   long t_read = 0, t_ins = 0, t_fix = 0, t_err = 0, t_unres = 0, t_big = 0, t_rel = 0, n_skipped = 0;
+  long t_oldrepr = 0;
   for (const class_plan &cp : plan)
     {
       t_read += cp.rows_read;
@@ -845,6 +898,7 @@ migratedb (UTIL_FUNCTION_ARG *arg)
       t_big += cp.skipped_bigone;
       t_rel += cp.skipped_relocation;
       n_skipped += cp.skipped ? 1 : 0;
+      t_oldrepr += cp.old_repr_rows;
     }
 
   printf ("\n--- totals ---\n");
@@ -854,6 +908,7 @@ migratedb (UTIL_FUNCTION_ARG *arg)
   printf ("rows with refs set: %ld\n", t_fix);
   printf ("unresolved refs   : %ld\n", t_unres);
   printf ("errors            : %ld\n", t_err);
+  printf ("other record shape : %ld\n", t_oldrepr);
   printf ("skipped REC_BIGONE: %ld\n", t_big);
   printf ("skipped REC_RELOC : %ld\n", t_rel);
   printf ("elapsed           : %.3f s\n", secs);
@@ -861,7 +916,7 @@ migratedb (UTIL_FUNCTION_ARG *arg)
   db_shutdown ();
   migrate_heap_close ();
 
-  bool ok = (t_err == 0 && t_unres == 0 && n_skipped == 0);
+  bool ok = (t_err == 0 && t_unres == 0 && n_skipped == 0 && t_oldrepr == 0 && t_big == 0 && t_rel == 0);
   printf ("\n%s\n", ok ? "OK" : "INCOMPLETE");
   return ok ? 0 : 1;
 }

@@ -39,6 +39,8 @@
 #include "file_io.h"
 #include "dbtype_def.h"
 #include "release_string.h"
+#include "object_domain.h"
+#include "heap_attrinfo.h"
 
 #define MIGRATE_HEAP_HEADER_AND_CHAIN_SLOTID 0
 
@@ -67,12 +69,46 @@ struct migrate_src_format
   int hdr_next_vpid_offset;
 
   /*
-   * Attributes this release stores fixed that guava stores variable.  A class holding one of
+   * Attributes this release stores fixed that this one stores variable.  A class holding one of
    * them has a different record shape in the two, so it cannot be read with the target class's
-   * representation.
+   * representation as it stands; migrate_src_layout_build () rebuilds the source's shape instead.
    */
   const DB_TYPE *moved_to_variable;
   int n_moved_to_variable;
+
+  /* on-disk size of a fixed NUMERIC in that release; this one uses a different constant */
+  int numeric_disk_size;
+};
+
+/*
+ * The source's shape for one attribute, expressed against the target class's attribute of the
+ * same id: the domain comes from the target (same DDL, same domain), the placement from the source.
+ */
+typedef struct migrate_src_attr MIGRATE_SRC_ATTR;
+struct migrate_src_attr
+{
+  ATTR_ID id;
+  int def_order;		/* the column's place in the class definition */
+  int value_index;		/* index into HEAP_CACHE_ATTRINFO::values */
+  TP_DOMAIN *domain;
+  bool is_fixed;		/* in the source */
+  int location;			/* byte offset inside the fixed block, or index into the variable table */
+  int disk_size;		/* fixed only: size in the source's encoding */
+};
+
+typedef struct migrate_src_layout MIGRATE_SRC_LAYOUT;
+struct migrate_src_layout
+{
+  int n_attrs;
+  int n_fixed;
+  int n_variable;
+  int fixed_length;
+  /*
+   * Two fixed attributes of the same alignment and width leave the source's order unknowable, so
+   * a layout that has to be rebuilt cannot be trusted; the widths and counts still can be.
+   */
+  bool order_ambiguous;
+  MIGRATE_SRC_ATTR *attrs;	/* source storage order: the fixed block first, then the variable ones */
 };
 
 /*
@@ -130,5 +166,26 @@ extern SPAGE_SLOT *migrate_heap_page_slot (char *page, PGSLOTID slot_id);
  */
 extern int migrate_heap_walk (int hfid_volid, PAGEID hpgid, MIGRATE_HEAP_RECORD_FN fn, void *arg,
 			      MIGRATE_HEAP_STATS * stats);
+
+/*
+ * Rebuild the source's record shape for a class from the target class's representation.  What
+ * moved between fixed and variable storage is the only thing that differs, and the order inside
+ * each group follows rules the two releases share, so the shape can be computed rather than
+ * carried in from outside.  Returns ER_FAILED if the class holds something this cannot place.
+ */
+extern int migrate_src_layout_build (const MIGRATE_SRC_FORMAT * fmt, HEAP_CACHE_ATTRINFO * attr_info,
+				     MIGRATE_SRC_LAYOUT * layout);
+extern void migrate_src_layout_free (MIGRATE_SRC_LAYOUT * layout);
+
+/*
+ * Does the record have the shape the layout describes? Representation ids are not comparable
+ * across databases, so the shape is what tells a readable record from one written under some
+ * other representation.
+ */
+extern int migrate_src_layout_matches (const MIGRATE_SRC_LAYOUT * layout, char *rec, int reclen);
+
+/* Decode a source record into the attribute info, in place of heap_attrinfo_read_dbvalues_without_oid (). */
+extern int migrate_src_read_record (const MIGRATE_SRC_FORMAT * fmt, const MIGRATE_SRC_LAYOUT * layout,
+				    char *rec, int reclen, HEAP_CACHE_ATTRINFO * attr_info);
 
 #endif /* _MIGRATEDB_HEAP_H_ */
