@@ -70,6 +70,7 @@ static PT_NODE *sp_make_null_literal (void);
 static PT_NODE *sp_make_boolean_literal (bool value);
 static PT_NODE *sp_make_typed_literal (PT_TYPE_ENUM type, const char *text);
 static PT_NODE *sp_make_data_type (PT_TYPE_ENUM type, int precision, int scale);
+static PT_NODE *sp_make_case (PT_NODE * operand, PT_NODE * when_list, PT_NODE * else_expr);
 
 /* The location bison built for a rule, put on the node that rule returns. It is a macro
  * because @$ is only a location inside an action - bison rewrites it there, and would leave
@@ -86,7 +87,7 @@ static PT_NODE *sp_make_data_type (PT_TYPE_ENUM type, int precision, int scale);
 
 %token BEGIN_ CONSTANT_ CONTINUE_ DECLARE_ ELSE_ ELSIF_ END_ EXIT_ FOR_ IF_ IN_ LOOP_ NOT_ NULL_ REVERSE_
 %token EXCEPTION_ OTHERS_ RAISE_ SQLCODE_ SQLERRM_
-%token FALSE_ THEN_ TRUE_ WHEN_ WHILE_
+%token CASE_ FALSE_ THEN_ TRUE_ WHEN_ WHILE_
 %token CLOSE_ CURSOR_ FETCH_ INTO_ OPEN_
 %token AS_ AUTHID_ CREATE_ FUNCTION_ OUT_ PROCEDURE_ REPLACE_ RETURN_
 %token AND_ DIV_ IS_ MOD_ OR_
@@ -99,6 +100,7 @@ static PT_NODE *sp_make_data_type (PT_TYPE_ENUM type, int precision, int scale);
 %type <node> block decl_list decl_list_opt decl stmt_list stmt if_stmt else_part_opt loop_stmt
 %type <node> assign_stmt block_stmt null_stmt return_stmt return_opt expr expr_list_opt type_spec
 %type <node> call_stmt sp_name arg_list_opt arg_list
+%type <node> when_clause_list when_clause case_else_opt
 %type <node> jump_stmt label_decl_opt label_opt when_opt sql_stmt
 %type <node> raise_stmt handler_part_opt handler_list handler handler_name_list
 %type <node> cursor_decl cursor_params_opt open_stmt close_stmt fetch_stmt fetch_targets
@@ -912,6 +914,14 @@ expr
 		{
 		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_UNARY_MINUS, $2, NULL, NULL), @$);
 		}
+	| CASE_ when_clause_list case_else_opt END_
+		{
+		  $$ = SP_AT (sp_make_case (NULL, $2, $3), @$);
+		}
+	| CASE_ expr when_clause_list case_else_opt END_
+		{
+		  $$ = SP_AT (sp_make_case ($2, $3, $4), @$);
+		}
 	| '(' expr ')'
 		{
 		  $$ = $2;
@@ -974,6 +984,46 @@ expr
 	| TYPE_KEYWORD CHAR_STRING
 		{
 		  $$ = SP_AT (sp_make_typed_literal ((PT_TYPE_ENUM) $1, $2), @$);
+		}
+	;
+
+/* One arm, built the same way for both forms: its WHEN part in arg3, its THEN part in arg1.
+ * What that WHEN part means is sp_make_case ()'s to decide, which is what lets one rule and
+ * one chaining loop serve both. */
+when_clause_list
+	: when_clause_list when_clause
+		{
+		  $$ = parser_append_node ($2, $1);
+		}
+	| when_clause
+		{
+		  $$ = $1;
+		}
+	;
+
+when_clause
+	: WHEN_ expr THEN_ expr
+		{
+		  PT_NODE *arm = parser_new_node (sp_Parser, PT_EXPR);
+
+		  if (arm != NULL)
+		    {
+		      arm->info.expr.op = PT_CASE;
+		      arm->info.expr.arg3 = $2;
+		      arm->info.expr.arg1 = $4;
+		    }
+		  $$ = SP_AT (arm, @$);
+		}
+	;
+
+case_else_opt
+	: /* empty */
+		{
+		  $$ = NULL;
+		}
+	| ELSE_ expr
+		{
+		  $$ = $2;
 		}
 	;
 
@@ -1228,6 +1278,83 @@ sp_make_data_type (PT_TYPE_ENUM type, int precision, int scale)
     }
 
   return dt;
+}
+
+/*
+ * sp_make_case () - fold a CASE's arms into the chain the evaluator walks
+ *   return: the first arm, which is the whole expression; NULL when there are no arms
+ *   operand(in)   : the value written between CASE and the first WHEN, NULL for the searched
+ *                   form. It is consumed here
+ *   when_list(in) : the arms, in the order written, each holding its WHEN in arg3 and its
+ *                   THEN in arg1
+ *   else_expr(in) : what ELSE named, NULL when none was written
+ *
+ * note: a CASE is not one node but a list of them stood on end - each arm's arg2 is the next
+ *       arm, so the evaluator that meets a false condition simply moves to arg2 and meets
+ *       another PT_CASE. continued_case marks every arm but the first, which is how the
+ *       evaluator tells a nested CASE apart from a continuation of this one. The last arm's
+ *       arg2 takes ELSE, or an explicit NULL: the shape has no room for "nothing left to try",
+ *       so the value that a CASE without ELSE yields has to be written out, and marked.
+ *
+ *       The two forms differ only in what an arm's WHEN part means. In the searched form it is
+ *       already a condition. In the simple form it is a value, so each arm gets its own copy of
+ *       the operand and an equality to compare them - copies rather than one shared node,
+ *       because the arms are separate trees from here on and freeing one must not reach into
+ *       another. This mirrors what the SQL grammar builds for CASE (csql_grammar.y), so
+ *       everything below the parser meets the node shape it already knows.
+ */
+static PT_NODE *
+sp_make_case (PT_NODE * operand, PT_NODE * when_list, PT_NODE * else_expr)
+{
+  PT_NODE *arm, *next;
+
+  if (when_list == NULL)
+    {
+      return NULL;
+    }
+
+  if (operand != NULL)
+    {
+      for (arm = when_list; arm != NULL; arm = arm->next)
+	{
+	  PT_NODE *eq = parser_new_node (sp_Parser, PT_EXPR);
+
+	  if (eq == NULL)
+	    {
+	      return NULL;
+	    }
+	  eq->info.expr.op = PT_EQ;
+	  eq->info.expr.arg1 = parser_copy_tree_list (sp_Parser, operand);
+	  eq->info.expr.arg2 = arm->info.expr.arg3;
+	  arm->info.expr.arg3 = eq;
+	}
+      parser_free_node (sp_Parser, operand);
+    }
+
+  when_list->info.expr.continued_case = 0;
+  for (arm = when_list; (next = arm->next) != NULL; arm = next)
+    {
+      next->info.expr.continued_case = 1;
+      arm->info.expr.arg2 = next;
+      arm->next = NULL;
+    }
+
+  if (else_expr == NULL)
+    {
+      /* A CASE that matches nothing yields NULL, and the shape has nowhere to say so except
+       * by standing a NULL in the last arg2. It has to be marked as the parser's own: an
+       * unmarked NULL argument makes type checking give the whole expression the type NULL
+       * (type_checking.c, does_op_specially_treat_null_arg () does not exempt PT_CASE), so
+       * `CASE WHEN c THEN 'y' END` would come back typed NULL instead of the THEN's type. */
+      else_expr = sp_make_null_literal ();
+      if (else_expr != NULL)
+	{
+	  else_expr->flag.is_added_by_parser = 1;
+	}
+    }
+  arm->info.expr.arg2 = else_expr;
+
+  return when_list;
 }
 
 /*

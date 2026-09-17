@@ -52,6 +52,7 @@ static SP_KEYWORD sp_Keywords[] = {
   {"begin", BEGIN_, PT_TYPE_NONE},
   {"bigint", TYPE_KEYWORD, PT_TYPE_BIGINT},
   {"boolean", TYPE_KEYWORD, PT_TYPE_LOGICAL},
+  {"case", CASE_, PT_TYPE_NONE},
   {"char", TYPE_KEYWORD, PT_TYPE_CHAR},
   {"character", TYPE_KEYWORD, PT_TYPE_CHAR},
   {"close", CLOSE_, PT_TYPE_NONE},
