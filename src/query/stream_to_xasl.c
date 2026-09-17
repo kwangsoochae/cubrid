@@ -4199,6 +4199,25 @@ stx_build_plcsql_proc (THREAD_ENTRY * thread_p, char *ptr, PLCSQL_PROC_NODE * pl
   ptr = or_unpack_int (ptr, &plcsql_proc->routines_cnt);
   ptr = or_unpack_int (ptr, &plcsql_proc->routine_base_slot);
   ptr = or_unpack_int (ptr, &plcsql_proc->routine_slot_cnt);
+
+  ptr = or_unpack_int (ptr, &plcsql_proc->routine_modes_cnt);
+  if (plcsql_proc->routine_modes_cnt > 0)
+    {
+      plcsql_proc->routine_modes = (int *) stx_alloc_struct (thread_p, sizeof (int) * plcsql_proc->routine_modes_cnt);
+      if (plcsql_proc->routine_modes == NULL)
+	{
+	  stx_set_xasl_errcode (thread_p, ER_OUT_OF_VIRTUAL_MEMORY);
+	  goto error;
+	}
+      for (i = 0; i < plcsql_proc->routine_modes_cnt; i++)
+	{
+	  ptr = or_unpack_int (ptr, &plcsql_proc->routine_modes[i]);
+	}
+    }
+  else
+    {
+      plcsql_proc->routine_modes = NULL;
+    }
   ptr = or_unpack_int (ptr, &plcsql_proc->cursors_cnt);
   ptr = or_unpack_int (ptr, &plcsql_proc->cursor_base_slot);
   ptr = or_unpack_int (ptr, &plcsql_proc->cursor_cols_cnt);

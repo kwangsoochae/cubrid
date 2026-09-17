@@ -549,6 +549,13 @@ typedef enum
 #define PLCSQL_JUMP_EXIT	0x01
 #define PLCSQL_JUMP_CONTINUE	0x02
 
+/* What a local routine's header wrote before a parameter. These mirror the parse tree's
+ * PT_SP_PARAM_*, which the XASL side cannot include; pt_to_plcsql_routine_decl () copies one onto
+ * the other rather than casting. An argument to anything but IN is written back after the call. */
+#define PLCSQL_PARAM_IN		0
+#define PLCSQL_PARAM_OUT	1
+#define PLCSQL_PARAM_IN_OUT	2
+
 /* plcsql_proc_node.flags of a PLCSQL_OP_CALL. A call with no flag set names a routine the catalog
  * holds and carries it in a regu variable; a local one names a routine of the running frame and
  * carries its number in target_slot. */
@@ -615,6 +622,9 @@ struct plcsql_proc_node
 				 * back, which is what lets a routine recurse while the variables of
 				 * whatever encloses it stay shared */
   int routine_slot_cnt;
+  int *routine_modes;		/* ROUTINE: what the header wrote before each parameter, in order.
+				 * A call reads it to know which arguments to give back */
+  int routine_modes_cnt;
   int cursors_cnt;		/* BLOCK: how many cursors the frame holds, numbered flat over the
 				 * procedure the way the slots are, so again only the outermost
 				 * block carries the count */

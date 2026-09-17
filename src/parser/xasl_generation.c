@@ -30912,13 +30912,6 @@ pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCO
 
 	  for (param = decl->info.sp_stmt.params; param != NULL; param = param->next)
 	    {
-	      if (param->info.name.plcsql_slot == PT_SP_PARAM_NOT_IN)
-		{
-		  /* what a call has to give back, which is a task of its own. Refusing is what
-		   * keeps an argument from going in and quietly not coming back out. */
-		  (void) pt_plcsql_refuse (parser, "a local routine takes an OUT or IN OUT parameter");
-		  return ER_FAILED;
-		}
 	      param->info.name.meta_class = PT_PLCSQL_LOCAL;
 	      param->info.name.plcsql_slot = (*next_slot)++;
 	    }
@@ -31806,6 +31799,8 @@ pt_to_plcsql_routine_decl (PARSER_CONTEXT * parser, PT_NODE * decl)
 {
   XASL_NODE *xasl, *body, **buf = NULL;
   TP_DOMAIN *ret_domain = NULL;
+  PT_NODE *param;
+  int cnt = 0, i;
 
   if (decl->info.sp_stmt.ret_type != NULL)
     {
@@ -31839,6 +31834,27 @@ pt_to_plcsql_routine_decl (PARSER_CONTEXT * parser, PT_NODE * decl)
   xasl->proc.plcsql.routines_cnt = decl->info.sp_stmt.name->info.name.plcsql_slot;
   xasl->proc.plcsql.routine_base_slot = decl->info.sp_stmt.slot_base;
   xasl->proc.plcsql.routine_slot_cnt = decl->info.sp_stmt.slot_cnt;
+
+  for (param = decl->info.sp_stmt.params; param != NULL; param = param->next)
+    {
+      cnt++;
+    }
+  if (cnt > 0)
+    {
+      regu_array_alloc (&xasl->proc.plcsql.routine_modes, (size_t) cnt);
+      if (xasl->proc.plcsql.routine_modes == NULL)
+	{
+	  return NULL;
+	}
+      i = 0;
+      for (param = decl->info.sp_stmt.params; param != NULL; param = param->next)
+	{
+	  /* PT_SP_PARAM_* and PLCSQL_PARAM_* are the same three values, written apart because the
+	   * XASL side cannot include the parse tree */
+	  xasl->proc.plcsql.routine_modes[i++] = param->info.name.plcsql_param_mode;
+	}
+      xasl->proc.plcsql.routine_modes_cnt = cnt;
+    }
 
   return pt_plcsql_set_children (parser, xasl, buf, 1) == NO_ERROR ? xasl : NULL;
 }

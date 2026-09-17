@@ -2720,6 +2720,9 @@ struct pt_name_info
 				 * unless it was written as one. The cursor is in original. */
   int plcsql_reserved;		/* SQLCODE or SQLERRM where the name is one of them, and
 				 * PT_SP_RESERVED_NONE where it is a name the body wrote */
+  int plcsql_param_mode;	/* PT_SP_PARAM_IN, _OUT or _IN_OUT where the name is a routine's
+				 * parameter. A catalog routine's modes come from its signature; a
+				 * local one has none, so its header is where they are read */
   PT_NODE *default_value;	/* PT_VALUE the default value of the attribute */
   PT_NODE *constant_value;	/* constant value derived from qo_reduce_equality_terms () */
   unsigned int custom_print;
@@ -3451,9 +3454,10 @@ typedef enum
 #define PT_SP_CALL_LOCAL     0x01	/* CALL: the name is one the declaration part holds rather than
 					 * one the catalog does, and slot_base is its number */
 
-/* A parameter whose header wrote OUT or IN OUT. It rides in plcsql_slot until the parameter is
- * given a frame slot, which is after the only place that reads it. */
-#define PT_SP_PARAM_NOT_IN	(-2)
+/* What a routine header wrote before a parameter. IN is also what nothing written means. */
+#define PT_SP_PARAM_IN		0
+#define PT_SP_PARAM_OUT		1
+#define PT_SP_PARAM_IN_OUT	2
 
 struct pt_sp_stmt_info
 {

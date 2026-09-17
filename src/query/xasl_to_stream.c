@@ -3711,6 +3711,12 @@ xts_process_plcsql_proc (char *ptr, const PLCSQL_PROC_NODE * plcsql_proc)
   ptr = or_pack_int (ptr, plcsql_proc->routines_cnt);
   ptr = or_pack_int (ptr, plcsql_proc->routine_base_slot);
   ptr = or_pack_int (ptr, plcsql_proc->routine_slot_cnt);
+
+  ptr = or_pack_int (ptr, plcsql_proc->routine_modes_cnt);
+  for (i = 0; i < plcsql_proc->routine_modes_cnt; i++)
+    {
+      ptr = or_pack_int (ptr, plcsql_proc->routine_modes[i]);
+    }
   ptr = or_pack_int (ptr, plcsql_proc->cursors_cnt);
   ptr = or_pack_int (ptr, plcsql_proc->cursor_base_slot);
   ptr = or_pack_int (ptr, plcsql_proc->cursor_cols_cnt);
@@ -6779,6 +6785,8 @@ xts_sizeof_plcsql_proc (const PLCSQL_PROC_NODE * plcsql_proc)
 	   + OR_INT_SIZE	/* routines_cnt */
 	   + OR_INT_SIZE	/* routine_base_slot */
 	   + OR_INT_SIZE	/* routine_slot_cnt */
+	   + OR_INT_SIZE	/* routine_modes_cnt */
+	   + (plcsql_proc->routine_modes_cnt * OR_INT_SIZE)	/* routine_modes */
 	   + OR_INT_SIZE	/* cursors_cnt */
 	   + OR_INT_SIZE	/* cursor_base_slot */
 	   + OR_INT_SIZE	/* cursor_cols_cnt */

@@ -115,6 +115,8 @@ struct plcsql_routine
 				 * the same way a cursor's query is recorded when its block runs */
   int base_slot;		/* the run of frame slots the routine's own names take */
   int slot_cnt;
+  int *modes;			/* what the header wrote before each parameter, in order */
+  int modes_cnt;
 };
 
 typedef struct plcsql_frame PLCSQL_FRAME;

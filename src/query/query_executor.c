@@ -3846,6 +3846,8 @@ qexec_alloc_plcsql_frame (THREAD_ENTRY * thread_p, int locals_cnt, int cursors_c
 	  frame->routines[i].body = NULL;
 	  frame->routines[i].base_slot = 0;
 	  frame->routines[i].slot_cnt = 0;
+	  frame->routines[i].modes = NULL;
+	  frame->routines[i].modes_cnt = 0;
 	}
     }
 
@@ -29648,6 +29650,18 @@ qexec_plcsql_place (THREAD_ENTRY * thread_p, PLCSQL_FRAME * frame, XASL_NODE * x
 }
 
 /*
+ * qexec_plcsql_mode_of () - what the header wrote before one parameter
+ *   return: PLCSQL_PARAM_IN, _OUT or _IN_OUT
+ *   routine(in) :
+ *   i(in)      : which parameter, by position
+ */
+static int
+qexec_plcsql_mode_of (const PLCSQL_ROUTINE * routine, int i)
+{
+  return (routine->modes != NULL && i >= 0 && i < routine->modes_cnt) ? routine->modes[i] : PLCSQL_PARAM_IN;
+}
+
+/*
  * qexec_plcsql_run_local () - run a routine the declaration part named
  *   return: NO_ERROR, or ER_FAILED when the routine failed or the arguments could not be read
  *   thread_p(in) :
@@ -29731,6 +29745,12 @@ qexec_plcsql_run_local (THREAD_ENTRY * thread_p, XASL_STATE * xasl_state, int nu
 	{
 	  DB_VALUE *value = NULL;
 
+	  if (qexec_plcsql_mode_of (routine, i) == PLCSQL_PARAM_OUT)
+	    {
+	      /* nothing goes in: the reference implementation starts one at NULL, which is what a
+	       * body that never writes it leaves the caller's variable at */
+	      continue;
+	    }
 	  if (qexec_plcsql_fetch_value (thread_p, &arg->value, xasl_state, &value) != NO_ERROR
 	      || pr_clone_value (value, &argv[i]) != NO_ERROR)
 	    {
@@ -29779,6 +29799,39 @@ qexec_plcsql_run_local (THREAD_ENTRY * thread_p, XASL_STATE * xasl_state, int nu
       rc = qexec_execute_plcsql_stmt (thread_p, routine->body, xasl_state);
     }
   frame->call_depth--;
+
+  /* What the routine gives back goes to the caller's own slots, and it goes there whether the
+   * routine ran through or failed - measured: a body that writes an OUT parameter and then
+   * raises leaves the written value behind. This runs before the routine's own slots are given
+   * back, because that is where those values still are. A target inside the run being given
+   * back is written into the buffer instead, which is where a recursive call's caller lives. */
+  i = 0;
+  for (arg = args; arg != NULL; arg = arg->next, i++)
+    {
+      int mode = qexec_plcsql_mode_of (routine, i);
+      int target;
+
+      if ((mode != PLCSQL_PARAM_OUT && mode != PLCSQL_PARAM_IN_OUT) || arg->value.type != TYPE_PLCSQL_SLOT)
+	{
+	  continue;
+	}
+
+      target = arg->value.value.plcsql_slot;
+      if (target < 0 || target >= frame->locals_cnt)
+	{
+	  continue;
+	}
+      if (target >= base && target < base + cnt)
+	{
+	  pr_clear_value (&saved[target - base]);
+	  (void) pr_clone_value (&frame->locals[base + i], &saved[target - base]);
+	}
+      else
+	{
+	  pr_clear_value (&frame->locals[target]);
+	  (void) pr_clone_value (&frame->locals[base + i], &frame->locals[target]);
+	}
+    }
 
   /* what a RETURN left has to be read before the run is given back, because the outer frame's
    * own retval goes into that place.
@@ -29971,13 +30024,18 @@ qexec_execute_plcsql_stmt_inner (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL
       }
 
     case PLCSQL_OP_ROUTINE:
-      /* a declaration files the body on the frame the way a cursor declaration files its query,
-       * so every call finds the one node - which is also what lets a routine call itself */
-      xasl_state->plcsql_frame->routines[xasl->proc.plcsql.routines_cnt].body = xasl->proc.plcsql.children[0];
-      xasl_state->plcsql_frame->routines[xasl->proc.plcsql.routines_cnt].base_slot =
-	xasl->proc.plcsql.routine_base_slot;
-      xasl_state->plcsql_frame->routines[xasl->proc.plcsql.routines_cnt].slot_cnt = xasl->proc.plcsql.routine_slot_cnt;
-      return NO_ERROR;
+      {
+	/* a declaration files the body on the frame the way a cursor declaration files its query,
+	 * so every call finds the one node - which is also what lets a routine call itself */
+	PLCSQL_ROUTINE *filed = &xasl_state->plcsql_frame->routines[xasl->proc.plcsql.routines_cnt];
+
+	filed->body = xasl->proc.plcsql.children[0];
+	filed->base_slot = xasl->proc.plcsql.routine_base_slot;
+	filed->slot_cnt = xasl->proc.plcsql.routine_slot_cnt;
+	filed->modes = xasl->proc.plcsql.routine_modes;
+	filed->modes_cnt = xasl->proc.plcsql.routine_modes_cnt;
+	return NO_ERROR;
+      }
 
     case PLCSQL_OP_CALL:
       if (xasl->proc.plcsql.flags & PLCSQL_CALL_LOCAL)

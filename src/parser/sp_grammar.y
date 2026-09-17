@@ -227,7 +227,7 @@ param
 
 		  if (name != NULL)
 		    {
-		      name->info.name.plcsql_slot = $2 ? PT_SP_PARAM_NOT_IN : 0;
+		      name->info.name.plcsql_param_mode = $2;
 		      name->data_type = $3;
 		      name->type_enum = ($3 != NULL) ? $3->type_enum : PT_TYPE_NONE;
 
@@ -238,26 +238,25 @@ param
 		}
 	;
 
-/* What the mode is does not matter here, only whether one was written. A catalog routine's modes
- * come from its signature, so the header's are dropped; a local routine has no signature, and
- * running one whose parameter is not IN is a task of its own - so the flag is what refuses it
- * rather than an argument silently going in and not coming back. */
+/* A catalog routine's modes come from its signature, so what the header wrote is dropped for one.
+ * A local routine has no signature, and a call has to know which of its arguments to give back,
+ * so the mode is kept on the parameter. */
 param_mode_opt
 	: /* empty */
 		{
-		  $$ = 0;
+		  $$ = PT_SP_PARAM_IN;
 		}
 	| IN_
 		{
-		  $$ = 0;
+		  $$ = PT_SP_PARAM_IN;
 		}
 	| OUT_
 		{
-		  $$ = 1;
+		  $$ = PT_SP_PARAM_OUT;
 		}
 	| IN_ OUT_
 		{
-		  $$ = 1;
+		  $$ = PT_SP_PARAM_IN_OUT;
 		}
 	;
 
