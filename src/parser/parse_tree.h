@@ -3446,6 +3446,12 @@ typedef enum
 #define PT_SP_HANDLER_OTHERS 0x40	/* WHEN OTHERS, which names no exception and catches the rest */
 #define PT_SP_DECL_ROUTINE   0x80	/* a declaration that names a local procedure or function: its
 					 * header is in params and ret_type and its body in body */
+#define PT_SP_CALL_LOCAL     0x01	/* CALL: the name is one the declaration part holds rather than
+					 * one the catalog does, and slot_base is its number */
+
+/* A parameter whose header wrote OUT or IN OUT. It rides in plcsql_slot until the parameter is
+ * given a frame slot, which is after the only place that reads it. */
+#define PT_SP_PARAM_NOT_IN	(-2)
 
 struct pt_sp_stmt_info
 {
@@ -3473,6 +3479,10 @@ struct pt_sp_stmt_info
   PT_NODE *sql;			/* SQL, CURSOR: the statement the SQL parser read out of sql_text */
   const char *sql_text;		/* SQL, CURSOR: the statement as written, which is what the SQL parser
 				 * is given - a hint lives in a comment, so nothing is normalised */
+  int slot_base;		/* DECL of a local routine: the run of frame slots its parameters and
+				 * locals were given. Resolution is the only place that knows it, and
+				 * lowering is where a call needs it */
+  int slot_cnt;
 };
 
 /* DO ENTITY INFO */

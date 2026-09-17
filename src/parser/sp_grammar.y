@@ -104,6 +104,7 @@ static PT_NODE *sp_make_case (PT_NODE * operand, PT_NODE * when_list, PT_NODE * 
 %type <node> jump_stmt label_decl_opt label_opt when_opt sql_stmt
 %type <node> raise_stmt handler_part_opt handler_list handler handler_name_list
 %type <node> cursor_decl cursor_params_opt open_stmt close_stmt fetch_stmt fetch_targets
+%type <number> param_mode_opt
 %type <node> routine param_list_opt param_list param
 %type <number> constant_opt reverse_opt
 
@@ -226,6 +227,7 @@ param
 
 		  if (name != NULL)
 		    {
+		      name->info.name.plcsql_slot = $2 ? PT_SP_PARAM_NOT_IN : 0;
 		      name->data_type = $3;
 		      name->type_enum = ($3 != NULL) ? $3->type_enum : PT_TYPE_NONE;
 
@@ -236,11 +238,27 @@ param
 		}
 	;
 
+/* What the mode is does not matter here, only whether one was written. A catalog routine's modes
+ * come from its signature, so the header's are dropped; a local routine has no signature, and
+ * running one whose parameter is not IN is a task of its own - so the flag is what refuses it
+ * rather than an argument silently going in and not coming back. */
 param_mode_opt
 	: /* empty */
+		{
+		  $$ = 0;
+		}
 	| IN_
+		{
+		  $$ = 0;
+		}
 	| OUT_
+		{
+		  $$ = 1;
+		}
 	| IN_ OUT_
+		{
+		  $$ = 1;
+		}
 	;
 
 param_default_opt

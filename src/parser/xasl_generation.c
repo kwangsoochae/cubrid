@@ -30154,10 +30154,11 @@ static int pt_plcsql_cursor_attr_slot (PT_NODE * name);
 static int pt_plcsql_bind_cursor (PARSER_CONTEXT * parser, PT_NODE * stmt, PT_PLCSQL_SCOPE * scope);
 static int pt_plcsql_exc_number (const char *name);
 static int pt_plcsql_bind_exception (PARSER_CONTEXT * parser, PT_NODE * name, PT_PLCSQL_SCOPE * scope);
+static int pt_plcsql_bind_call (PARSER_CONTEXT * parser, PT_NODE * stmt, PT_PLCSQL_SCOPE * scope);
 static int pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_SCOPE * scope,
-					int *next_slot, int *next_cursor, int *next_exc);
+					int *next_slot, int *next_cursor, int *next_exc, int *next_routine);
 static int pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCOPE * outer,
-				    int *next_slot, int *next_cursor, int *next_exc);
+				    int *next_slot, int *next_cursor, int *next_exc, int *next_routine);
 
 /*
  * pt_plcsql_find_decl () - the declaration a name refers to, innermost scope first
@@ -30199,6 +30200,19 @@ pt_plcsql_find_decl (PT_PLCSQL_SCOPE * scope, const char *name)
       if (found != NULL)
 	{
 	  return found;
+	}
+
+      /* A routine is visible over the whole declaration part it stands in, not only from where
+       * it was written: a body may call one declared after it, which is what lets two of them
+       * recurse into each other. A variable is not - reading one declared later is refused, so
+       * the two cannot be looked up the same way. */
+      for (decl = scope->decl_list; decl != NULL; decl = decl->next)
+	{
+	  if ((decl->info.sp_stmt.flags & PT_SP_DECL_ROUTINE) != 0
+	      && intl_identifier_casecmp (decl->info.sp_stmt.name->info.name.original, name) == 0)
+	    {
+	      return decl;
+	    }
 	}
     }
 
@@ -30380,11 +30394,20 @@ pt_plcsql_bind_name_pre (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int
 
   if (node->node_type == PT_METHOD_CALL)
     {
-      /* only the arguments carry names the body declared; the routine's own name is resolved
-       * against the catalog when the call is lowered. Binding it here would look for a local
-       * of that name and refuse the body. */
+      /* the arguments carry names the body declared; the routine's own name is resolved against
+       * the catalog when the call is lowered, unless the declaration part holds it - and a
+       * local one standing in an expression is not lowered yet. */
+      PT_NODE *callee = node->info.method_call.method_name;
+
       if (pt_plcsql_resolve_expr (parser, node->info.method_call.arg_list, resolve->scope) != NO_ERROR)
 	{
+	  resolve->error = ER_FAILED;
+	  *continue_walk = PT_STOP_WALK;
+	}
+      else if (callee != NULL && callee->node_type == PT_NAME
+	       && pt_plcsql_find_decl (resolve->scope, callee->info.name.original) != NULL)
+	{
+	  (void) pt_plcsql_refuse (parser, "an expression calls a local function");
 	  resolve->error = ER_FAILED;
 	  *continue_walk = PT_STOP_WALK;
 	}
@@ -30614,6 +30637,41 @@ pt_plcsql_bind_exception (PARSER_CONTEXT * parser, PT_NODE * name, PT_PLCSQL_SCO
 }
 
 /*
+ * pt_plcsql_bind_call () - say whether a call names a routine the declaration part holds
+ *   return: NO_ERROR or ER_FAILED
+ *   parser(in) :
+ *   stmt(in/out) : a PT_SP_CALL
+ *   scope(in)  : the innermost scope at the call
+ *
+ * note: a name that is not found here belongs to the catalog and is left alone - the call is
+ *       lowered against it the way it was before local routines existed. A declared one hides
+ *       it, which is what the reference implementation does.
+ */
+static int
+pt_plcsql_bind_call (PARSER_CONTEXT * parser, PT_NODE * stmt, PT_PLCSQL_SCOPE * scope)
+{
+  PT_NODE *name = stmt->info.sp_stmt.expr->info.method_call.method_name;
+  PT_NODE *decl;
+
+  if (name == NULL || name->node_type != PT_NAME)
+    {
+      return NO_ERROR;
+    }
+
+  decl = pt_plcsql_find_decl (scope, name->info.name.original);
+  if (decl == NULL || decl->node_type != PT_SP_STMT || (decl->info.sp_stmt.flags & PT_SP_DECL_ROUTINE) == 0)
+    {
+      return NO_ERROR;
+    }
+
+  stmt->info.sp_stmt.flags |= PT_SP_CALL_LOCAL;
+  name->info.name.plcsql_slot = decl->info.sp_stmt.name->info.name.plcsql_slot;
+  stmt->info.sp_stmt.slot_base = decl->info.sp_stmt.slot_base;
+
+  return NO_ERROR;
+}
+
+/*
  * pt_plcsql_resolve_stmt_list () - resolve a statement list in one scope
  *   return: NO_ERROR or ER_FAILED
  *   parser(in) :
@@ -30623,7 +30681,7 @@ pt_plcsql_bind_exception (PARSER_CONTEXT * parser, PT_NODE * name, PT_PLCSQL_SCO
  */
 static int
 pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_SCOPE * scope, int *next_slot,
-			     int *next_cursor, int *next_exc)
+			     int *next_cursor, int *next_exc, int *next_routine)
 {
   PT_NODE *stmt;
   PT_PLCSQL_SCOPE loop_scope;
@@ -30633,7 +30691,7 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
       switch (stmt->info.sp_stmt.op)
 	{
 	case PT_SP_BLOCK:
-	  if (pt_plcsql_resolve_block (parser, stmt, scope, next_slot, next_cursor, next_exc) != NO_ERROR)
+	  if (pt_plcsql_resolve_block (parser, stmt, scope, next_slot, next_cursor, next_exc, next_routine) != NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }
@@ -30650,9 +30708,9 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
 	case PT_SP_IF:
 	  if (pt_plcsql_resolve_expr (parser, stmt->info.sp_stmt.expr, scope) != NO_ERROR
 	      || pt_plcsql_resolve_stmt_list (parser, stmt->info.sp_stmt.body, scope, next_slot, next_cursor,
-					      next_exc) != NO_ERROR
+					      next_exc, next_routine) != NO_ERROR
 	      || pt_plcsql_resolve_stmt_list (parser, stmt->info.sp_stmt.else_body, scope, next_slot, next_cursor,
-					      next_exc) != NO_ERROR)
+					      next_exc, next_routine) != NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }
@@ -30681,16 +30739,18 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
 	    }
 
 	  if (pt_plcsql_resolve_stmt_list (parser, stmt->info.sp_stmt.body, &loop_scope, next_slot, next_cursor,
-					   next_exc) != NO_ERROR)
+					   next_exc, next_routine) != NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }
 	  break;
 
 	case PT_SP_CALL:
-	  /* only the arguments carry names; the routine's own name is resolved against the
-	   * catalog when the call is lowered, not against the frame */
-	  if (pt_plcsql_resolve_expr (parser, stmt->info.sp_stmt.expr->info.method_call.arg_list, scope) != NO_ERROR)
+	  /* the routine's own name is looked for among the declarations first, because one
+	   * declared there hides a catalog routine of the same name. Only when nothing holds it
+	   * is it left to be resolved against the catalog at lowering. */
+	  if (pt_plcsql_resolve_expr (parser, stmt->info.sp_stmt.expr->info.method_call.arg_list, scope) != NO_ERROR
+	      || pt_plcsql_bind_call (parser, stmt, scope) != NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }
@@ -30783,7 +30843,7 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
  */
 static int
 pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCOPE * outer, int *next_slot,
-			 int *next_cursor, int *next_exc)
+			 int *next_cursor, int *next_exc, int *next_routine)
 {
   PT_PLCSQL_SCOPE scope;
   PT_NODE *decl;
@@ -30793,14 +30853,57 @@ pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCO
   scope.names = NULL;
   scope.outer = outer;
 
+  /* Numbers first, bodies after. A routine is visible over the whole declaration part it stands
+   * in, so one body may call another written below it, and what the call carries is the number -
+   * which has to exist before any body is read. */
+  for (decl = scope.decl_list; decl != NULL; decl = decl->next)
+    {
+      if ((decl->info.sp_stmt.flags & PT_SP_DECL_ROUTINE) != 0)
+	{
+	  decl->info.sp_stmt.name->info.name.plcsql_slot = (*next_routine)++;
+	}
+    }
+
   for (decl = scope.decl_list; decl != NULL; decl = decl->next)
     {
       if (decl->info.sp_stmt.flags & PT_SP_DECL_ROUTINE)
 	{
-	  /* the grammar reads one and the rest of the way is not built yet. Naming it here is
-	   * what tells a strict sweep this apart from a body the grammar could not read at all. */
-	  (void) pt_plcsql_refuse (parser, "the declaration part holds a local procedure or function");
-	  return ER_FAILED;
+	  PT_PLCSQL_SCOPE routine_scope;
+	  PT_NODE *param;
+
+	  /* the number was given in the pass above, because a body may call a routine declared
+	   * after it and the call has only the number to go on */
+	  decl->info.sp_stmt.slot_base = *next_slot;
+
+	  for (param = decl->info.sp_stmt.params; param != NULL; param = param->next)
+	    {
+	      if (param->info.name.plcsql_slot == PT_SP_PARAM_NOT_IN)
+		{
+		  /* what a call has to give back, which is a task of its own. Refusing is what
+		   * keeps an argument from going in and quietly not coming back out. */
+		  (void) pt_plcsql_refuse (parser, "a local routine takes an OUT or IN OUT parameter");
+		  return ER_FAILED;
+		}
+	      param->info.name.meta_class = PT_PLCSQL_LOCAL;
+	      param->info.name.plcsql_slot = (*next_slot)++;
+	    }
+
+	  /* the parameters stand between the body and what encloses it, so a name the body does
+	   * not declare itself is looked for in the block this declaration is in - which is how
+	   * an enclosing variable is reached, and it is the same variable rather than a copy */
+	  routine_scope.decl_list = NULL;
+	  routine_scope.visible = NULL;
+	  routine_scope.names = decl->info.sp_stmt.params;
+	  routine_scope.outer = &scope;
+	  if (pt_plcsql_resolve_block (parser, decl->info.sp_stmt.body, &routine_scope, next_slot, next_cursor,
+				       next_exc, next_routine) != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
+
+	  decl->info.sp_stmt.slot_cnt = *next_slot - decl->info.sp_stmt.slot_base;
+	  scope.visible = decl;
+	  continue;
 	}
 
       if (decl->info.sp_stmt.flags & PT_SP_DECL_EXCEPTION)
@@ -30891,8 +30994,8 @@ pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCO
       scope.visible = decl;
     }
 
-  if (pt_plcsql_resolve_stmt_list (parser, block->info.sp_stmt.body, &scope, next_slot, next_cursor, next_exc)
-      != NO_ERROR)
+  if (pt_plcsql_resolve_stmt_list (parser, block->info.sp_stmt.body, &scope, next_slot, next_cursor, next_exc,
+				   next_routine) != NO_ERROR)
     {
       return ER_FAILED;
     }
@@ -30911,8 +31014,8 @@ pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCO
 	    }
 	}
 
-      if (pt_plcsql_resolve_stmt_list (parser, decl->info.sp_stmt.body, &scope, next_slot, next_cursor, next_exc)
-	  != NO_ERROR)
+      if (pt_plcsql_resolve_stmt_list (parser, decl->info.sp_stmt.body, &scope, next_slot, next_cursor, next_exc,
+				       next_routine) != NO_ERROR)
 	{
 	  return ER_FAILED;
 	}
@@ -30935,7 +31038,8 @@ pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCO
  *       value.
  */
 int
-pt_plcsql_resolve_locals (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params, int *cursors_cnt)
+pt_plcsql_resolve_locals (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params, int *cursors_cnt,
+			  int *routines_cnt)
 {
   PT_PLCSQL_SCOPE outer;
   PT_NODE *p;
@@ -30955,8 +31059,9 @@ pt_plcsql_resolve_locals (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * pa
     }
 
   *cursors_cnt = 0;
-  if (pt_plcsql_resolve_block (parser, block, (params != NULL) ? &outer : NULL, &next_slot, cursors_cnt, &next_exc)
-      != NO_ERROR)
+  *routines_cnt = 0;
+  if (pt_plcsql_resolve_block (parser, block, (params != NULL) ? &outer : NULL, &next_slot, cursors_cnt, &next_exc,
+			       routines_cnt) != NO_ERROR)
     {
       return -1;
     }
@@ -31147,6 +31252,17 @@ pt_plcsql_read_static_sql (PARSER_CONTEXT * parser, PT_NODE * list)
 	case PT_SP_CURSOR:
 	  /* a cursor's query is read here too, so that what OPEN runs is a plan like any other */
 	  if (pt_plcsql_read_one_sql (parser, stmt) != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
+	  break;
+
+	case PT_SP_DECL:
+	  /* a local routine is declared rather than written as a statement, and what its body
+	   * holds is read on the same parser as the rest - one body, one numbering of host
+	   * variables, whichever routine wrote the statement */
+	  if ((stmt->info.sp_stmt.flags & PT_SP_DECL_ROUTINE) != 0
+	      && pt_plcsql_read_static_sql (parser, stmt->info.sp_stmt.body) != NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }
@@ -31630,6 +31746,61 @@ pt_to_plcsql_stmt_list_block (PARSER_CONTEXT * parser, PT_NODE * list, TP_DOMAIN
 }
 
 /*
+ * pt_to_plcsql_routine_decl () - a local routine's declaration
+ *   return: the PLCSQL_OP_ROUTINE node, NULL on error
+ *   parser(in) :
+ *   decl(in)   : the PT_SP_DECL the declaration part holds
+ *
+ * note: the body is the node's only child and the declaration files it on the frame when the
+ *       block runs, the way a cursor's query is filed - so a call has one place to find it and
+ *       calling a routine from itself finds the same node rather than another copy of it.
+ *
+ *       A routine's body is a block and is lowered as one, but not with the loops around the
+ *       declaration: an EXIT written in it names a loop of its own or none at all.
+ */
+static XASL_NODE *
+pt_to_plcsql_routine_decl (PARSER_CONTEXT * parser, PT_NODE * decl)
+{
+  XASL_NODE *xasl, *body, **buf = NULL;
+  TP_DOMAIN *ret_domain = NULL;
+
+  if (decl->info.sp_stmt.ret_type != NULL)
+    {
+      ret_domain = pt_xasl_data_type_to_domain (parser, decl->info.sp_stmt.ret_type);
+      if (ret_domain == NULL)
+	{
+	  return NULL;
+	}
+    }
+
+  xasl = pt_plcsql_new_node (PLCSQL_OP_ROUTINE);
+  if (xasl == NULL)
+    {
+      return NULL;
+    }
+  pt_plcsql_place (xasl, decl);
+
+  body = pt_to_plcsql_block (parser, decl->info.sp_stmt.body, decl->info.sp_stmt.params, ret_domain, NULL);
+  if (body == NULL)
+    {
+      return NULL;
+    }
+
+  regu_array_alloc (&buf, 1);
+  if (buf == NULL)
+    {
+      return NULL;
+    }
+  buf[0] = body;
+
+  xasl->proc.plcsql.routines_cnt = decl->info.sp_stmt.name->info.name.plcsql_slot;
+  xasl->proc.plcsql.routine_base_slot = decl->info.sp_stmt.slot_base;
+  xasl->proc.plcsql.routine_slot_cnt = decl->info.sp_stmt.slot_cnt;
+
+  return pt_plcsql_set_children (parser, xasl, buf, 1) == NO_ERROR ? xasl : NULL;
+}
+
+/*
  * pt_to_plcsql_block () - a block: its declarations turned into assignments, then its statements
  *   return: the node, NULL on error
  *   parser(in) :
@@ -31720,6 +31891,17 @@ pt_to_plcsql_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params, 
 	  if (decl->info.sp_stmt.op == PT_SP_CURSOR)
 	    {
 	      buf[i] = pt_to_plcsql_cursor_decl (parser, decl);
+	      if (buf[i] == NULL)
+		{
+		  return NULL;
+		}
+	      i++;
+	      continue;
+	    }
+
+	  if (decl->info.sp_stmt.flags & PT_SP_DECL_ROUTINE)
+	    {
+	      buf[i] = pt_to_plcsql_routine_decl (parser, decl);
 	      if (buf[i] == NULL)
 		{
 		  return NULL;
@@ -32334,6 +32516,23 @@ pt_to_plcsql_stmt_inner (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * re
 	    }
 	}
 
+      if (stmt->info.sp_stmt.flags & PT_SP_CALL_LOCAL)
+	{
+	  /* A local routine is not a routine the catalog holds, so there is no signature to make
+	   * and no plan to carry: the body was filed on the frame by the declaration, and what
+	   * the call needs is its number and what to put in its parameters. */
+	  xasl->proc.plcsql.flags = PLCSQL_CALL_LOCAL;
+	  xasl->proc.plcsql.target_slot = call->info.method_call.method_name->info.name.plcsql_slot;
+	  xasl->proc.plcsql.routine_base_slot = stmt->info.sp_stmt.slot_base;
+	  xasl->proc.plcsql.call_args = pt_to_regu_variable_list (parser, call->info.method_call.arg_list,
+								  UNBOX_AS_VALUE, NULL, NULL);
+	  if (call->info.method_call.arg_list != NULL && xasl->proc.plcsql.call_args == NULL)
+	    {
+	      return NULL;
+	    }
+	  return xasl;
+	}
+
       /* a TYPE_SP regu variable is already "call this routine with these arguments", and
        * fetching one is already how the server runs a stored procedure, so the executor has
        * nothing of its own to do for a call */
@@ -32585,9 +32784,9 @@ pt_to_plcsql_xasl (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params)
 {
   XASL_NODE *xasl;
   TP_DOMAIN *ret_domain = NULL;
-  int locals_cnt, cursors_cnt;
+  int locals_cnt, cursors_cnt, routines_cnt;
 
-  locals_cnt = pt_plcsql_resolve_locals (parser, block, params, &cursors_cnt);
+  locals_cnt = pt_plcsql_resolve_locals (parser, block, params, &cursors_cnt, &routines_cnt);
   if (locals_cnt < 0)
     {
       return NULL;
@@ -32612,6 +32811,7 @@ pt_to_plcsql_xasl (PARSER_CONTEXT * parser, PT_NODE * block, PT_NODE * params)
 
   xasl->proc.plcsql.locals_cnt = locals_cnt;
   xasl->proc.plcsql.cursors_cnt = cursors_cnt;
+  xasl->proc.plcsql.routines_cnt = routines_cnt;
 
   return xasl;
 }

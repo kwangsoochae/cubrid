@@ -1657,6 +1657,8 @@ qdump_plcsql_op_string (PLCSQL_OP op)
       return "CURSOR";
     case PLCSQL_OP_CALL:
       return "CALL";
+    case PLCSQL_OP_ROUTINE:
+      return "ROUTINE";
     case PLCSQL_OP_SQL:
       return "SQL";
     case PLCSQL_OP_HANDLER:

@@ -4636,7 +4636,7 @@ fetch_execute_plcsql (THREAD_ENTRY * thread_p, SP_TYPE * sp, val_descr * vd, OID
 
   frame =
     qexec_alloc_plcsql_frame (thread_p, sp->plcsql->proc.plcsql.locals_cnt, sp->plcsql->proc.plcsql.cursors_cnt,
-			      xasl_state->plcsql_frame);
+			      sp->plcsql->proc.plcsql.routines_cnt, xasl_state->plcsql_frame);
   if (frame == NULL)
     {
       return ER_FAILED;

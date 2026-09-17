@@ -4196,6 +4196,9 @@ stx_build_plcsql_proc (THREAD_ENTRY * thread_p, char *ptr, PLCSQL_PROC_NODE * pl
   ptr = or_unpack_int (ptr, &plcsql_proc->locals_cnt);
   ptr = or_unpack_int (ptr, &plcsql_proc->line);
   ptr = or_unpack_int (ptr, &plcsql_proc->column);
+  ptr = or_unpack_int (ptr, &plcsql_proc->routines_cnt);
+  ptr = or_unpack_int (ptr, &plcsql_proc->routine_base_slot);
+  ptr = or_unpack_int (ptr, &plcsql_proc->routine_slot_cnt);
   ptr = or_unpack_int (ptr, &plcsql_proc->cursors_cnt);
   ptr = or_unpack_int (ptr, &plcsql_proc->cursor_base_slot);
   ptr = or_unpack_int (ptr, &plcsql_proc->cursor_cols_cnt);
@@ -4242,6 +4245,20 @@ stx_build_plcsql_proc (THREAD_ENTRY * thread_p, char *ptr, PLCSQL_PROC_NODE * pl
     {
       plcsql_proc->expr2 = stx_restore_regu_variable (thread_p, &xasl_unpack_info->packed_xasl[offset]);
       if (plcsql_proc->expr2 == NULL)
+	{
+	  goto error;
+	}
+    }
+
+  ptr = or_unpack_int (ptr, &offset);
+  if (offset == 0)
+    {
+      plcsql_proc->call_args = NULL;
+    }
+  else
+    {
+      plcsql_proc->call_args = stx_restore_regu_variable_list (thread_p, &xasl_unpack_info->packed_xasl[offset]);
+      if (plcsql_proc->call_args == NULL)
 	{
 	  goto error;
 	}
