@@ -1335,7 +1335,8 @@ qdump_print_value (REGU_VARIABLE * value_p)
 
     case TYPE_SP:
       fprintf (foutput, "[TYPE_SP]");
-      fprintf (foutput, "[%s]", value_p->value.sp_ptr->sig->name);
+      fprintf (foutput, "[%s]",
+	       (value_p->value.sp_ptr->sig != NULL) ? value_p->value.sp_ptr->sig->name : "local routine");
       fprintf (foutput, "[%s]", value_p->value.sp_ptr->plcsql != NULL ? "native" : "pl engine");
       fprintf (foutput, "args-->");
       qdump_print_regu_variable_list (value_p->value.sp_ptr->args);

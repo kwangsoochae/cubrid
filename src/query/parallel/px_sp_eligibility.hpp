@@ -44,7 +44,8 @@ px_sp_is_parallel_eligible (const cubxasl::sp_node *sp)
   /* A procedure the server runs itself reads its locals through the frame on XASL_STATE, and a
    * px worker has no frame of its own. What PARALLEL_ENABLE declares is about the procedure's
    * body, so it says nothing about that. */
-  return sp != nullptr && sp->plcsql == nullptr && px_sp_is_parallel_eligible (sp->sig);
+  /* a local routine needs the frame the same way, and has no signature to ask */
+  return sp != nullptr && sp->plcsql == nullptr && sp->local_routine < 0 && px_sp_is_parallel_eligible (sp->sig);
 }
 
 #endif /* _PX_SP_ELIGIBILITY_HPP_ */

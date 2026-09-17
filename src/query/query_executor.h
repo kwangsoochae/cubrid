@@ -46,6 +46,7 @@ struct pred_expr_with_context;
 struct qfile_list_id;
 struct qfile_tuple_record;
 class regu_variable_node;
+struct regu_variable_list_node;
 struct tp_domain;
 struct valptr_list_node;
 struct xasl_node;
@@ -188,6 +189,8 @@ extern int qexec_clear_xasl_for_parallel_aptr (THREAD_ENTRY * thread_p, xasl_nod
 extern qfile_list_id *qexec_get_xasl_list_id (xasl_node * xasl);
 extern xasl_state *qexec_deep_copy_xasl_state (THREAD_ENTRY * thread_p, xasl_state * xasl_state);
 extern void qexec_free_xasl_state (THREAD_ENTRY * thread_p, xasl_state * xasl_state);
+extern int qexec_plcsql_run_local (THREAD_ENTRY * thread_p, xasl_state * xasl_state, int number,
+				   struct regu_variable_list_node *args, DB_VALUE * result);
 extern PLCSQL_FRAME *qexec_alloc_plcsql_frame (THREAD_ENTRY * thread_p, int locals_cnt, int cursors_cnt,
 					       int routines_cnt, PLCSQL_FRAME * caller);
 extern void qexec_free_plcsql_frame (THREAD_ENTRY * thread_p, PLCSQL_FRAME * frame);

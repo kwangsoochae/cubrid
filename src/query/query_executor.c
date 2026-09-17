@@ -29648,11 +29648,14 @@ qexec_plcsql_place (THREAD_ENTRY * thread_p, PLCSQL_FRAME * frame, XASL_NODE * x
 }
 
 /*
- * qexec_plcsql_call_local () - run a routine the declaration part named
+ * qexec_plcsql_run_local () - run a routine the declaration part named
  *   return: NO_ERROR, or ER_FAILED when the routine failed or the arguments could not be read
  *   thread_p(in) :
- *   xasl(in)   : the PLCSQL_OP_CALL, whose target_slot is the routine's number
- *   xasl_state(in) :
+ *   xasl_state(in) : the state whose frame the routine was declared on
+ *   number(in) : which of that frame's routines
+ *   args(in)   : what to put in its parameters, read in the caller's own view
+ *   result(out) : what a RETURN left, for a function standing in an expression. NULL for a
+ *                 call written as a statement, which has nothing to read back
  *
  * note: the frame is the one the call stands in rather than a new one, which is what lets the
  *       routine read and write the variables around it - measured: four levels of recursion
@@ -29662,16 +29665,16 @@ qexec_plcsql_place (THREAD_ENTRY * thread_p, PLCSQL_FRAME * frame, XASL_NODE * x
  *       handler reads no error rather than the one being handled, and so does what a RETURN
  *       leaves - without that, returning from a local routine would end the one around it.
  */
-static int
-qexec_plcsql_call_local (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state)
+int
+qexec_plcsql_run_local (THREAD_ENTRY * thread_p, XASL_STATE * xasl_state, int number, REGU_VARIABLE_LIST args,
+			DB_VALUE * result)
 {
-  PLCSQL_FRAME *frame = xasl_state->plcsql_frame;
+  PLCSQL_FRAME *frame = (xasl_state != NULL) ? xasl_state->plcsql_frame : NULL;
   PLCSQL_ROUTINE *routine;
   REGU_VARIABLE_LIST arg;
-  DB_VALUE *saved = NULL, *args = NULL;
+  DB_VALUE *saved = NULL, *argv = NULL;
   DB_VALUE outer_retval;
   PLCSQL_SIGNAL outer_signal;
-  int number = xasl->proc.plcsql.target_slot;
   int outer_level, base, cnt, argc = 0, i, rc = NO_ERROR;
 
   if (frame == NULL || number < 0 || number >= frame->routines_cnt || frame->routines[number].body == NULL)
@@ -29699,7 +29702,7 @@ qexec_plcsql_call_local (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE *
       return ER_FAILED;
     }
 
-  for (arg = xasl->proc.plcsql.call_args; arg != NULL; arg = arg->next)
+  for (arg = args; arg != NULL; arg = arg->next)
     {
       argc++;
     }
@@ -29713,23 +29716,23 @@ qexec_plcsql_call_local (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE *
    * calling itself passes what those very slots hold */
   if (argc > 0)
     {
-      args = (DB_VALUE *) db_private_alloc (thread_p, sizeof (DB_VALUE) * argc);
-      if (args == NULL)
+      argv = (DB_VALUE *) db_private_alloc (thread_p, sizeof (DB_VALUE) * argc);
+      if (argv == NULL)
 	{
 	  return ER_FAILED;
 	}
       for (i = 0; i < argc; i++)
 	{
-	  db_make_null (&args[i]);
+	  db_make_null (&argv[i]);
 	}
 
       i = 0;
-      for (arg = xasl->proc.plcsql.call_args; arg != NULL; arg = arg->next, i++)
+      for (arg = args; arg != NULL; arg = arg->next, i++)
 	{
 	  DB_VALUE *value = NULL;
 
 	  if (qexec_plcsql_fetch_value (thread_p, &arg->value, xasl_state, &value) != NO_ERROR
-	      || pr_clone_value (value, &args[i]) != NO_ERROR)
+	      || pr_clone_value (value, &argv[i]) != NO_ERROR)
 	    {
 	      rc = ER_FAILED;
 	      goto done;
@@ -29763,8 +29766,8 @@ qexec_plcsql_call_local (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE *
 
   for (i = 0; i < argc; i++)
     {
-      frame->locals[base + i] = args[i];
-      db_make_null (&args[i]);
+      frame->locals[base + i] = argv[i];
+      db_make_null (&argv[i]);
     }
 
   frame->signal = PLCSQL_SIGNAL_NONE;
@@ -29776,6 +29779,19 @@ qexec_plcsql_call_local (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE *
       rc = qexec_execute_plcsql_stmt (thread_p, routine->body, xasl_state);
     }
   frame->call_depth--;
+
+  /* what a RETURN left has to be read before the run is given back, because the outer frame's
+   * own retval goes into that place.
+   *
+   * The place it is read into is cleared first. A routine calling itself runs the same regu
+   * variable again, and that variable holds one value for every level of the call - the level
+   * below has already had its answer taken, and writing over it without letting go would leave
+   * it behind. A call the catalog holds never met this: it refuses to recurse. */
+  if (rc == NO_ERROR && result != NULL)
+    {
+      pr_clear_value (result);
+      rc = pr_clone_value (&frame->retval, result);
+    }
 
   for (i = 0; i < cnt; i++)
     {
@@ -29793,13 +29809,13 @@ qexec_plcsql_call_local (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE *
   frame->signal_level = outer_level;
 
 done:
-  if (args != NULL)
+  if (argv != NULL)
     {
       for (i = 0; i < argc; i++)
 	{
-	  pr_clear_value (&args[i]);
+	  pr_clear_value (&argv[i]);
 	}
-      db_private_free_and_init (thread_p, args);
+      db_private_free_and_init (thread_p, argv);
     }
   if (saved != NULL)
     {
@@ -29966,7 +29982,9 @@ qexec_execute_plcsql_stmt_inner (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL
     case PLCSQL_OP_CALL:
       if (xasl->proc.plcsql.flags & PLCSQL_CALL_LOCAL)
 	{
-	  return qexec_plcsql_call_local (thread_p, xasl, xasl_state);
+	  /* a procedure written as a statement leaves nothing to read back */
+	  return qexec_plcsql_run_local (thread_p, xasl_state, xasl->proc.plcsql.target_slot,
+					 xasl->proc.plcsql.call_args, NULL);
 	}
       {
 	DB_VALUE *ignored = NULL;

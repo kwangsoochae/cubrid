@@ -6946,6 +6946,8 @@ pt_make_function (PARSER_CONTEXT * parser, int function_code, const REGU_VARIABL
 static XASL_NODE *pt_plcsql_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig);
 static bool pt_plcsql_compiling_body (void);
 static bool pt_plcsql_callee_is_builtin (const REGU_VARIABLE * regu);
+static REGU_VARIABLE *pt_plcsql_local_call_to_regu (PARSER_CONTEXT * parser, PT_NODE * node, int number,
+						    PT_NODE * args);
 
 static REGU_VARIABLE *
 pt_stored_procedure_to_regu (PARSER_CONTEXT * parser, PT_NODE * node)
@@ -6962,6 +6964,7 @@ pt_stored_procedure_to_regu (PARSER_CONTEXT * parser, PT_NODE * node)
     }
 
   regu_alloc (regu->value.sp_ptr);
+  regu->value.sp_ptr->local_routine = -1;
 
   sp = regu->value.sp_ptr;
   if (sp)
@@ -7769,6 +7772,16 @@ pt_to_regu_variable (PARSER_CONTEXT * parser, PT_NODE * node, UNBOX unbox)
 	         pt_to_regu_variable() : generate regu_var for jsp function
 	         fetch_peek_dbval() : fetch regu_var for jsp function
 	       */
+
+	      if (node->info.method_call.method_name != NULL
+		  && node->info.method_call.method_name->info.name.meta_class == PT_PLCSQL_ROUTINE)
+		{
+		  /* the declaration part holds this name, so there is no catalog routine to look up */
+		  regu = pt_plcsql_local_call_to_regu (parser, node,
+						       node->info.method_call.method_name->info.name.plcsql_slot,
+						       node->info.method_call.arg_list);
+		  break;
+		}
 
 	      /* a method call that can be evaluated as a constant expression. */
 	      if (PT_IS_METHOD (node))
@@ -9661,7 +9674,11 @@ pt_to_regu_variable (PARSER_CONTEXT * parser, PT_NODE * node, UNBOX unbox)
 	      break;
 
 	    case PT_NAME:
-	      if (node->info.name.meta_class == PT_PLCSQL_LOCAL)
+	      if (node->info.name.meta_class == PT_PLCSQL_ROUTINE)
+		{
+		  regu = pt_plcsql_local_call_to_regu (parser, node, node->info.name.plcsql_slot, NULL);
+		}
+	      else if (node->info.name.meta_class == PT_PLCSQL_LOCAL)
 		{
 		  regu_alloc (regu);
 		  if (regu != NULL)
@@ -29597,7 +29614,8 @@ pt_make_sq_cache_key_struct (QPROC_DB_VALUE_LIST key_struct, void *p, int type)
 	   * 3: PT_AUTHID_CALLER + PT_DETERMINISTIC
 	   */
 #if defined (CS_MODE)
-	  if (regu_src->value.sp_ptr->sig->is_deterministic == false)
+	  /* a local routine has no signature to ask, and the body it stands in is what decides */
+	  if (regu_src->value.sp_ptr->sig != NULL && regu_src->value.sp_ptr->sig->is_deterministic == false)
 	    {
 	      return ER_FAILED;
 	    }
@@ -30352,12 +30370,14 @@ pt_plcsql_bind_name (PARSER_CONTEXT * parser, PT_NODE * name, PT_PLCSQL_SCOPE * 
   if (decl->node_type == PT_SP_STMT && (decl->info.sp_stmt.flags & PT_SP_DECL_ROUTINE) != 0)
     {
       /* A local function taking no argument is called by writing its name, with no parentheses
-       * to tell it from a variable - so this is a call and not a reference, and a call standing
-       * in an expression is not lowered yet. What a routine's name carries is its number among
-       * the frame's routines, which is not a slot: reading it as one would quietly serve
-       * whatever that slot holds rather than failing. */
-      (void) pt_plcsql_refuse (parser, "an expression calls a local function");
-      return ER_FAILED;
+       * to tell it from a variable - so this is a call and not a reference. What the name
+       * carries is the routine's number, which is not a frame slot: marking it apart is what
+       * keeps it from being read as one and quietly serving whatever that slot holds. */
+      name->info.name.meta_class = PT_PLCSQL_ROUTINE;
+      name->info.name.plcsql_slot = decl->info.sp_stmt.name->info.name.plcsql_slot;
+      name->type_enum = (decl->info.sp_stmt.ret_type != NULL) ? decl->info.sp_stmt.ret_type->type_enum : PT_TYPE_NONE;
+      name->data_type = parser_copy_tree (parser, decl->info.sp_stmt.ret_type);
+      return NO_ERROR;
     }
 
   /* pt_plcsql_find_decl () answers with a PT_SP_STMT for a declaration and with a bare PT_NAME
@@ -30415,15 +30435,19 @@ pt_plcsql_bind_name_pre (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int
 	  resolve->error = ER_FAILED;
 	  *continue_walk = PT_STOP_WALK;
 	}
-      else if (callee != NULL && callee->node_type == PT_NAME
-	       && pt_plcsql_find_decl (resolve->scope, callee->info.name.original) != NULL)
-	{
-	  (void) pt_plcsql_refuse (parser, "an expression calls a local function");
-	  resolve->error = ER_FAILED;
-	  *continue_walk = PT_STOP_WALK;
-	}
       else
 	{
+	  PT_NODE *decl = (callee != NULL && callee->node_type == PT_NAME)
+	    ? pt_plcsql_find_decl (resolve->scope, callee->info.name.original) : NULL;
+
+	  if (decl != NULL && decl->node_type == PT_SP_STMT && (decl->info.sp_stmt.flags & PT_SP_DECL_ROUTINE) != 0)
+	    {
+	      callee->info.name.meta_class = PT_PLCSQL_ROUTINE;
+	      callee->info.name.plcsql_slot = decl->info.sp_stmt.name->info.name.plcsql_slot;
+	      node->type_enum =
+		(decl->info.sp_stmt.ret_type != NULL) ? decl->info.sp_stmt.ret_type->type_enum : PT_TYPE_NONE;
+	      node->data_type = parser_copy_tree (parser, decl->info.sp_stmt.ret_type);
+	    }
 	  *continue_walk = PT_LIST_WALK;
 	}
 
@@ -31371,6 +31395,14 @@ pt_plcsql_type_call (PARSER_CONTEXT * parser, PT_NODE * call)
 {
   const char *name;
   int sp_type, ret_type;
+
+  if (call->info.method_call.method_name != NULL
+      && call->info.method_call.method_name->info.name.meta_class == PT_PLCSQL_ROUTINE)
+    {
+      /* the declaration part holds this one, and resolution has already given the call the type
+       * its header declares - there is no catalog row to read it from */
+      return NO_ERROR;
+    }
 
   name = pt_plcsql_routine_name (parser, call->info.method_call.method_name);
 
@@ -33055,6 +33087,55 @@ static bool
 pt_plcsql_compiling_body (void)
 {
   return pt_Plcsql_compile_depth > 0;
+}
+
+/*
+ * pt_plcsql_local_call_to_regu () - a call of a local routine, as a value
+ *   return: the regu variable, NULL on error
+ *   parser(in) :
+ *   node(in)   : what the call was written as, for the type the value takes
+ *   number(in) : which of the frame's routines
+ *   args(in)   : the argument expressions, NULL when it was written with none
+ *
+ * note: a TYPE_SP regu variable is already "call this and give back what it returns", so a local
+ *       routine borrows it rather than growing a regu type of its own. What it does not have is
+ *       a signature - the catalog holds nothing about it - so sig stays NULL and the number is
+ *       what says which routine to run.
+ */
+static REGU_VARIABLE *
+pt_plcsql_local_call_to_regu (PARSER_CONTEXT * parser, PT_NODE * node, int number, PT_NODE * args)
+{
+  REGU_VARIABLE *regu = NULL;
+
+  regu_alloc (regu);
+  if (regu == NULL)
+    {
+      return NULL;
+    }
+
+  regu_alloc (regu->value.sp_ptr);
+  if (regu->value.sp_ptr == NULL)
+    {
+      return NULL;
+    }
+
+  regu->type = TYPE_SP;
+  regu->domain = pt_xasl_node_to_domain (parser, node);
+  regu->value.sp_ptr->sig = NULL;
+  regu->value.sp_ptr->plcsql = NULL;
+  regu->value.sp_ptr->local_routine = number;
+  regu_dbval_type_init (regu->value.sp_ptr->value, pt_node_to_db_type (node));
+
+  if (args != NULL)
+    {
+      regu->value.sp_ptr->args = pt_to_regu_variable_list (parser, args, UNBOX_AS_VALUE, NULL, NULL);
+      if (regu->value.sp_ptr->args == NULL)
+	{
+	  return NULL;
+	}
+    }
+
+  return regu;
 }
 
 /*

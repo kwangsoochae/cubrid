@@ -4960,6 +4960,20 @@ fetch_peek_dbval_slow (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_de
 	pr_clear_value (regu_var->value.sp_ptr->value);
 	fetch_force_not_const_recursive (*regu_var);
 
+	if (regu_var->value.sp_ptr->local_routine >= 0)
+	  {
+	    /* a routine the running body declared. It is not reached through plcsql - the
+	     * declaration filed its body on the frame, and the call shares that frame. */
+	    error = qexec_plcsql_run_local (thread_p, vd->xasl_state, regu_var->value.sp_ptr->local_routine,
+					    regu_var->value.sp_ptr->args, regu_var->value.sp_ptr->value);
+	    if (error != NO_ERROR)
+	      {
+		goto exit_on_error;
+	      }
+	    *peek_dbval = regu_var->value.sp_ptr->value;
+	    break;
+	  }
+
 	if (regu_var->value.sp_ptr->plcsql != NULL)
 	  {
 	    /* the client could build the procedure's own plan, so the server runs it here instead

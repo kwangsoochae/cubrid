@@ -5907,12 +5907,20 @@ xts_process_sp_type (char *ptr, const SP_TYPE * sp)
     }
   ptr = or_pack_int (ptr, offset);
 
-  offset = xts_save_packable_object (*sp->sig);
-  if (offset == ER_FAILED)
+  if (sp->sig == NULL)
     {
-      return NULL;
+      /* a local routine, which the catalog holds nothing about */
+      ptr = or_pack_int (ptr, 0);
     }
-  ptr = or_pack_int (ptr, offset);
+  else
+    {
+      offset = xts_save_packable_object (*sp->sig);
+      if (offset == ER_FAILED)
+	{
+	  return NULL;
+	}
+      ptr = or_pack_int (ptr, offset);
+    }
 
   offset = xts_save_xasl_node (sp->plcsql);
   if (offset == ER_FAILED)
@@ -5920,6 +5928,8 @@ xts_process_sp_type (char *ptr, const SP_TYPE * sp)
       return NULL;
     }
   ptr = or_pack_int (ptr, offset);
+
+  ptr = or_pack_int (ptr, sp->local_routine);
 
   return ptr;
 }
@@ -7697,7 +7707,8 @@ xts_sizeof_sp_type (const SP_TYPE * sp)
   size += (PTR_SIZE		/* value */
 	   + PTR_SIZE		/* sig */
 	   + PTR_SIZE		/* args */
-	   + PTR_SIZE);		/* plcsql */
+	   + PTR_SIZE		/* plcsql */
+	   + OR_INT_SIZE);	/* local_routine */
 
   return size;
 }

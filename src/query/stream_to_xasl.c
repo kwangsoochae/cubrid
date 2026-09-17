@@ -6340,6 +6340,8 @@ stx_build_sp_type (THREAD_ENTRY * thread_p, char *ptr, SP_TYPE * sp)
 	}
     }
 
+  ptr = or_unpack_int (ptr, &sp->local_routine);
+
   return ptr;
 }
 
