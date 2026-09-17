@@ -29377,10 +29377,13 @@ qexec_plcsql_test (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu, XASL_STATE * x
  *
  * note: this is only for a failure that named no exception on its way out. A RAISE, a SQL
  *       statement, a cursor operation and a SELECT ... INTO all name their own, because the
- *       error code cannot tell them apart. The reference implementation does not decide by error code alone either: it
- *       runs built-in functions through a query, so a built-in that fails raises SQL_ERROR
- *       where the same failure in a native expression is an invalid value. What is listed
- *       below is measured against it rather than derived.
+ *       error code cannot tell them apart. The reference implementation does not decide by
+ *       error code alone either: it computes the operators and the assignment conversions
+ *       itself, and runs every built-in through "select f(?) from dual" - so a built-in that
+ *       fails raises SQL_ERROR where the same failure in an operator is an invalid value.
+ *       The code can stand in for that split only as far as the two sides raise different
+ *       ones, which is what the list below is: the codes a sweep of the built-ins and the
+ *       operators in plain SQL found on the built-in side alone.
  */
 static int
 qexec_plcsql_exc_of_error (int err)
@@ -29400,9 +29403,25 @@ qexec_plcsql_exc_of_error (int err)
        * expression - the error code is what both shapes have in common. */
       return PLCSQL_EXC_SQL_ERROR;
 
+    case ER_DATE_CONVERSION:
+    case ER_OBJ_INVALID_ARGUMENTS:
+    case ER_DATE_EXCEED_LIMIT:
+    case ER_QSTR_INVALID_FORMAT:
+    case ER_QSTR_MISMATCHING_ARGUMENTS:
+    case ER_TIME_CONVERSION:
+    case ER_TIMESTAMP_CONVERSION:
+    case ER_QPROC_OVERFLOW_POWER:
+    case ER_QPROC_FUNCTION_ARG_ERROR:
+    case ER_QPROC_OVERFLOW_EXP:
+    case ER_QPROC_STRING_SIZE_TOO_BIG:
     case ER_QSTR_TONUM_FORMAT_MISMATCH:
-      /* the one built-in a baseline case pins. The rest of that family is unmeasured and is
-       * left to read as an invalid value rather than guessed at. */
+      /* What a built-in fails with. Two of these are not as clean as the rest.
+       *   ER_QPROC_STRING_SIZE_TOO_BIG: '||' reaches it as well, but the reference
+       *     implementation joins strings in Java and never stops at that limit, so there is
+       *     no answer of its own that keeping it on the operator side would preserve.
+       *   CAST is missing from here on purpose: the reference runs it as SQL and answers
+       *     SQL_ERROR, yet it fails with the code an assignment fails with, so naming that
+       *     code would move the assignment too. The grammar does not take CAST yet. */
       return PLCSQL_EXC_SQL_ERROR;
 
     default:
