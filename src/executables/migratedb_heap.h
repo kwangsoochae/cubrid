@@ -168,6 +168,17 @@ extern int migrate_heap_walk (int hfid_volid, PAGEID hpgid, MIGRATE_HEAP_RECORD_
 			      MIGRATE_HEAP_STATS * stats);
 
 /*
+ * Follow a REC_RELOCATION slot to the row it stands for.
+ *
+ * A row that outgrew its page was moved: the slot it started in keeps only the OID of where it
+ * went, and the row itself sits there as REC_NEWHOME. The row is still known by the slot it
+ * started in, which is what its references point at, so a caller keeps using that OID and takes
+ * the content from here. Needs its own IO-page-sized scratch, since the walk is using its own.
+ */
+extern int migrate_heap_follow_relocation (char *reloc_rec, int reloc_len, char *scratch_iopage,
+					   char **out_rec, int *out_len);
+
+/*
  * Rebuild the source's record shape for a class from the target class's representation.  What
  * moved between fixed and variable storage is the only thing that differs, and the order inside
  * each group follows rules the two releases share, so the shape can be computed rather than

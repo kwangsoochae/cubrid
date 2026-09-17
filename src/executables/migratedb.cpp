@@ -119,9 +119,12 @@ struct class_plan
   long old_repr_rows = 0;	/* written under a representation the target no longer has */
   long skipped_bigone = 0;
   long skipped_relocation = 0;
+  long relocated_rows = 0;	/* rows that had moved off the page they started on */
 };
 
 static MIGRATE_SRC_FORMAT g_src_format;
+/* a second page, so a relocation can be followed while the walk still holds its own */
+static char *g_scratch_page = NULL;
 static THREAD_ENTRY *g_thread_p = NULL;
 static std::unordered_map<uint64_t, OID> g_oid_map;
 static bool g_remap_oids = false;     /* plan mode resolves references; a single-class run cannot */
@@ -463,9 +466,17 @@ pass1_record (char *rec, int reclen, int rec_type, const OID *src_oid, void *arg
     }
   if (rec_type == REC_RELOCATION)
     {
-      /* the body is in a REC_NEWHOME slot on another page */
-      cp.skipped_relocation++;
-      return NO_ERROR;
+      /*
+       * The row outgrew its page and moved; this slot only points at where it went. The row is
+       * still known by this slot, which is what src_oid already holds, so only the content comes
+       * from the other page.
+       */
+      if (migrate_heap_follow_relocation (rec, reclen, g_scratch_page, &rec, &reclen) != NO_ERROR)
+	{
+	  cp.skipped_relocation++;
+	  return NO_ERROR;
+	}
+      cp.relocated_rows++;
     }
 
   if (g_limit >= 0 && cp.rows_read >= g_limit)
@@ -578,7 +589,14 @@ pass2_record (char *rec, int reclen, int rec_type, const OID *src_oid, void *arg
 {
   class_plan &cp = * (class_plan *) arg;
 
-  if (rec_type != REC_HOME)
+  if (rec_type == REC_RELOCATION)
+    {
+      if (migrate_heap_follow_relocation (rec, reclen, g_scratch_page, &rec, &reclen) != NO_ERROR)
+	{
+	  return NO_ERROR;
+	}
+    }
+  else if (rec_type != REC_HOME)
     {
       return NO_ERROR;
     }
@@ -785,6 +803,12 @@ migratedb (UTIL_FUNCTION_ARG *arg)
     {
       return EXIT_FAILURE;
     }
+  g_scratch_page = (char *) malloc (g_src_format.io_page_size);
+  if (g_scratch_page == NULL)
+    {
+      return EXIT_FAILURE;
+    }
+
   printf ("source: release %s (compatibility %.1f), page %d bytes\n",
 	  g_src_format.release, g_src_format.compatibility, g_src_format.io_page_size);
 
@@ -887,7 +911,7 @@ migratedb (UTIL_FUNCTION_ARG *arg)
 
   /* ---- report ---- */
   long t_read = 0, t_ins = 0, t_fix = 0, t_err = 0, t_unres = 0, t_big = 0, t_rel = 0, n_skipped = 0;
-  long t_oldrepr = 0;
+  long t_oldrepr = 0, t_reloc = 0;
   for (const class_plan &cp : plan)
     {
       t_read += cp.rows_read;
@@ -897,6 +921,7 @@ migratedb (UTIL_FUNCTION_ARG *arg)
       t_unres += cp.unresolved_refs;
       t_big += cp.skipped_bigone;
       t_rel += cp.skipped_relocation;
+      t_reloc += cp.relocated_rows;
       n_skipped += cp.skipped ? 1 : 0;
       t_oldrepr += cp.old_repr_rows;
     }
@@ -910,7 +935,7 @@ migratedb (UTIL_FUNCTION_ARG *arg)
   printf ("errors            : %ld\n", t_err);
   printf ("other record shape : %ld\n", t_oldrepr);
   printf ("skipped REC_BIGONE: %ld\n", t_big);
-  printf ("skipped REC_RELOC : %ld\n", t_rel);
+  printf ("relocated rows    : %ld followed, %ld unreadable\n", t_reloc, t_rel);
   printf ("elapsed           : %.3f s\n", secs);
 
   db_shutdown ();

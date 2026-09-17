@@ -639,6 +639,36 @@ migrate_src_readval (const MIGRATE_SRC_FORMAT *fmt, char *ptr, int size, TP_DOMA
     }
 }
 
+int
+migrate_heap_follow_relocation (char *reloc_rec, int reloc_len, char *scratch_iopage, char **out_rec, int *out_len)
+{
+  OID forward_oid;
+  char *page;
+  SPAGE_SLOT *slot;
+
+  if (reloc_len < OR_OID_SIZE)
+    {
+      return ER_FAILED;
+    }
+  COPY_OID (&forward_oid, (OID *) reloc_rec);
+
+  page = migrate_heap_read_page (forward_oid.volid, forward_oid.pageid, scratch_iopage);
+  if (page == NULL)
+    {
+      return ER_FAILED;
+    }
+
+  slot = migrate_heap_page_slot (page, forward_oid.slotid);
+  if (slot->record_type != REC_NEWHOME)
+    {
+      return ER_FAILED;
+    }
+
+  *out_rec = page + slot->offset_to_record;
+  *out_len = (int) slot->record_length;
+  return NO_ERROR;
+}
+
 /*
  * Does this record actually have the shape the layout describes?
  *
