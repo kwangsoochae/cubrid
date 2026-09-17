@@ -86,7 +86,7 @@ static PT_NODE *sp_make_case (PT_NODE * operand, PT_NODE * when_list, PT_NODE * 
 }
 
 %token BEGIN_ CONSTANT_ CONTINUE_ DECLARE_ ELSE_ ELSIF_ END_ EXIT_ FOR_ IF_ IN_ LOOP_ NOT_ NULL_ REVERSE_
-%token EXCEPTION_ OTHERS_ RAISE_ SQLCODE_ SQLERRM_
+%token EXCEPTION_ OTHERS_ RAISE_ RAISE_APPLICATION_ERROR_ SQLCODE_ SQLERRM_
 %token CASE_ FALSE_ THEN_ TRUE_ WHEN_ WHILE_
 %token CLOSE_ CURSOR_ FETCH_ INTO_ OPEN_
 %token AS_ AUTHID_ CREATE_ FUNCTION_ OUT_ PROCEDURE_ REPLACE_ RETURN_
@@ -650,7 +650,11 @@ return_stmt
 	;
 
 /* A bare RAISE re-raises what the handler it stands in is handling. Whether it stands in one is
- * not judged here - the PL/CSQL compiler has already refused a body that gets it wrong. */
+ * not judged here - the PL/CSQL compiler has already refused a body that gets it wrong.
+ *
+ * RAISE_APPLICATION_ERROR is a third form of the same statement rather than a call: the name is
+ * a keyword in the reference implementation's grammar too, which is why a body can hold it
+ * without the catalog holding a routine under that name. */
 raise_stmt
 	: RAISE_ ';'
 		{
@@ -663,6 +667,18 @@ raise_stmt
 		  if (node)
 		    {
 		      node->info.sp_stmt.name = SP_AT (pt_name (sp_Parser, $2), @2);
+		    }
+		  $$ = node;
+		}
+	| RAISE_APPLICATION_ERROR_ '(' expr ',' expr ')' ';'
+		{
+		  PT_NODE *node = sp_make_stmt (PT_SP_RAISE, @$.first_line, @$.first_column);
+
+		  if (node)
+		    {
+		      node->info.sp_stmt.flags |= PT_SP_RAISE_APP;
+		      node->info.sp_stmt.expr = $3;
+		      node->info.sp_stmt.expr2 = $5;
 		    }
 		  $$ = node;
 		}

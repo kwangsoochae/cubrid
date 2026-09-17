@@ -531,6 +531,13 @@ typedef enum
   PLCSQL_EXC_ZERO_DIVIDE,
   PLCSQL_EXC_PREDEFINED_CNT,
 
+  /* What RAISE_APPLICATION_ERROR raises. It stands above the predefined ones and below the
+   * declared ones so that no handler can name it: the reference implementation throws
+   * $APP_ERROR itself there, which is the class a body's own declarations extend, so only
+   * WHEN OTHERS takes one. The number the call was written with is not this one - that rides
+   * on the frame, because SQLCODE shows it while a handler still has to match on one value. */
+  PLCSQL_EXC_APP_ERROR = PLCSQL_EXC_PREDEFINED_CNT,
+
   /* One a body declared. They are numbered from here in the order the declarations are read,
    * which keeps them apart from the predefined ones in the single integer a handler carries. */
   PLCSQL_EXC_USER_FIRST = 1000
@@ -560,6 +567,11 @@ typedef enum
  * holds and carries it in a regu variable; a local one names a routine of the running frame and
  * carries its number in target_slot. */
 #define PLCSQL_CALL_LOCAL	0x01
+
+/* plcsql_proc_node.flags of a PLCSQL_OP_RAISE. RAISE_APPLICATION_ERROR is the form that carries
+ * expressions - expr is the number and expr2 the sentence. A plain RAISE sets no flag and carries
+ * a number in target_slot instead. */
+#define PLCSQL_RAISE_APP	0x01
 
 /* plcsql_proc_node.flags of a PLCSQL_OP_CURSOR. The declaration is a node of its own because
  * the query belongs to it and not to any one OPEN: a cursor opened in two places is still one
