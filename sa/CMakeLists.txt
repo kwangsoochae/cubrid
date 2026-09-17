@@ -32,10 +32,12 @@ set(EXECUTABLE_SOURCES
   ${EXECUTABLES_DIR}/unload_object_file.c
   ${EXECUTABLES_DIR}/unload_schema.c
   ${EXECUTABLES_DIR}/file_hash.c
+  ${EXECUTABLES_DIR}/migratedb_heap.cpp
   )
 
 set(EXECUTABLE_HEADERS
   ${EXECUTABLES_DIR}/extract_schema.hpp
+  ${EXECUTABLES_DIR}/migratedb_heap.h
   )
 
 set(COMPAT_SOURCES
