@@ -91,7 +91,8 @@ typedef enum
   MSGCAT_UTIL_SET_TDE = 57,
   MSGCAT_UTIL_SET_FLASHBACK = 58,
   MSGCAT_UTIL_SET_MEMMON = 59,
-  MSGCAT_UTIL_SET_CLEANFILEDB = 60
+  MSGCAT_UTIL_SET_CLEANFILEDB = 60,
+  MSGCAT_UTIL_SET_MIGRATEDB = 61
 } MSGCAT_UTIL_SET;
 
 /* Message id in the set MSGCAT_UTIL_SET_GENERIC */
@@ -772,6 +773,12 @@ typedef enum
   CLEANFILEDB_MSG_USAGE = 60
 } MSGCAT_CLEANFILEDB_MSG;
 
+/* Message id in the set MSGCAT_UTIL_SET_MIGRATEDB */
+typedef enum
+{
+  MIGRATEDB_MSG_USAGE = 60
+} MSGCAT_MIGRATEDB_MSG;
+
 typedef void *DSO_HANDLE;
 
 typedef enum
@@ -821,6 +828,7 @@ typedef enum
   TDE,
   FLASHBACK,
   MEMMON,
+  MIGRATEDB,
   LOGFILEDUMP,
 } UTIL_INDEX;
 
@@ -1037,6 +1045,7 @@ typedef struct _ha_config
 #define UTIL_OPTION_TDE			        "tde"
 #define UTIL_OPTION_FLASHBACK                   "flashback"
 #define UTIL_OPTION_MEMMON                      "memmon"
+#define UTIL_OPTION_MIGRATEDB                   "migratedb"
 
 #define HIDDEN_CS_MODE_S                        15000
 
@@ -1242,6 +1251,24 @@ typedef struct _ha_config
 #define DIAG_CLASS_NAME_L                       "class-name"
 #define DIAG_INPUT_FILE_S                       'i'
 #define DIAG_INPUT_FILE_L                       "input-file"
+
+/* migratedb option list */
+#define MIGRATEDB_PLAN_S                        14200
+#define MIGRATEDB_PLAN_L                        "plan"
+#define MIGRATEDB_CLASS_S                       14201
+#define MIGRATEDB_CLASS_L                       "class"
+#define MIGRATEDB_SRC_VOLID_S                   14202
+#define MIGRATEDB_SRC_VOLID_L                   "src-volid"
+#define MIGRATEDB_SRC_HPGID_S                   14203
+#define MIGRATEDB_SRC_HPGID_L                   "src-hpgid"
+#define MIGRATEDB_LIMIT_S                       14204
+#define MIGRATEDB_LIMIT_L                       "limit"
+#define MIGRATEDB_COMMIT_EVERY_S                14205
+#define MIGRATEDB_COMMIT_EVERY_L                "commit-every"
+#define MIGRATEDB_DRY_RUN_S                     14206
+#define MIGRATEDB_DRY_RUN_L                     "dry-run"
+#define MIGRATEDB_FORCE_S                       14207
+#define MIGRATEDB_FORCE_L                       "force"
 
 /* cleanfiledb option list */
 #define CLEANFILEDB_SA_MODE_S                   'S'
@@ -1931,6 +1958,7 @@ extern "C"
   extern int tde (UTIL_FUNCTION_ARG * arg_map);
   extern int flashback (UTIL_FUNCTION_ARG * arg_map);
   extern int memmon (UTIL_FUNCTION_ARG * arg_map);
+  extern int migratedb (UTIL_FUNCTION_ARG * arg_map);
 
   extern void util_admin_usage (const char *argv0);
   extern void util_admin_version (const char *argv0);

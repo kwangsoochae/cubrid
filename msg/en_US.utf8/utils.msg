@@ -1380,3 +1380,30 @@ valid options:\n\
     -o, --output-file=FILE        redirect output message to FILE; default: none.\n\
     -l, --list                    list all files\n\
     -c, --clean-invalid-file      clean invalid files\n
+
+$set 61 MSGCAT_UTIL_SET_MIGRATEDB
+60 \
+migratedb: Load the data of an older CUBRID database directly from its volumes.\n\
+usage: %1$s migratedb [OPTION] source-db-path database-name\n\
+\n\
+  source-db-path  path prefix of the source database, e.g. /data/olddb/mydb\n\
+                  the release and page size are read from <source-db-path>_lgat\n\
+  database-name   the target database, already created and loaded with the schema\n\
+\n\
+This is the data load step only. Creating the target database, loading the schema\n\
+dumped by the source release's unloaddb -s, and rebuilding indexes afterwards are\n\
+not done here.\n\
+\n\
+valid options:\n\
+      --plan=FILE            migrate every class listed in FILE; one line per class:\n\
+                             <class-name> <source-hfid-volid> <source-hfid-hpgid>\n\
+                             taken from the source release's diagdb -d 7 dump.\n\
+                             Only a plan run resolves object references, because it\n\
+                             has to see every class at once.\n\
+      --class=NAME           migrate one class; needs --src-volid and --src-hpgid\n\
+      --src-volid=N          volid of that class's HFID in the source database\n\
+      --src-hpgid=N          hpgid of that class's HFID in the source database\n\
+      --limit=N              stop after N rows per class; default: no limit\n\
+      --commit-every=N       commit every N rows; 0 commits once at the end; default: 100000\n\
+      --dry-run              read and decode only, write nothing\n\
+      --force                migrate classes the tool would otherwise refuse\n

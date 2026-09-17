@@ -32,6 +32,7 @@ set(EXECUTABLE_SOURCES
   ${EXECUTABLES_DIR}/unload_object_file.c
   ${EXECUTABLES_DIR}/unload_schema.c
   ${EXECUTABLES_DIR}/file_hash.c
+  ${EXECUTABLES_DIR}/migratedb.cpp
   ${EXECUTABLES_DIR}/migratedb_heap.cpp
   )
 

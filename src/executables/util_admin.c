@@ -315,6 +315,31 @@ static GETOPT_LONG ua_Install_Option[] = {
   {0, 0, 0, 0}
 };
 
+static UTIL_ARG_MAP ua_Migratedb_Option_Map[] = {
+  {OPTION_STRING_TABLE, {0}, {0}},
+  {MIGRATEDB_PLAN_S, {ARG_STRING}, {0}},
+  {MIGRATEDB_CLASS_S, {ARG_STRING}, {0}},
+  {MIGRATEDB_SRC_VOLID_S, {ARG_INTEGER}, {(void *) 0}},
+  {MIGRATEDB_SRC_HPGID_S, {ARG_INTEGER}, {(void *) 0}},
+  {MIGRATEDB_LIMIT_S, {ARG_INTEGER}, {(void *) -1}},
+  {MIGRATEDB_COMMIT_EVERY_S, {ARG_INTEGER}, {(void *) 100000}},
+  {MIGRATEDB_DRY_RUN_S, {ARG_BOOLEAN}, {0}},
+  {MIGRATEDB_FORCE_S, {ARG_BOOLEAN}, {0}},
+  {0, {0}, {0}}
+};
+
+static GETOPT_LONG ua_Migratedb_Option[] = {
+  {MIGRATEDB_PLAN_L, 1, 0, MIGRATEDB_PLAN_S},
+  {MIGRATEDB_CLASS_L, 1, 0, MIGRATEDB_CLASS_S},
+  {MIGRATEDB_SRC_VOLID_L, 1, 0, MIGRATEDB_SRC_VOLID_S},
+  {MIGRATEDB_SRC_HPGID_L, 1, 0, MIGRATEDB_SRC_HPGID_S},
+  {MIGRATEDB_LIMIT_L, 1, 0, MIGRATEDB_LIMIT_S},
+  {MIGRATEDB_COMMIT_EVERY_L, 1, 0, MIGRATEDB_COMMIT_EVERY_S},
+  {MIGRATEDB_DRY_RUN_L, 0, 0, MIGRATEDB_DRY_RUN_S},
+  {MIGRATEDB_FORCE_L, 0, 0, MIGRATEDB_FORCE_S},
+  {0, 0, 0, 0}
+};
+
 static UTIL_ARG_MAP ua_Diag_Option_Map[] = {
   {OPTION_STRING_TABLE, {0}, {0}},
   {DIAG_DUMP_TYPE_S, {ARG_INTEGER}, {(void *) -1}},
@@ -1009,6 +1034,7 @@ static UTIL_MAP ua_Utility_Map[] = {
   {TDE, SA_CS, 1, UTIL_OPTION_TDE, "tde", ua_Tde_Option, ua_Tde_Option_Map},
   {FLASHBACK, CS_ONLY, 2, UTIL_OPTION_FLASHBACK, "flashback", ua_Flashback_Option, ua_Flashback_Option_Map},
   {MEMMON, CS_ONLY, 1, UTIL_OPTION_MEMMON, "memmon", ua_Memmon_Option, ua_Memmon_Option_Map},
+  {MIGRATEDB, SA_ONLY, 2, UTIL_OPTION_MIGRATEDB, "migratedb", ua_Migratedb_Option, ua_Migratedb_Option_Map},
   {-1, -1, 0, 0, 0, 0, 0}
 };
 

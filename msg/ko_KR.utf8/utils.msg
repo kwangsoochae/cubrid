@@ -1366,3 +1366,29 @@ valid options:\n\
     -o, --output-file=FILE        출력 메시지를 FILE로 리디렉션합니다. 기본값: 없음.\n\
     -l, --list                    모든 파일 항목 출력\n\
     -c, --clean-invalid-file      유효하지 않은 파일 정리\n
+
+$set 61 MSGCAT_UTIL_SET_MIGRATEDB
+60 \
+migratedb: 구 버전 CUBRID 데이터베이스의 데이터를 볼륨에서 직접 읽어 적재합니다.\n\
+usage: %1$s migratedb [OPTION] source-db-path database-name\n\
+\n\
+  source-db-path  원본 데이터베이스의 경로 접두. 예: /data/olddb/mydb\n\
+                  릴리스와 페이지 크기는 <source-db-path>_lgat 에서 읽습니다.\n\
+  database-name   대상 데이터베이스. 미리 생성하고 스키마를 적재해 두어야 합니다.\n\
+\n\
+데이터 적재 단계만 수행합니다. 대상 데이터베이스 생성, 원본 릴리스의 unloaddb -s 로\n\
+뽑은 스키마 적재, 적재 후 인덱스 재생성은 이 명령이 하지 않습니다.\n\
+\n\
+valid options:\n\
+      --plan=FILE            FILE 에 적힌 모든 클래스를 이관합니다. 한 줄에 한 클래스:\n\
+                             <클래스이름> <원본 HFID volid> <원본 HFID hpgid>\n\
+                             원본 릴리스의 diagdb -d 7 덤프에서 얻습니다.\n\
+                             객체 참조는 plan 실행에서만 해소됩니다. 모든 클래스를\n\
+                             한 번에 보아야 하기 때문입니다.\n\
+      --class=NAME           한 클래스만 이관합니다. --src-volid, --src-hpgid 가 필요합니다.\n\
+      --src-volid=N          원본에서 그 클래스 HFID 의 volid\n\
+      --src-hpgid=N          원본에서 그 클래스 HFID 의 hpgid\n\
+      --limit=N              클래스마다 N 행에서 멈춥니다. 기본값: 제한 없음\n\
+      --commit-every=N       N 행마다 커밋합니다. 0 이면 끝에서 한 번. 기본값: 100000\n\
+      --dry-run              읽고 해석만 하고 쓰지 않습니다.\n\
+      --force                도구가 거절할 클래스도 이관합니다.\n

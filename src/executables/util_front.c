@@ -158,6 +158,11 @@ static ARG_MAP_TABLE ua_Diag_map[] = {
   {0, 0}
 };
 
+/* migratedb has no short options; every one of them is long-only */
+static ARG_MAP_TABLE ua_Migratedb_map[] = {
+  {0, 0}
+};
+
 static ARG_MAP_TABLE ua_Check_map[] = {
   {"-sa", "--" CHECK_SA_MODE_L},
   {"-cs", "--" CHECK_CS_MODE_L},
@@ -291,6 +296,7 @@ UTIL_MAP_TABLE ua_Util_table[] = {
   {"optimizedb", UTIL_OPTION_OPTIMIZEDB, ua_Optimize_map},
   {"installdb", UTIL_OPTION_INSTALLDB, ua_Install_map},
   {"diagdb", UTIL_OPTION_DIAGDB, ua_Diag_map},
+  {"migratedb", UTIL_OPTION_MIGRATEDB, ua_Migratedb_map},
   {"cleanfiledb", UTIL_OPTION_CLEANFILEDB, ua_cleanfiledb_map},
   {"checkdb", UTIL_OPTION_CHECKDB, ua_Check_map},
   {"killtran", UTIL_OPTION_KILLTRAN, ua_Killtran_map},
