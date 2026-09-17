@@ -2712,12 +2712,17 @@ struct pt_name_info
   SM_PARTITION *partition;	/* partition info reference */
   PT_NODE *path_correlation;	/* as in a.b.c [path_correlation].d.e.f */
   PT_TYPE_ENUM virt_type_enum;	/* type of oid's in ldb for proxies. */
-  PT_MISC_TYPE meta_class;	/* 0 or PT_META or PT_PARAMETER or PT_CLASS or PT_PLCSQL_LOCAL */
-  int plcsql_slot;		/* the frame slot, read only where meta_class is PT_PLCSQL_LOCAL */
+  PT_MISC_TYPE meta_class;	/* 0 or PT_META or PT_PARAMETER or PT_CLASS or PT_PLCSQL_LOCAL or
+				 * PT_PLCSQL_ROUTINE */
+  int plcsql_slot;		/* the frame slot where meta_class is PT_PLCSQL_LOCAL, and which of the
+				 * frame's local routines where it is PT_PLCSQL_ROUTINE */
   int plcsql_cursor_attr;	/* which attribute of a cursor this name is, PT_SP_CURSOR_ATTR_NONE
 				 * unless it was written as one. The cursor is in original. */
   int plcsql_reserved;		/* SQLCODE or SQLERRM where the name is one of them, and
 				 * PT_SP_RESERVED_NONE where it is a name the body wrote */
+  int plcsql_param_mode;	/* PT_SP_PARAM_IN, _OUT or _IN_OUT where the name is a routine's
+				 * parameter. A catalog routine's modes come from its signature; a
+				 * local one has none, so its header is where they are read */
   PT_NODE *default_value;	/* PT_VALUE the default value of the attribute */
   PT_NODE *constant_value;	/* constant value derived from qo_reduce_equality_terms () */
   unsigned int custom_print;
@@ -3444,6 +3449,15 @@ typedef enum
 #define PT_SP_DECL_EXCEPTION 0x20	/* e EXCEPTION; - a declaration that names an exception rather
 					 * than a variable, so it has no type and no initial value */
 #define PT_SP_HANDLER_OTHERS 0x40	/* WHEN OTHERS, which names no exception and catches the rest */
+#define PT_SP_DECL_ROUTINE   0x80	/* a declaration that names a local procedure or function: its
+					 * header is in params and ret_type and its body in body */
+#define PT_SP_CALL_LOCAL     0x01	/* CALL: the name is one the declaration part holds rather than
+					 * one the catalog does, and slot_base is its number */
+
+/* What a routine header wrote before a parameter. IN is also what nothing written means. */
+#define PT_SP_PARAM_IN		0
+#define PT_SP_PARAM_OUT		1
+#define PT_SP_PARAM_IN_OUT	2
 
 struct pt_sp_stmt_info
 {
@@ -3471,6 +3485,10 @@ struct pt_sp_stmt_info
   PT_NODE *sql;			/* SQL, CURSOR: the statement the SQL parser read out of sql_text */
   const char *sql_text;		/* SQL, CURSOR: the statement as written, which is what the SQL parser
 				 * is given - a hint lives in a comment, so nothing is normalised */
+  int slot_base;		/* DECL of a local routine: the run of frame slots its parameters and
+				 * locals were given. Resolution is the only place that knows it, and
+				 * lowering is where a call needs it */
+  int slot_cnt;
 };
 
 /* DO ENTITY INFO */

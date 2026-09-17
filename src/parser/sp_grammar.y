@@ -104,6 +104,7 @@ static PT_NODE *sp_make_case (PT_NODE * operand, PT_NODE * when_list, PT_NODE * 
 %type <node> jump_stmt label_decl_opt label_opt when_opt sql_stmt
 %type <node> raise_stmt handler_part_opt handler_list handler handler_name_list
 %type <node> cursor_decl cursor_params_opt open_stmt close_stmt fetch_stmt fetch_targets
+%type <number> param_mode_opt
 %type <node> routine param_list_opt param_list param
 %type <number> constant_opt reverse_opt
 
@@ -226,6 +227,7 @@ param
 
 		  if (name != NULL)
 		    {
+		      name->info.name.plcsql_param_mode = $2;
 		      name->data_type = $3;
 		      name->type_enum = ($3 != NULL) ? $3->type_enum : PT_TYPE_NONE;
 
@@ -236,11 +238,26 @@ param
 		}
 	;
 
+/* A catalog routine's modes come from its signature, so what the header wrote is dropped for one.
+ * A local routine has no signature, and a call has to know which of its arguments to give back,
+ * so the mode is kept on the parameter. */
 param_mode_opt
 	: /* empty */
+		{
+		  $$ = PT_SP_PARAM_IN;
+		}
 	| IN_
+		{
+		  $$ = PT_SP_PARAM_IN;
+		}
 	| OUT_
+		{
+		  $$ = PT_SP_PARAM_OUT;
+		}
 	| IN_ OUT_
+		{
+		  $$ = PT_SP_PARAM_IN_OUT;
+		}
 	;
 
 param_default_opt
@@ -353,9 +370,27 @@ decl_list
 		}
 	;
 
-/* v bigint;   c constant int := 7;   e exception; */
+/* v bigint;   c constant int := 7;   e exception;   procedure p as begin ... end; */
 decl
 	: cursor_decl
+	| routine_kind IDENT param_list_opt return_opt as_or_is block
+		{
+		  /* A local routine is declared where a variable is, and its body is an ordinary
+		   * block - which is what makes the rule recursive, because a block has a
+		   * declaration part of its own. The header is spelled the same way the top-level
+		   * one is, so which kind it is reads off ret_type rather than the keyword. */
+		  PT_NODE *node = sp_make_stmt (PT_SP_DECL, @$.first_line, @$.first_column);
+
+		  if (node)
+		    {
+		      node->info.sp_stmt.name = SP_AT (pt_name (sp_Parser, $2), @2);
+		      node->info.sp_stmt.flags = PT_SP_DECL_ROUTINE;
+		      node->info.sp_stmt.params = $3;
+		      node->info.sp_stmt.ret_type = $4;
+		      node->info.sp_stmt.body = $6;
+		    }
+		  $$ = node;
+		}
 	| IDENT EXCEPTION_ ';'
 		{
 		  PT_NODE *node = sp_make_stmt (PT_SP_DECL, @$.first_line, @$.first_column);

@@ -42,6 +42,11 @@ namespace cubxasl
     /* The procedure's own plan, when the client could build one. NULL means this call goes to
      * the PL engine, which is still the only way to run everything the grammar does not take. */
     xasl_node *plcsql;
+    /* Which of the running frame's local routines this call names, -1 for one the catalog holds.
+     * A local routine has no catalog entry, so sig is null for one and plcsql is not where its
+     * body lives - the declaration filed that on the frame, and the call shares the frame rather
+     * than making one. */
+    int local_routine;
   };
 };
 

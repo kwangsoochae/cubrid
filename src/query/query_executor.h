@@ -46,6 +46,7 @@ struct pred_expr_with_context;
 struct qfile_list_id;
 struct qfile_tuple_record;
 class regu_variable_node;
+struct regu_variable_list_node;
 struct tp_domain;
 struct valptr_list_node;
 struct xasl_node;
@@ -107,6 +108,17 @@ struct plcsql_cursor
   int cols_cnt;			/* how many columns its query gives back */
 };
 
+typedef struct plcsql_routine PLCSQL_ROUTINE;
+struct plcsql_routine
+{
+  xasl_node *body;		/* the block the declaration filed, NULL until the declaration runs -
+				 * the same way a cursor's query is recorded when its block runs */
+  int base_slot;		/* the run of frame slots the routine's own names take */
+  int slot_cnt;
+  int *modes;			/* what the header wrote before each parameter, in order */
+  int modes_cnt;
+};
+
 typedef struct plcsql_frame PLCSQL_FRAME;
 struct plcsql_frame
 {
@@ -115,6 +127,9 @@ struct plcsql_frame
 
   PLCSQL_CURSOR *cursors;
   int cursors_cnt;
+
+  PLCSQL_ROUTINE *routines;
+  int routines_cnt;
 
   PLCSQL_SIGNAL signal;
   int signal_level;		/* how many enclosing loops a labelled EXIT or CONTINUE leaves */
@@ -176,8 +191,10 @@ extern int qexec_clear_xasl_for_parallel_aptr (THREAD_ENTRY * thread_p, xasl_nod
 extern qfile_list_id *qexec_get_xasl_list_id (xasl_node * xasl);
 extern xasl_state *qexec_deep_copy_xasl_state (THREAD_ENTRY * thread_p, xasl_state * xasl_state);
 extern void qexec_free_xasl_state (THREAD_ENTRY * thread_p, xasl_state * xasl_state);
+extern int qexec_plcsql_run_local (THREAD_ENTRY * thread_p, xasl_state * xasl_state, int number,
+				   struct regu_variable_list_node *args, DB_VALUE * result);
 extern PLCSQL_FRAME *qexec_alloc_plcsql_frame (THREAD_ENTRY * thread_p, int locals_cnt, int cursors_cnt,
-					       PLCSQL_FRAME * caller);
+					       int routines_cnt, PLCSQL_FRAME * caller);
 extern void qexec_free_plcsql_frame (THREAD_ENTRY * thread_p, PLCSQL_FRAME * frame);
 extern int qexec_execute_plcsql (THREAD_ENTRY * thread_p, xasl_node * xasl, xasl_state * xstate);
 extern int qexec_call_plcsql (THREAD_ENTRY * thread_p, xasl_node * xasl, DB_VALUE * args, int args_cnt,

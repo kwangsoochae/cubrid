@@ -201,7 +201,10 @@ typedef enum
   PT_LOGIN,			/* user login capability */
   PT_NOLOGIN,
 
-  PT_PLCSQL_LOCAL		/* a name bound to a PL/CSQL frame slot */
+  PT_PLCSQL_LOCAL,		/* a name bound to a PL/CSQL frame slot */
+  PT_PLCSQL_ROUTINE		/* a name that is a call of a local routine rather than a value. A
+				 * function taking no argument is written with no parentheses, so the
+				 * two look alike until the name is looked up */
     // todo: separate into relevant enumerations
 } PT_MISC_TYPE;
 

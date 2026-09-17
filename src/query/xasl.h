@@ -505,6 +505,7 @@ typedef enum
   PLCSQL_OP_RAISE,		/* RAISE, RAISE_APPLICATION_ERROR */
   PLCSQL_OP_CURSOR,		/* OPEN, FETCH, CLOSE, OPEN FOR */
   PLCSQL_OP_CALL,		/* procedure call */
+  PLCSQL_OP_ROUTINE,		/* a local procedure or function the declaration part named */
   PLCSQL_OP_SQL,		/* one SQL statement, whose plan is this node's only child */
   PLCSQL_OP_HANDLER		/* one WHEN of a block's EXCEPTION part */
 } PLCSQL_OP;
@@ -548,6 +549,18 @@ typedef enum
 #define PLCSQL_JUMP_EXIT	0x01
 #define PLCSQL_JUMP_CONTINUE	0x02
 
+/* What a local routine's header wrote before a parameter. These mirror the parse tree's
+ * PT_SP_PARAM_*, which the XASL side cannot include; pt_to_plcsql_routine_decl () copies one onto
+ * the other rather than casting. An argument to anything but IN is written back after the call. */
+#define PLCSQL_PARAM_IN		0
+#define PLCSQL_PARAM_OUT	1
+#define PLCSQL_PARAM_IN_OUT	2
+
+/* plcsql_proc_node.flags of a PLCSQL_OP_CALL. A call with no flag set names a routine the catalog
+ * holds and carries it in a regu variable; a local one names a routine of the running frame and
+ * carries its number in target_slot. */
+#define PLCSQL_CALL_LOCAL	0x01
+
 /* plcsql_proc_node.flags of a PLCSQL_OP_CURSOR. The declaration is a node of its own because
  * the query belongs to it and not to any one OPEN: a cursor opened in two places is still one
  * cursor, and what CLOSE lets go of has to be what OPEN ran. */
@@ -587,6 +600,9 @@ struct plcsql_proc_node
   int flags;			/* op-specific: which loop form, which jump */
   REGU_VARIABLE *expr;		/* condition, assigned value, RAISE argument */
   REGU_VARIABLE *expr2;		/* LOOP: the upper bound of a FOR, NULL in every other form */
+  regu_variable_list_node *call_args;	/* CALL of a local routine: what to put in its parameters'
+					 * slots. They are read before any of them is written, because
+					 * a routine calling itself passes what those very slots hold */
   int target_slot;		/* frame slot an assignment writes, -1 when there is none.
 				 * CURSOR: which of the frame's cursors the OPEN or CLOSE acts on */
   int jump_levels;		/* JUMP: how many enclosing loops an EXIT or CONTINUE acts on - 1 for one
@@ -597,6 +613,18 @@ struct plcsql_proc_node
 				 * PL engine names, which for a statement that evaluates an expression is
 				 * where that expression begins rather than where the statement does */
   int column;
+  int routines_cnt;		/* BLOCK: how many local routines the frame holds, numbered flat over
+				 * the procedure the way cursors are. Only the outermost block carries
+				 * the count, because that is where the frame is made.
+				 * ROUTINE: which of them this declaration files */
+  int routine_base_slot;	/* ROUTINE: the first frame slot this routine's parameters and locals
+				 * take, and how many of them. A call puts that run aside and gives it
+				 * back, which is what lets a routine recurse while the variables of
+				 * whatever encloses it stay shared */
+  int routine_slot_cnt;
+  int *routine_modes;		/* ROUTINE: what the header wrote before each parameter, in order.
+				 * A call reads it to know which arguments to give back */
+  int routine_modes_cnt;
   int cursors_cnt;		/* BLOCK: how many cursors the frame holds, numbered flat over the
 				 * procedure the way the slots are, so again only the outermost
 				 * block carries the count */
