@@ -1331,12 +1331,20 @@ sp_make_data_type (PT_TYPE_ENUM type, int precision, int scale)
  *       arg2 takes ELSE, or an explicit NULL: the shape has no room for "nothing left to try",
  *       so the value that a CASE without ELSE yields has to be written out, and marked.
  *
- *       The two forms differ only in what an arm's WHEN part means. In the searched form it is
- *       already a condition. In the simple form it is a value, so each arm gets its own copy of
- *       the operand and an equality to compare them - copies rather than one shared node,
- *       because the arms are separate trees from here on and freeing one must not reach into
- *       another. This mirrors what the SQL grammar builds for CASE (csql_grammar.y), so
- *       everything below the parser meets the node shape it already knows.
+ *       The two forms differ only in what an arm's WHEN part means. In the simple form it is a
+ *       value, so each arm gets its own copy of the operand and an equality to compare them -
+ *       copies rather than one shared node, because the arms are separate trees from here on
+ *       and freeing one must not reach into another. This mirrors what the SQL grammar builds
+ *       for CASE (csql_grammar.y), so everything below the parser meets the node shape it
+ *       already knows.
+ *
+ *       In the searched form the WHEN part is a condition, and one that is not a comparison
+ *       gets an equality against TRUE. What reads the condition builds a predicate from a
+ *       PT_EXPR and, from anything else, a constant taken from a field only a PT_VALUE has
+ *       (xasl_generation.c, pt_to_pred_expr_local_with_arg ()). A body may write a boolean
+ *       where a condition goes - a variable, a parameter, a function call, any of them in
+ *       parentheses - and such an arm was taken whatever the boolean held. The equality also
+ *       leaves a NULL condition untaken, which is what the reference implementation does.
  */
 static PT_NODE *
 sp_make_case (PT_NODE * operand, PT_NODE * when_list, PT_NODE * else_expr)
@@ -1364,6 +1372,29 @@ sp_make_case (PT_NODE * operand, PT_NODE * when_list, PT_NODE * else_expr)
 	  arm->info.expr.arg3 = eq;
 	}
       parser_free_node (sp_Parser, operand);
+    }
+  else
+    {
+      for (arm = when_list; arm != NULL; arm = arm->next)
+	{
+	  PT_NODE *eq, *yes;
+
+	  if (arm->info.expr.arg3->node_type == PT_EXPR)
+	    {
+	      continue;
+	    }
+
+	  eq = parser_new_node (sp_Parser, PT_EXPR);
+	  yes = sp_make_boolean_literal (true);
+	  if (eq == NULL || yes == NULL)
+	    {
+	      return NULL;
+	    }
+	  eq->info.expr.op = PT_EQ;
+	  eq->info.expr.arg1 = arm->info.expr.arg3;
+	  eq->info.expr.arg2 = yes;
+	  arm->info.expr.arg3 = eq;
+	}
     }
 
   when_list->info.expr.continued_case = 0;
