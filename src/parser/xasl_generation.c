@@ -30227,7 +30227,7 @@ struct pt_plcsql_resolve_arg
 
 static XASL_NODE *pt_plcsql_refuse (PARSER_CONTEXT * parser, const char *reason);
 static PT_NODE *pt_plcsql_find_decl (PT_PLCSQL_SCOPE * scope, const char *name);
-static int pt_plcsql_bind_name (PARSER_CONTEXT * parser, PT_NODE * name, PT_PLCSQL_SCOPE * scope);
+static int pt_plcsql_bind_name (PARSER_CONTEXT * parser, PT_NODE * name, PT_PLCSQL_SCOPE * scope, PT_NODE ** value);
 static PT_NODE *pt_plcsql_bind_name_pre (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int *continue_walk);
 static int pt_plcsql_resolve_expr (PARSER_CONTEXT * parser, PT_NODE * expr, PT_PLCSQL_SCOPE * scope);
 static int pt_plcsql_bind_host_vars (PARSER_CONTEXT * parser, PT_NODE * sql, PT_PLCSQL_SCOPE * scope);
@@ -30386,9 +30386,14 @@ pt_plcsql_bind_cursor (PARSER_CONTEXT * parser, PT_NODE * stmt, PT_PLCSQL_SCOPE 
  *   parser(in) :
  *   name(in/out) : the PT_NAME to bind
  *   scope(in)  : the innermost scope at the point of reference
+ *   value(out) : where a name that nothing declares may be a function taking no argument -
+ *                SYS_DATE and the rest, which are written without parentheses - the node
+ *                built for it is left here and the caller puts it in the name's place.
+ *                NULL where the name is a place to write rather than a value to read, and
+ *                then an undeclared name is refused as before
  */
 static int
-pt_plcsql_bind_name (PARSER_CONTEXT * parser, PT_NODE * name, PT_PLCSQL_SCOPE * scope)
+pt_plcsql_bind_name (PARSER_CONTEXT * parser, PT_NODE * name, PT_PLCSQL_SCOPE * scope, PT_NODE ** value)
 {
   PT_NODE *decl;
 
@@ -30426,6 +30431,17 @@ pt_plcsql_bind_name (PARSER_CONTEXT * parser, PT_NODE * name, PT_PLCSQL_SCOPE * 
 
   if (decl == NULL)
     {
+      /* a declaration wins, which is what lets a body keep a variable named USER: nothing is
+       * looked up here until the scope has been asked and has no answer */
+      if (value != NULL)
+	{
+	  *value = parser_plcsql_builtin_func (parser, name->info.name.original, NULL);
+	  if (*value != NULL)
+	    {
+	      return NO_ERROR;
+	    }
+	}
+
       PT_ERRORmf (parser, name, MSGCAT_SET_PARSER_SEMANTIC, MSGCAT_SEMANTIC_IS_NOT_DEFINED, name->info.name.original);
       return ER_FAILED;
     }
@@ -30517,10 +30533,22 @@ pt_plcsql_bind_name_pre (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int
       return node;
     }
 
-  if (node->node_type == PT_NAME && pt_plcsql_bind_name (parser, node, resolve->scope) != NO_ERROR)
+  if (node->node_type == PT_NAME)
     {
-      resolve->error = ER_FAILED;
-      *continue_walk = PT_STOP_WALK;
+      PT_NODE *value = NULL;
+
+      if (pt_plcsql_bind_name (parser, node, resolve->scope, &value) != NO_ERROR)
+	{
+	  resolve->error = ER_FAILED;
+	  *continue_walk = PT_STOP_WALK;
+	}
+      else if (value != NULL)
+	{
+	  /* the expression keeps the node's place in the tree, so what follows it comes along */
+	  value->next = node->next;
+	  node->next = NULL;
+	  return value;
+	}
     }
 
   return node;
@@ -30573,7 +30601,7 @@ pt_plcsql_bind_host_vars_pre (PARSER_CONTEXT * parser, PT_NODE * node, void *arg
       return node;
     }
 
-  if (pt_plcsql_bind_name (parser, name, resolve->scope) != NO_ERROR)
+  if (pt_plcsql_bind_name (parser, name, resolve->scope, NULL) != NO_ERROR)
     {
       resolve->error = ER_FAILED;
       *continue_walk = PT_STOP_WALK;
@@ -30658,7 +30686,7 @@ pt_plcsql_take_into_list (PARSER_CONTEXT * parser, PT_NODE * stmt, PT_PLCSQL_SCO
 	  PT_ERRORc (parser, target, "an INTO target is not a name");
 	  return ER_FAILED;
 	}
-      if (pt_plcsql_bind_name (parser, target, scope) != NO_ERROR)
+      if (pt_plcsql_bind_name (parser, target, scope, NULL) != NO_ERROR)
 	{
 	  return ER_FAILED;
 	}
@@ -30798,7 +30826,7 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
 
 	case PT_SP_ASSIGN:
 	  if (pt_plcsql_resolve_expr (parser, stmt->info.sp_stmt.expr, scope) != NO_ERROR
-	      || pt_plcsql_bind_name (parser, stmt->info.sp_stmt.name, scope) != NO_ERROR)
+	      || pt_plcsql_bind_name (parser, stmt->info.sp_stmt.name, scope, NULL) != NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }
