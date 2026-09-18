@@ -143,6 +143,9 @@ struct plcsql_frame
 				 * NULL outside one. A bare RAISE sends it back out as it stands */
   int raising;			/* the exception a RAISE announced, -1 when the failure in hand came
 				 * from the engine instead and the block reads its error code */
+  int app_code;			/* the number a RAISE_APPLICATION_ERROR was written with, which is what
+				 * SQLCODE shows for it. Only read while the exception in hand is
+				 * PLCSQL_EXC_APP_ERROR, and saved across a handler the way exc is */
   bool positioned;		/* whether the error in hand already names where it was raised. The
 				 * innermost statement that fails is the one that knows, and the blocks
 				 * it travels out through must not name themselves instead */

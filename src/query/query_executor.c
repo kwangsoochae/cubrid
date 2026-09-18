@@ -3807,6 +3807,7 @@ qexec_alloc_plcsql_frame (THREAD_ENTRY * thread_p, int locals_cnt, int cursors_c
   frame->exc = -1;
   frame->caught = NULL;
   frame->raising = -1;
+  frame->app_code = 0;
   frame->positioned = false;
   frame->placed = NULL;
   frame->msg = NULL;
@@ -29377,10 +29378,13 @@ qexec_plcsql_test (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu, XASL_STATE * x
  *
  * note: this is only for a failure that named no exception on its way out. A RAISE, a SQL
  *       statement, a cursor operation and a SELECT ... INTO all name their own, because the
- *       error code cannot tell them apart. The reference implementation does not decide by error code alone either: it
- *       runs built-in functions through a query, so a built-in that fails raises SQL_ERROR
- *       where the same failure in a native expression is an invalid value. What is listed
- *       below is measured against it rather than derived.
+ *       error code cannot tell them apart. The reference implementation does not decide by
+ *       error code alone either: it computes the operators and the assignment conversions
+ *       itself, and runs every built-in through "select f(?) from dual" - so a built-in that
+ *       fails raises SQL_ERROR where the same failure in an operator is an invalid value.
+ *       The code can stand in for that split only as far as the two sides raise different
+ *       ones, which is what the list below is: the codes a sweep of the built-ins and the
+ *       operators in plain SQL found on the built-in side alone.
  */
 static int
 qexec_plcsql_exc_of_error (int err)
@@ -29400,9 +29404,25 @@ qexec_plcsql_exc_of_error (int err)
        * expression - the error code is what both shapes have in common. */
       return PLCSQL_EXC_SQL_ERROR;
 
+    case ER_DATE_CONVERSION:
+    case ER_OBJ_INVALID_ARGUMENTS:
+    case ER_DATE_EXCEED_LIMIT:
+    case ER_QSTR_INVALID_FORMAT:
+    case ER_QSTR_MISMATCHING_ARGUMENTS:
+    case ER_TIME_CONVERSION:
+    case ER_TIMESTAMP_CONVERSION:
+    case ER_QPROC_OVERFLOW_POWER:
+    case ER_QPROC_FUNCTION_ARG_ERROR:
+    case ER_QPROC_OVERFLOW_EXP:
+    case ER_QPROC_STRING_SIZE_TOO_BIG:
     case ER_QSTR_TONUM_FORMAT_MISMATCH:
-      /* the one built-in a baseline case pins. The rest of that family is unmeasured and is
-       * left to read as an invalid value rather than guessed at. */
+      /* What a built-in fails with. Two of these are not as clean as the rest.
+       *   ER_QPROC_STRING_SIZE_TOO_BIG: '||' reaches it as well, but the reference
+       *     implementation joins strings in Java and never stops at that limit, so there is
+       *     no answer of its own that keeping it on the operator side would preserve.
+       *   CAST is missing from here on purpose: the reference runs it as SQL and answers
+       *     SQL_ERROR, yet it fails with the code an assignment fails with, so naming that
+       *     code would move the assignment too. The grammar does not take CAST yet. */
       return PLCSQL_EXC_SQL_ERROR;
 
     default:
@@ -29474,7 +29494,9 @@ qexec_plcsql_set_sqlstate (PLCSQL_FRAME * frame, int exc, const char *msg)
 
   pr_clear_value (code);
   pr_clear_value (errm);
-  db_make_int (code, (exc < 0) ? 0 : qexec_plcsql_sqlcode (exc));
+  /* an application error is the one exception whose number is not fixed by which exception it
+   * is: RAISE_APPLICATION_ERROR was written with it, and the frame is where it was left */
+  db_make_int (code, (exc < 0) ? 0 : (exc == PLCSQL_EXC_APP_ERROR) ? frame->app_code : qexec_plcsql_sqlcode (exc));
 
   return db_make_string_copy (errm, (exc < 0) ? "no error" : (msg != NULL) ? msg : qexec_plcsql_exc_name (exc));
 }
@@ -29495,7 +29517,7 @@ qexec_plcsql_handle (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xas
 {
   PLCSQL_FRAME *frame = xasl_state->plcsql_frame;
   char *outer_caught, *outer_msg;
-  int caught, outer_exc, i, j, rc;
+  int caught, outer_exc, outer_app, i, j, rc;
 
   if (xasl->proc.plcsql.handlers_cnt == 0)
     {
@@ -29525,6 +29547,7 @@ qexec_plcsql_handle (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xas
        * its own line. What the failure was stays on the frame instead - a bare RAISE inside
        * sends it back out, and SQLCODE and SQLERRM read it. */
       outer_exc = frame->exc;
+      outer_app = frame->app_code;
       outer_caught = frame->caught;
       /* what the handler around this one was reading, taken from the slot rather than kept in
        * step with it: the slot is where SQLERRM lives and there is nowhere else it can drift to */
@@ -29544,6 +29567,7 @@ qexec_plcsql_handle (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xas
 
       /* an inner handler ran on its own exception and the one around it goes back to reading
        * its own, which is 0 and "no error" once the outermost one is done */
+      frame->app_code = outer_app;
       (void) qexec_plcsql_set_sqlstate (frame, outer_exc, outer_msg);
       if (outer_msg != NULL)
 	{
@@ -29878,6 +29902,81 @@ done:
   return rc;
 }
 
+/*
+ * qexec_plcsql_raise_app () - run a RAISE_APPLICATION_ERROR
+ *   return: ER_FAILED - the statement is a failure, and never anything else
+ *   thread_p(in) :
+ *   xasl(in)   : the PLCSQL_OP_RAISE whose expr is the number and expr2 the sentence
+ *   xasl_state(in) :
+ *
+ * note: both are expressions, so the number is judged here rather than at CREATE. The
+ *       reference implementation raises what a body declared - not a predefined exception -
+ *       so only WHEN OTHERS takes this, and what SQLCODE shows is the number itself.
+ */
+static int
+qexec_plcsql_raise_app (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state)
+{
+  PLCSQL_FRAME *frame = xasl_state->plcsql_frame;
+  DB_VALUE *value = NULL;
+  DB_VALUE as_str;
+  const char *msg;
+  int code = 0;
+  bool is_null = false;
+
+  if (qexec_plcsql_as_int (thread_p, xasl->proc.plcsql.expr, xasl_state, &code, &is_null) != NO_ERROR)
+    {
+      return ER_FAILED;
+    }
+
+  if (is_null)
+    {
+      /* the reference implementation has no answer written for this one: the number reaches a
+       * check that dereferences it, and what comes back out is the program error its outermost
+       * catch turns anything unaccounted for into */
+      frame->raising = PLCSQL_EXC_PROGRAM_ERROR;
+      qexec_plcsql_place (thread_p, frame, xasl, qexec_plcsql_exc_name (PLCSQL_EXC_PROGRAM_ERROR));
+      return ER_FAILED;
+    }
+
+  if (code <= PLCSQL_EXC_USER_FIRST)
+    {
+      /* the numbers at and below PLCSQL_EXC_USER_FIRST belong to the exceptions PL/CSQL
+       * already has, and the reference implementation refuses them with its own wording */
+      frame->raising = PLCSQL_EXC_VALUE_ERROR;
+      qexec_plcsql_place (thread_p, frame, xasl, "exception codes below 1001 are reserved");
+      return ER_FAILED;
+    }
+
+  if (qexec_plcsql_fetch_value (thread_p, xasl->proc.plcsql.expr2, xasl_state, &value) != NO_ERROR)
+    {
+      return ER_FAILED;
+    }
+
+  db_make_null (&as_str);
+  if (value != NULL && !DB_IS_NULL (value)
+      && tp_value_cast (value, &as_str, tp_domain_resolve_default (DB_TYPE_VARCHAR), false) != DOMAIN_COMPATIBLE)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_DATATYPE, 0);
+      pr_clear_value (&as_str);
+      return ER_FAILED;
+    }
+
+  /* a sentence that says nothing reads as the wording every declared exception reads as,
+   * which is what the reference implementation puts there for an empty one */
+  msg = DB_IS_NULL (&as_str) ? NULL : db_get_string (&as_str);
+  if (msg == NULL || *msg == '\0')
+    {
+      msg = qexec_plcsql_exc_name (PLCSQL_EXC_APP_ERROR);
+    }
+
+  frame->raising = PLCSQL_EXC_APP_ERROR;
+  frame->app_code = code;
+  qexec_plcsql_place (thread_p, frame, xasl, msg);
+  pr_clear_value (&as_str);
+
+  return ER_FAILED;
+}
+
 static int
 qexec_execute_plcsql_stmt_inner (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state)
 {
@@ -29910,6 +30009,11 @@ qexec_execute_plcsql_stmt_inner (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL
       return NO_ERROR;
 
     case PLCSQL_OP_RAISE:
+      if ((xasl->proc.plcsql.flags & PLCSQL_RAISE_APP) != 0)
+	{
+	  return qexec_plcsql_raise_app (thread_p, xasl, xasl_state);
+	}
+
       /* A RAISE is a failure like any other: what tells the block which handler to look for is
        * the number, and what the error carries is the sentence. A bare one names nothing and
        * sends on what the handler it stands in caught. */

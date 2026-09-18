@@ -30610,8 +30610,9 @@ pt_plcsql_take_into_list (PARSER_CONTEXT * parser, PT_NODE * stmt, PT_PLCSQL_SCO
  *   name(in) :
  *
  * note: the order is the manual's, and the reference implementation keeps the same list
- *       (SymbolStack.addPredefinedExceptions). $APP_ERROR is left out because nothing raises
- *       it yet - RAISE_APPLICATION_ERROR is its own task.
+ *       (SymbolStack.addPredefinedExceptions). $APP_ERROR is left out because it is not a
+ *       name a handler can write: RAISE_APPLICATION_ERROR raises it, and only WHEN OTHERS
+ *       takes one.
  */
 static int
 pt_plcsql_exc_number (const char *name)
@@ -30842,9 +30843,16 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
 
 	case PT_SP_RAISE:
 	  /* the name is an exception, not a value, so what it binds to is a number and not a
-	   * slot. A bare RAISE names nothing and re-raises whatever the handler caught. */
+	   * slot. A bare RAISE names nothing and re-raises whatever the handler caught, and
+	   * RAISE_APPLICATION_ERROR names nothing either - it carries two expressions. */
 	  if (stmt->info.sp_stmt.name != NULL
 	      && pt_plcsql_bind_exception (parser, stmt->info.sp_stmt.name, scope) != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
+	  if ((stmt->info.sp_stmt.flags & PT_SP_RAISE_APP) != 0
+	      && (pt_plcsql_resolve_expr (parser, stmt->info.sp_stmt.expr, scope) != NO_ERROR
+		  || pt_plcsql_resolve_expr (parser, stmt->info.sp_stmt.expr2, scope) != NO_ERROR))
 	    {
 	      return ER_FAILED;
 	    }
@@ -32515,10 +32523,12 @@ pt_plcsql_place (XASL_NODE * xasl, PT_NODE * stmt)
    * the expression the statement evaluates, and that is the place the PL engine names. A
    * cursor statement keeps something else there - the arguments an OPEN passes, the targets a
    * FETCH writes - and neither is what the statement does, so those are reported from the
-   * statement itself. */
+   * statement itself. So is a RAISE_APPLICATION_ERROR, whose expressions are what it raises
+   * with rather than what it evaluates - measured at the keyword, not at the number. */
   bool on_expr = (stmt->info.sp_stmt.expr != NULL
 		  && stmt->info.sp_stmt.op != PT_SP_OPEN
-		  && stmt->info.sp_stmt.op != PT_SP_CLOSE && stmt->info.sp_stmt.op != PT_SP_FETCH);
+		  && stmt->info.sp_stmt.op != PT_SP_CLOSE && stmt->info.sp_stmt.op != PT_SP_FETCH
+		  && stmt->info.sp_stmt.op != PT_SP_RAISE);
   PT_NODE *at = on_expr ? stmt->info.sp_stmt.expr : stmt;
 
   if (xasl != NULL)
@@ -32809,6 +32819,18 @@ pt_to_plcsql_stmt_inner (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * re
 	  return NULL;
 	}
       pt_plcsql_place (xasl, stmt);
+
+      if ((stmt->info.sp_stmt.flags & PT_SP_RAISE_APP) != 0)
+	{
+	  xasl->proc.plcsql.flags = PLCSQL_RAISE_APP;
+	  xasl->proc.plcsql.expr = pt_plcsql_expr_to_regu (parser, &stmt->info.sp_stmt.expr);
+	  xasl->proc.plcsql.expr2 = pt_plcsql_expr_to_regu (parser, &stmt->info.sp_stmt.expr2);
+	  if (xasl->proc.plcsql.expr == NULL || xasl->proc.plcsql.expr2 == NULL)
+	    {
+	      return NULL;
+	    }
+	  return xasl;
+	}
 
       /* A bare RAISE re-raises what the handler it stands in caught, and says so by naming
        * nothing: the slot stays at the -1 a new node is born with. */

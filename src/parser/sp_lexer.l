@@ -94,6 +94,7 @@ static SP_KEYWORD sp_Keywords[] = {
   {"out", OUT_, PT_TYPE_NONE},
   {"procedure", PROCEDURE_, PT_TYPE_NONE},
   {"raise", RAISE_, PT_TYPE_NONE},
+  {"raise_application_error", RAISE_APPLICATION_ERROR_, PT_TYPE_NONE},
   {"real", TYPE_KEYWORD, PT_TYPE_FLOAT},
   {"replace", REPLACE_, PT_TYPE_NONE},
   {"return", RETURN_, PT_TYPE_NONE},

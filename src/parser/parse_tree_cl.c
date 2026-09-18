@@ -8329,7 +8329,7 @@ pt_print_sp_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list)
 static PARSER_VARCHAR *
 pt_print_sp_stmt (PARSER_CONTEXT * parser, PT_NODE * p)
 {
-  PARSER_VARCHAR *q = 0, *r1;
+  PARSER_VARCHAR *q = 0, *r1, *r2;
   int form;
 
   switch (p->info.sp_stmt.op)
@@ -8554,6 +8554,17 @@ pt_print_sp_stmt (PARSER_CONTEXT * parser, PT_NODE * p)
       break;
 
     case PT_SP_RAISE:
+      if (p->info.sp_stmt.flags & PT_SP_RAISE_APP)
+	{
+	  r1 = pt_print_bytes (parser, p->info.sp_stmt.expr);
+	  r2 = pt_print_bytes (parser, p->info.sp_stmt.expr2);
+	  q = pt_append_nulstring (parser, q, "raise_application_error (");
+	  q = pt_append_varchar (parser, q, r1);
+	  q = pt_append_nulstring (parser, q, ", ");
+	  q = pt_append_varchar (parser, q, r2);
+	  q = pt_append_nulstring (parser, q, ");");
+	  break;
+	}
       q = pt_append_nulstring (parser, q, "raise");
       if (p->info.sp_stmt.name != NULL)
 	{

@@ -3453,6 +3453,8 @@ typedef enum
 					 * header is in params and ret_type and its body in body */
 #define PT_SP_CALL_LOCAL     0x01	/* CALL: the name is one the declaration part holds rather than
 					 * one the catalog does, and slot_base is its number */
+#define PT_SP_RAISE_APP      0x01	/* RAISE: RAISE_APPLICATION_ERROR, whose number and sentence are
+					 * the two expressions rather than a name */
 
 /* What a routine header wrote before a parameter. IN is also what nothing written means. */
 #define PT_SP_PARAM_IN		0
