@@ -20,9 +20,9 @@
  * migratedb_heap.h - walk a heap file of an older CUBRID database, with guava code.
  *
  * Read-only, and it does not boot anything: the volume files are opened directly and the
- * pages are interpreted with guava's slotted-page structs.  The file manager is not usable
- * here because FILE_HEADER differs between releases, so the pages are reached through
- * HEAP_CHAIN.next_vpid instead.
+ * pages are interpreted with guava's slotted-page structs.  A heap's pages are reached through
+ * HEAP_CHAIN.next_vpid, the same link the engine's own scan follows -- see heap_vpid_next ().
+ * Asking the file manager instead is not an option anyway: FILE_HEADER differs between releases.
  *
  * Everything that depends on which release wrote the volume lives in MIGRATE_SRC_FORMAT, so
  * adding a source release means adding a row to migrate_Known_formats[] and verifying it --
