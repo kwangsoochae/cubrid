@@ -1395,14 +1395,14 @@ dumped by the source release's unloaddb -s, and rebuilding indexes afterwards ar
 not done here.\n\
 \n\
 valid options:\n\
-      --plan=FILE            migrate every class listed in FILE; one line per class:\n\
-                             <class-name> <source-hfid-volid> <source-hfid-hpgid>\n\
-                             taken from the source release's diagdb -d 7 dump.\n\
+      --plan=FILE            migrate every class listed in FILE, one name per line.\n\
+                             Where its rows are is read from the source volumes; a line\n\
+                             may still give it as <class-name> <volid> <hpgid>.\n\
                              Only a plan run resolves object references, because it\n\
                              has to see every class at once.\n\
-      --class=NAME           migrate one class; needs --src-volid and --src-hpgid\n\
-      --src-volid=N          volid of that class's HFID in the source database\n\
-      --src-hpgid=N          hpgid of that class's HFID in the source database\n\
+      --class=NAME           migrate one class\n\
+      --src-volid=N          volid of that class's HFID, if it has to be given by hand\n\
+      --src-hpgid=N          hpgid of that class's HFID, if it has to be given by hand\n\
       --limit=N              stop after N rows per class; default: no limit\n\
       --commit-every=N       commit every N rows; 0 commits once at the end; default: 100000\n\
       --dry-run              read and decode only, write nothing\n\

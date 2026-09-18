@@ -78,6 +78,21 @@ struct migrate_src_format
 
   /* on-disk size of a fixed NUMERIC in that release; this one uses a different constant */
   int numeric_disk_size;
+
+  /*
+   * Where the bootstrap chain's values sit in that release -- see migrate_src_class_map (),
+   * which reads every class's name and HFID out of the source volumes, so that a migration
+   * does not need the source release installed to dump its catalog.
+   */
+  int volheader_boot_hfid_offset;	/* DISK_VOLUME_HEADER.boot_hfid, from the start of the page */
+  int dbparm_rootclass_hfid_offset;	/* BOOT_DB_PARM.rootclass_hfid, from the start of the record */
+  int class_var_att_count;	/* variable attributes in a class record (ORC_CLASS_VAR_ATT_COUNT) */
+  int class_name_index;		/* which of them holds the name (ORC_NAME_INDEX) */
+  int class_hfid_fileid_offset;	/* the class's own HFID inside its fixed block (ORC_HFID_*_OFFSET) */
+  int class_hfid_volid_offset;
+  int class_hfid_pageid_offset;
+  int class_flags_offset;	/* the class's flag word, same block (ORC_CLASS_FLAGS) */
+  int class_flag_system;	/* the bit that marks a system class (SM_CLASSFLAG_SYSTEM) */
 };
 
 /*
@@ -189,6 +204,35 @@ extern int migrate_heap_follow_relocation (char *reloc_rec, int reloc_len, char 
  */
 extern int migrate_heap_read_overflow (char *bigone_rec, int reclen, char *scratch_iopage,
 				       char **buf, int *buf_size, char **out_rec, int *out_len);
+
+/*
+ * One class of the source database, as the source itself names it: owner-qualified, and with
+ * the HFID the source recorded for it.  A class with no heap of its own -- a view -- comes
+ * back with a null HFID rather than being left out, since that is what the source holds.
+ */
+typedef struct migrate_class_entry MIGRATE_CLASS_ENTRY;
+struct migrate_class_entry
+{
+  char name[2 * SM_MAX_IDENTIFIER_LENGTH + 2];	/* owner "." class, both at their maximum */
+  HFID hfid;
+  bool is_system;		/* the source marks it a system class: the target made its own */
+};
+
+/*
+ * Read every class of the source database out of its volumes: the volume header names the boot
+ * heap, whose first record names the heap the classes live in, and each record there is one
+ * class.  The source release's binaries are not involved.
+ *
+ * The caller owns *entries and frees it with migrate_src_class_map_free ().  Decoding a class
+ * name goes through the string reader, so the locale has to be up by the time this is called --
+ * in the utility that means after the target database is booted.
+ */
+extern int migrate_src_class_map (const MIGRATE_SRC_FORMAT * fmt, MIGRATE_CLASS_ENTRY ** entries, int *count);
+extern void migrate_src_class_map_free (MIGRATE_CLASS_ENTRY * entries);
+
+/* Find one class in that map by its owner-qualified name; case is compared as the source wrote it. */
+extern const MIGRATE_CLASS_ENTRY *migrate_src_class_find (const MIGRATE_CLASS_ENTRY * entries, int count,
+							  const char *name);
 
 /*
  * Rebuild the source's record shape for a class from the target class's representation.  What

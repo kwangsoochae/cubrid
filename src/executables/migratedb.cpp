@@ -718,18 +718,99 @@ read_plan (const char *path, std::vector<class_plan> &plan)
     {
       char name[512];
       int volid, hpgid;
-      if (line[0] == '#' || sscanf (line, "%511s %d %d", name, &volid, &hpgid) != 3)
+      int n = sscanf (line, "%511s %d %d", name, &volid, &hpgid);
+
+      if (line[0] == '#' || n < 1)
 	{
 	  continue;
 	}
       class_plan cp;
       cp.classname = name;
-      cp.src_volid = volid;
-      cp.src_hpgid = hpgid;
+      if (n == 3)
+	{
+	  /* an HFID given here overrides what the source volumes say -- see resolve_src_hfids () */
+	  cp.src_volid = volid;
+	  cp.src_hpgid = hpgid;
+	}
       plan.push_back (std::move (cp));
     }
   fclose (fp);
   return plan.empty () ? ER_FAILED : NO_ERROR;
+}
+
+/*
+ * Fill in where each class's rows live in the source.  The source database carries that itself
+ * -- migrate_src_class_map () reads it out of the volumes -- so migrating does not need the
+ * source release installed.  An HFID named on the command line or in the plan is left as given:
+ * it is the way out for a source whose class records this cannot read.
+ */
+static int
+resolve_src_hfids (std::vector<class_plan> &plan)
+{
+  MIGRATE_CLASS_ENTRY *classes = NULL;
+  int count = 0;
+  bool any_missing = false;
+
+  for (const class_plan &cp : plan)
+    {
+      if (cp.src_hpgid == NULL_PAGEID)
+	{
+	  any_missing = true;
+	  break;
+	}
+    }
+  if (!any_missing)
+    {
+      return NO_ERROR;
+    }
+
+  if (migrate_src_class_map (&g_src_format, &classes, &count) != NO_ERROR)
+    {
+      fprintf (stderr, "cannot read the source's classes from its volumes; name the heap instead with"
+	       " --src-volid and --src-hpgid, which the source release's diagdb -d 7 dump gives\n");
+      return ER_FAILED;
+    }
+  printf ("source classes: %d, read from the volumes\n", count);
+
+  for (class_plan &cp : plan)
+    {
+      if (cp.src_hpgid != NULL_PAGEID)
+	{
+	  continue;
+	}
+
+      const MIGRATE_CLASS_ENTRY *entry = migrate_src_class_find (classes, count, cp.classname.c_str ());
+      if (entry == NULL)
+	{
+	  fprintf (stderr, "%s: the source database has no such class\n", cp.classname.c_str ());
+	  cp.skipped = true;
+	  continue;
+	}
+      if (HFID_IS_NULL (&entry->hfid))
+	{
+	  /* a view, or a class whose heap was never created: there are no rows to read */
+	  fprintf (stderr, "%s: the source gives it no heap of its own\n", cp.classname.c_str ());
+	  cp.skipped = true;
+	  continue;
+	}
+      if (entry->is_system && !g_force)
+	{
+	  /*
+	   * The target made its own when it was created, so copying the source's rows on top
+	   * leaves two of everything -- a second row in dual, say, which every query through it
+	   * would then see.
+	   */
+	  fprintf (stderr, "%s: the source marks it a system class; the target already has its own"
+		   " (--force migrates it anyway)\n", cp.classname.c_str ());
+	  cp.skipped = true;
+	  continue;
+	}
+      cp.src_volid = entry->hfid.vfid.volid;
+      cp.src_hpgid = entry->hfid.hpgid;
+    }
+
+  migrate_src_class_map_free (classes);
+  return NO_ERROR;
 }
 
 static void
@@ -801,12 +882,16 @@ migratedb (UTIL_FUNCTION_ARG *arg)
 	}
       class_plan cp;
       cp.classname = class_name;
-      cp.src_volid = utility_get_option_int_value (arg_map, MIGRATEDB_SRC_VOLID_S);
-      cp.src_hpgid = utility_get_option_int_value (arg_map, MIGRATEDB_SRC_HPGID_S);
-      if (cp.src_hpgid <= 0)
+
+      /*
+       * Where that class's heap is comes from the source volumes; the options are only for
+       * naming it by hand, for a source whose class records this cannot read.
+       */
+      int opt_hpgid = utility_get_option_int_value (arg_map, MIGRATEDB_SRC_HPGID_S);
+      if (opt_hpgid > 0)
 	{
-	  fprintf (stderr, "--class needs --src-volid and --src-hpgid from the source diagdb dump.\n");
-	  return EXIT_FAILURE;
+	  cp.src_volid = utility_get_option_int_value (arg_map, MIGRATEDB_SRC_VOLID_S);
+	  cp.src_hpgid = opt_hpgid;
 	}
       plan.push_back (std::move (cp));
     }
@@ -845,6 +930,14 @@ migratedb (UTIL_FUNCTION_ARG *arg)
     }
   g_thread_p = thread_get_thread_entry_info ();
 
+  /* the source's own catalog says where each class's rows are; booting set up the string reader */
+  if (resolve_src_hfids (plan) != NO_ERROR)
+    {
+      db_shutdown ();
+      migrate_heap_close ();
+      return EXIT_FAILURE;
+    }
+
   struct timeval t0, t1;
   gettimeofday (&t0, NULL);
 
@@ -852,6 +945,10 @@ migratedb (UTIL_FUNCTION_ARG *arg)
   printf ("=== pass 1: rows ===\n");
   for (class_plan &cp : plan)
     {
+      if (cp.skipped)
+	{
+	  continue;		/* resolving where its rows are already ruled it out */
+	}
       printf ("%s (11.4 heap %d|%d)\n", cp.classname.c_str (), cp.src_volid, cp.src_hpgid);
       if (open_class (cp) != NO_ERROR)
 	{

@@ -24,11 +24,14 @@
 #include <cerrno>
 #include <map>
 #include <string>
+#include <vector>
 
 #include <fcntl.h>
 #include <unistd.h>
 
 #include "error_code.h"
+#include "error_manager.h"
+#include "disk_manager.h"
 #include "object_representation.h"
 #include "object_primitive.h"
 #include "intl_support.h"
@@ -44,16 +47,53 @@
 /*
  * Known source releases.  A row is only here once its on-disk shapes have been checked against
  * that release's headers; an unverified release is refused rather than guessed at.
+ *
+ * Adding a release means adding a row and checking these against that release's sources.  The
+ * ones the row carries:
+ *
+ *   release, compatibility        release_string.c -- both are read back from the source's log
+ *                                 header, so they have to be what that release writes there
+ *   io_page_size, log_page_size   also read from the log header; the row records what this was
+ *                                 verified against
+ *   page_prefix_size              sizeof (FILEIO_PAGE_RESERVED)                      file_io.h
+ *   page_reserved_size            that plus sizeof (FILEIO_PAGE_WATERMARK)
+ *   hdr_next_vpid_offset          offsetof (HEAP_HDR_STATS, next_vpid)              heap_file.c
+ *   moved_to_variable             PR_TYPE::variable_p, per type              object_primitive.c
+ *   numeric_disk_size             the size a fixed NUMERIC takes on disk
+ *   volheader_boot_hfid_offset    offsetof (DISK_VOLUME_HEADER, boot_hfid)       disk_manager.c
+ *   dbparm_rootclass_hfid_offset  offsetof (BOOT_DB_PARM, rootclass_hfid)            boot_sr.c
+ *   class_*                       the ORC_* constants               object_representation.h,
+ *                                 except class_flag_system: SM_CLASSFLAG_SYSTEM in class_object.h
+ *
+ * And the shapes the walk reads as raw images, which no row can express -- if one of these
+ * differs in a release, the code needs a branch, not a row:
+ *
+ *   SPAGE_HEADER, SPAGE_SLOT                              slotted_page.h
+ *   HEAP_CHAIN                                            heap_file.c
+ *   OVERFLOW_FIRST_PART, OVERFLOW_REST_PART               overflow_file.c
+ *   VFID, HFID                                            storage_common.h -- copied straight
+ *                                                         out of the volume header and the boot
+ *                                                         parameter record
+ *   the record header and its variable table              OR_* in object_representation.h
+ *   the string encoding a class name is written in        object_primitive.c
+ *
+ * All of the above were compared between 11.4 and this release.  Only two things differed: the
+ * types in moved_to_variable, and NUMERIC's size on disk.
  */
 static const DB_TYPE mv_11_4[] = { DB_TYPE_CHAR, DB_TYPE_NCHAR_DEPRECATED, DB_TYPE_NUMERIC };
 
 static const MIGRATE_SRC_FORMAT migrate_Known_formats[] =
 {
-  /* release compat io log prefix reserved next_vpid moved_to_variable n numeric_disk_size
+  /*
+   * release compat io log prefix reserved next_vpid moved_to_variable n numeric_disk_size
+   * boot_hfid rootclass_hfid class_var_att_count class_name_index class_hfid fileid volid pageid
    *
    * 11.4's fixed NUMERIC is DB_NUMERIC_BUF_SIZE, which was 2 * sizeof (double) there and is 17 here.
    */
-  {"11.4", 11.4f, 0, 0, 32, 40, 16, mv_11_4, (int) (sizeof (mv_11_4) / sizeof (mv_11_4[0])), 16},
+  {
+    "11.4", 11.4f, 0, 0, 32, 40, 16, mv_11_4, (int) (sizeof (mv_11_4) / sizeof (mv_11_4[0])), 16,
+    96, 20, 17, 0, 16, 20, 24, 64, 1
+  },
 };
 
 static const int migrate_Known_format_count =
@@ -755,6 +795,230 @@ migrate_heap_read_overflow (char *bigone_rec, int reclen, char *scratch_iopage,
   *out_rec = *buf;
   *out_len = total;
   return NO_ERROR;
+}
+
+/*
+ * Reading the classes of the source database out of its volumes.
+ *
+ * The engine bootstraps without a catalog, and this walks the same way it does: the volume
+ * header names a heap kept for booting, its first record names the heap the class objects
+ * live in, and each record there is one class, carrying its name and its HFID.  Where those
+ * values sit is per release, so they come from MIGRATE_SRC_FORMAT rather than from this
+ * release's structures -- see the checklist above migrate_Known_formats[].
+ */
+
+typedef struct migrate_class_map_ctx MIGRATE_CLASS_MAP_CTX;
+struct migrate_class_map_ctx
+{
+  const MIGRATE_SRC_FORMAT *fmt;
+  std::vector<MIGRATE_CLASS_ENTRY> *out;
+  char *scratch;		/* an IO page of its own: the walk is using the caller's */
+  char **ovf_buf;
+  int *ovf_size;
+  HFID rootclass_hfid;		/* filled by the first callback, used by the second */
+  bool have_rootclass;
+  int unreadable;
+};
+
+/*
+ * Resolve a slot to the bytes of the row it stands for: a row that moved lives elsewhere, and
+ * one too big for a page is in the overflow file.  Both already have their own readers.
+ */
+static int
+migrate_class_map_row (MIGRATE_CLASS_MAP_CTX *ctx, int rec_type, char **rec, int *reclen)
+{
+  if (rec_type == REC_RELOCATION)
+    {
+      return migrate_heap_follow_relocation (*rec, *reclen, ctx->scratch, rec, reclen);
+    }
+  if (rec_type == REC_BIGONE)
+    {
+      return migrate_heap_read_overflow (*rec, *reclen, ctx->scratch, ctx->ovf_buf, ctx->ovf_size, rec, reclen);
+    }
+  return NO_ERROR;
+}
+
+static int
+migrate_class_map_dbparm (char *rec, int reclen, int rec_type, const OID *src_oid, void *arg)
+{
+  MIGRATE_CLASS_MAP_CTX *ctx = (MIGRATE_CLASS_MAP_CTX *) arg;
+  int need = ctx->fmt->dbparm_rootclass_hfid_offset + (int) sizeof (HFID);
+
+  if (ctx->have_rootclass)
+    {
+      return NO_ERROR;		/* the boot parameters are the first record; the rest is not ours */
+    }
+  if (migrate_class_map_row (ctx, rec_type, &rec, &reclen) != NO_ERROR)
+    {
+      return ER_FAILED;
+    }
+  if (reclen < need)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
+      return ER_FAILED;
+    }
+
+  /* written as a structure image, so it is copied out rather than decoded */
+  memcpy (&ctx->rootclass_hfid, rec + ctx->fmt->dbparm_rootclass_hfid_offset, sizeof (HFID));
+  ctx->have_rootclass = true;
+  return NO_ERROR;
+}
+
+static int
+migrate_class_map_class (char *rec, int reclen, int rec_type, const OID *src_oid, void *arg)
+{
+  MIGRATE_CLASS_MAP_CTX *ctx = (MIGRATE_CLASS_MAP_CTX *) arg;
+  const MIGRATE_SRC_FORMAT *fmt = ctx->fmt;
+
+  if (migrate_class_map_row (ctx, rec_type, &rec, &reclen) != NO_ERROR)
+    {
+      ctx->unreadable++;
+      return NO_ERROR;
+    }
+
+  int hdr = OR_HEADER_SIZE (rec);
+  int offset_size = OR_GET_OFFSET_SIZE (rec);
+  char *var_table = rec + hdr;
+  int name_off = OR_VAR_TABLE_ELEMENT_OFFSET_INTERNAL (var_table, fmt->class_name_index, offset_size);
+  int name_len = OR_VAR_TABLE_ELEMENT_LENGTH_INTERNAL (var_table, fmt->class_name_index, offset_size);
+
+  if (name_off <= 0 || name_len <= 0 || hdr + name_off + name_len > reclen)
+    {
+      ctx->unreadable++;
+      return NO_ERROR;
+    }
+
+  OR_BUF buf;
+  DB_VALUE value;
+  or_init (&buf, rec + hdr + name_off, name_len);
+  if (tp_String.data_readval (&buf, &value, NULL, name_len, false, NULL, 0) != NO_ERROR)
+    {
+      ctx->unreadable++;
+      return NO_ERROR;
+    }
+
+  const char *name = db_get_string (&value);
+  if (name == NULL || *name == '\0')
+    {
+      pr_clear_value (&value);
+      ctx->unreadable++;
+      return NO_ERROR;
+    }
+
+  MIGRATE_CLASS_ENTRY entry;
+  memset (&entry, 0, sizeof (entry));
+  strncpy (entry.name, name, sizeof (entry.name) - 1);
+  pr_clear_value (&value);
+
+  char *fixed = rec + OR_FIXED_ATTRIBUTES_OFFSET_INTERNAL (rec, fmt->class_var_att_count, offset_size);
+  entry.hfid.vfid.fileid = OR_GET_INT (fixed + fmt->class_hfid_fileid_offset);
+  entry.hfid.vfid.volid = (VOLID) OR_GET_INT (fixed + fmt->class_hfid_volid_offset);
+  entry.hfid.hpgid = OR_GET_INT (fixed + fmt->class_hfid_pageid_offset);
+  entry.is_system = (OR_GET_INT (fixed + fmt->class_flags_offset) & fmt->class_flag_system) != 0;
+
+  ctx->out->push_back (entry);
+  return NO_ERROR;
+}
+
+int
+migrate_src_class_map (const MIGRATE_SRC_FORMAT *fmt, MIGRATE_CLASS_ENTRY **entries, int *count)
+{
+  std::vector<MIGRATE_CLASS_ENTRY> found;
+  MIGRATE_CLASS_MAP_CTX ctx;
+  MIGRATE_HEAP_STATS stats;
+  char *scratch = NULL;
+  char *ovf_buf = NULL;
+  int ovf_size = 0;
+  int error = NO_ERROR;
+  HFID boot_hfid;
+  char *page;
+
+  *entries = NULL;
+  *count = 0;
+
+  scratch = (char *) malloc (hp_io_page_size);
+  if (scratch == NULL)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, (size_t) hp_io_page_size);
+      return ER_FAILED;
+    }
+
+  ctx.fmt = fmt;
+  ctx.out = &found;
+  ctx.scratch = scratch;
+  ctx.ovf_buf = &ovf_buf;
+  ctx.ovf_size = &ovf_size;
+  HFID_SET_NULL (&ctx.rootclass_hfid);
+  ctx.have_rootclass = false;
+  ctx.unreadable = 0;
+
+  /* the boot heap, named by the first volume's header */
+  page = migrate_heap_read_page (0, DISK_VOLHEADER_PAGE, scratch);
+  if (page == NULL)
+    {
+      error = ER_FAILED;
+      goto end;
+    }
+  memcpy (&boot_hfid, page + fmt->volheader_boot_hfid_offset, sizeof (HFID));
+  if (HFID_IS_NULL (&boot_hfid))
+    {
+      error = ER_FAILED;
+      goto end;
+    }
+
+  error = migrate_heap_walk (boot_hfid.vfid.volid, boot_hfid.hpgid, migrate_class_map_dbparm, &ctx, &stats);
+  if (error != NO_ERROR || !ctx.have_rootclass || HFID_IS_NULL (&ctx.rootclass_hfid))
+    {
+      error = ER_FAILED;
+      goto end;
+    }
+
+  error = migrate_heap_walk (ctx.rootclass_hfid.vfid.volid, ctx.rootclass_hfid.hpgid, migrate_class_map_class,
+			     &ctx, &stats);
+  if (error != NO_ERROR)
+    {
+      goto end;
+    }
+  if (ctx.unreadable > 0)
+    {
+      /* a class this cannot read is a class the caller cannot ask for by name */
+      fprintf (stderr, "warning: %d class record(s) of the source could not be read\n", ctx.unreadable);
+    }
+
+  *entries = (MIGRATE_CLASS_ENTRY *) malloc (sizeof (MIGRATE_CLASS_ENTRY) * (found.size () + 1));
+  if (*entries == NULL)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1,
+	      sizeof (MIGRATE_CLASS_ENTRY) * (found.size () + 1));
+      error = ER_FAILED;
+      goto end;
+    }
+  memcpy (*entries, found.data (), sizeof (MIGRATE_CLASS_ENTRY) * found.size ());
+  *count = (int) found.size ();
+
+end:
+  free (scratch);
+  free (ovf_buf);
+  return error;
+}
+
+void
+migrate_src_class_map_free (MIGRATE_CLASS_ENTRY *entries)
+{
+  free (entries);
+}
+
+const MIGRATE_CLASS_ENTRY *
+migrate_src_class_find (const MIGRATE_CLASS_ENTRY *entries, int count, const char *name)
+{
+  for (int i = 0; i < count; i++)
+    {
+      if (strcmp (entries[i].name, name) == 0)
+	{
+	  return &entries[i];
+	}
+    }
+  return NULL;
 }
 
 /*
