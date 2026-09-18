@@ -24130,10 +24130,16 @@ PT_HINT parser_hint_table[] = {
  *       say the statement cannot be cached or prepared, which nothing would read again until
  *       the next statement is parsed and which would therefore carry into it.
  *
- *       Those same flags are how a body is kept from calling a function whose value is not the
- *       same twice - SYS_DATE, RAND and the rest. A query settles where such a call is
- *       evaluated and a procedure's plan does not yet, so one is refused rather than folded
- *       into a plan that outlives the call.
+ *       One of those flags is not a refusal, though. The clock functions set cannot_cache
+ *       along with si_datetime, which is the client saying it will send the time it parsed at:
+ *       a statement kept in its cache would answer with that same time ever after. A body is
+ *       built and run on the server and reads the server's clock at every call - measured over
+ *       three calls two seconds apart, and the plan cache of PLCSQL-50012 does not freeze it -
+ *       so that reason does not reach here, and si_datetime is what tells the two apart.
+ *
+ *       What stays refused is the rest: a serial's next value, ROW_COUNT, LAST_INSERT_ID and
+ *       TRACE_STATS, each of which answers from where the statement was run rather than from
+ *       the server alone.
  */
 PT_NODE *
 parser_plcsql_builtin_func (PARSER_CONTEXT * parser, const char *name, PT_NODE * args)
@@ -24141,14 +24147,16 @@ parser_plcsql_builtin_func (PARSER_CONTEXT * parser, const char *name, PT_NODE *
   PARSER_CONTEXT *saved_parser = this_parser;
   bool saved_cannot_cache = parser_cannot_cache;
   bool saved_cannot_prepare = parser_cannot_prepare;
+  bool saved_si_datetime = parser_si_datetime;
   PT_NODE *node;
 
   this_parser = parser;
   parser_cannot_cache = false;
   parser_cannot_prepare = false;
+  parser_si_datetime = false;
 
   node = parser_keyword_func (name, args);
-  if (node != NULL && (parser_cannot_cache || parser_cannot_prepare))
+  if (node != NULL && !parser_si_datetime && (parser_cannot_cache || parser_cannot_prepare))
     {
       node = NULL;
     }
@@ -24156,6 +24164,7 @@ parser_plcsql_builtin_func (PARSER_CONTEXT * parser, const char *name, PT_NODE *
   this_parser = saved_parser;
   parser_cannot_cache = saved_cannot_cache;
   parser_cannot_prepare = saved_cannot_prepare;
+  parser_si_datetime = saved_si_datetime;
 
   return node;
 }
