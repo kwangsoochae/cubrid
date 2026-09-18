@@ -24117,6 +24117,152 @@ PT_HINT parser_hint_table[] = {
 
 
 
+/* The functions this grammar spells out as rules of its own rather than holding in
+ * keyword.c's functions[] table. parser_keyword_func () walks that table and so cannot reach
+ * these, which is why a body writing UPPER (s) was asking the catalog for a routine named
+ * UPPER. Only the ones whose syntax is a plain argument list are here: TRIM (BOTH x FROM y),
+ * POSITION (x IN y) and CAST (x AS t) put a keyword between their arguments and cannot be
+ * built from a list. Derived from the rules below rather than written by hand, and the names
+ * are the ones keyword.c and csql_lexer.l map to those rules.
+ *
+ * Some names the rules do offer are left out because a PL/CSQL body never sends them here.
+ * IF, MOD, REPLACE and TIMESTAMP are that grammar's own keywords and INSERT and TRUNCATE begin
+ * a SQL statement in it, so all six arrive as tokens rather than as a name (sp_lexer.l says so
+ * where it takes a statement's text). LEVEL and SYS_CONNECT_BY_PATH mean something only inside
+ * a hierarchical query, BENCHMARK measures elapsed time, and DEFAULT is not called at all.
+ *
+ * Every name left here was measured: each one built and ran in a body, the ones taking a date
+ * or a number given an argument of that type. */
+static const struct sp_expr_func
+{
+  const char *name;
+  PT_OP_TYPE op;
+  int argc;
+} sp_Expr_funcs[] = {
+  {"add_months",          PT_ADD_MONTHS,          2},
+  {"adddate",             PT_ADDDATE,             2},
+  {"bit_length",          PT_BIT_LENGTH,          1},
+  {"charset",             PT_CHARSET,             1},
+  {"chr",                 PT_CHR,                 2},
+  {"clob_to_char",        PT_CLOB_TO_CHAR,        2},
+  {"collation",           PT_COLLATION,           1},
+  {"database",            PT_DATABASE,            0},
+  {"current_date",        PT_CURRENT_DATE,        0},
+  {"current_datetime",    PT_CURRENT_DATETIME,    0},
+  {"current_time",        PT_CURRENT_TIME,        0},
+  {"current_timestamp",   PT_CURRENT_TIMESTAMP,   0},
+  {"current_user",        PT_CURRENT_USER,        0},
+  {"day",                 PT_DAYF,                1},
+  {"hour",                PT_HOURF,               1},
+  {"ifnull",              PT_IFNULL,              2},
+  {"index_prefix",        PT_INDEX_PREFIX,        3},
+  {"isnull",              PT_ISNULL,              1},
+  {"lcase",               PT_LOWER,               1},
+  {"left",                PT_LEFT,                2},
+  {"localtime",           PT_CURRENT_TIMESTAMP,   0},
+  {"localtimestamp",      PT_CURRENT_TIMESTAMP,   0},
+  {"lower",               PT_LOWER,               1},
+  {"minute",              PT_MINUTEF,             1},
+  {"month",               PT_MONTHF,              1},
+  {"octet_length",        PT_OCTET_LENGTH,        1},
+  {"right",               PT_RIGHT,               2},
+  {"schema",              PT_SCHEMA,              0},
+  {"second",              PT_SECONDF,             1},
+  {"str_to_date",         PT_STR_TO_DATE,         2},
+  {"subdate",             PT_SUBDATE,             2},
+  {"substring",           PT_SUBSTRING,           3},
+  {"sys_date",            PT_SYS_DATE,            0},
+  {"sys_datetime",        PT_SYS_DATETIME,        0},
+  {"sys_time",            PT_SYS_TIME,            0},
+  {"sys_timestamp",       PT_SYS_TIMESTAMP,       0},
+  {"system_user",         PT_CURRENT_USER,        0},
+  {"translate",           PT_TRANSLATE,           3},
+  {"trim",                PT_TRIM,                1},
+  {"ucase",               PT_UPPER,               1},
+  {"upper",               PT_UPPER,               1},
+  {"user",                PT_CURRENT_USER,        0},
+  {"year",                PT_YEARF,               1},
+};
+
+/* The same, for the names the rules build as a PT_FUNCTION. A zero upper bound is what the
+ * rules use for "no upper bound". */
+static const struct sp_list_func
+{
+  const char *name;
+  FUNC_CODE code;
+  int min_args;
+  int max_args;
+} sp_List_funcs[] = {
+  {"elt",                 F_ELT,                  1, 0},
+  {"json_array",          F_JSON_ARRAY,           0, 0},
+  {"json_contains",       F_JSON_CONTAINS,        2, 3},
+  {"json_contains_path",  F_JSON_CONTAINS_PATH,   3, 0},
+  {"json_depth",          F_JSON_DEPTH,           1, 1},
+  {"json_extract",        F_JSON_EXTRACT,         2, 0},
+  {"json_get_all_paths",  F_JSON_GET_ALL_PATHS,   1, 1},
+  {"json_keys",           F_JSON_KEYS,            0, 2},
+  {"json_length",         F_JSON_LENGTH,          1, 2},
+  {"json_merge",          F_JSON_MERGE,           2, 0},
+  {"json_merge_patch",    F_JSON_MERGE_PATCH,     2, 0},
+  {"json_merge_preserve", F_JSON_MERGE,           2, 0},
+  {"json_pretty",         F_JSON_PRETTY,          1, 1},
+  {"json_quote",          F_JSON_QUOTE,           1, 1},
+  {"json_remove",         F_JSON_REMOVE,          2, 0},
+  {"json_search",         F_JSON_SEARCH,          3, 0},
+  {"json_type",           F_JSON_TYPE,            1, 1},
+  {"json_unquote",        F_JSON_UNQUOTE,         1, 1},
+  {"json_valid",          F_JSON_VALID,           1, 1},
+  {"regexp_count",        F_REGEXP_COUNT,         2, 4},
+  {"regexp_instr",        F_REGEXP_INSTR,         2, 6},
+  {"regexp_like",         F_REGEXP_LIKE,          2, 3},
+  {"regexp_replace",      F_REGEXP_REPLACE,       3, 6},
+  {"regexp_substr",       F_REGEXP_SUBSTR,        2, 5},
+};
+
+/*
+ * parser_plcsql_keyword_func () - the function this grammar has a rule of its own for
+ *   return: the node, or NULL where no rule names this function or the count does not fit
+ *   parser(in) : the parser the body is being read on
+ *   name(in)   : the name written before the argument list
+ *   args(in)   : the arguments, already read
+ */
+static PT_NODE *
+parser_plcsql_keyword_func (PARSER_CONTEXT * parser, const char *name, PT_NODE * args)
+{
+  int argc = parser_count_list (args);
+  size_t i;
+
+  for (i = 0; i < sizeof (sp_Expr_funcs) / sizeof (sp_Expr_funcs[0]); i++)
+    {
+      if (intl_mbs_casecmp (sp_Expr_funcs[i].name, name) != 0)
+	{
+	  continue;
+	}
+      if (argc != sp_Expr_funcs[i].argc)
+	{
+	  return NULL;
+	}
+
+      /* the arguments are a list and an expression holds three of them apart, so the list is
+       * taken apart here rather than passed along */
+      return parser_make_expression (parser, sp_Expr_funcs[i].op, args,
+				     (args != NULL) ? args->next : NULL,
+				     (args != NULL && args->next != NULL) ? args->next->next : NULL);
+    }
+
+  for (i = 0; i < sizeof (sp_List_funcs) / sizeof (sp_List_funcs[0]); i++)
+    {
+      if (intl_mbs_casecmp (sp_List_funcs[i].name, name) != 0)
+	{
+	  continue;
+	}
+      return parser_make_func_with_arg_count (parser, sp_List_funcs[i].code, args,
+					      sp_List_funcs[i].min_args, sp_List_funcs[i].max_args);
+    }
+
+  return NULL;
+}
+
 /*
  * parser_plcsql_builtin_func () - the engine's own function of this name, for a PL/CSQL body
  *   return: the node, NULL when no such function or when it is not one a body may have
@@ -24135,7 +24281,7 @@ PT_HINT parser_hint_table[] = {
  *       a statement kept in its cache would answer with that same time ever after. A body is
  *       built and run on the server and reads the server's clock at every call - measured over
  *       three calls two seconds apart, and the plan cache of PLCSQL-50012 does not freeze it -
- *       so that reason does not reach here, and si_datetime is what tells the two apart.
+ *       so that reason does not reach here and si_datetime is what tells the two apart.
  *
  *       What stays refused is the rest: a serial's next value, ROW_COUNT, LAST_INSERT_ID and
  *       TRACE_STATS, each of which answers from where the statement was run rather than from
@@ -24159,6 +24305,10 @@ parser_plcsql_builtin_func (PARSER_CONTEXT * parser, const char *name, PT_NODE *
   if (node != NULL && !parser_si_datetime && (parser_cannot_cache || parser_cannot_prepare))
     {
       node = NULL;
+    }
+  if (node == NULL)
+    {
+      node = parser_plcsql_keyword_func (parser, name, args);
     }
 
   this_parser = saved_parser;
