@@ -141,6 +141,7 @@ struct dblink_dml_state
 typedef enum dblink_dml_kind
 {
   DBLINK_DML_INSERT,		/* uses attr_names/num_attrs/num_bind */
+  DBLINK_DML_REPLACE,		/* same params as INSERT: REPLACE takes an INSERT's shape */
   DBLINK_DML_DELETE,		/* uses key_col/op */
   DBLINK_DML_UPDATE		/* uses set_text, and key_col/op when the statement has a WHERE */
 } DBLINK_DML_KIND;

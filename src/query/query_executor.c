@@ -12899,11 +12899,12 @@ qexec_collect_remote_update_set_vals (XASL_NODE * xasl, DB_VALUE ** vals, int nu
 
 /*
  * qexec_execute_remote_dml_sink () - Push local values to a remote table via CCI: streaming a local SELECT
- *   into a remote INSERT, or sending one remote DELETE or UPDATE per value from a local subquery.
+ *   into a remote INSERT or REPLACE, or sending one remote DELETE or UPDATE per value from a local
+ *   subquery.
  *   return: NO_ERROR or ER_FAILED
  *   xasl(in)       : XASL Tree block (INSERT_PROC, DELETE_PROC or UPDATE_PROC with sink.is_remote set)
  *   xasl_state(in) : XASL state
- *   kind(in)       : which of the three the proc is
+ *   kind(in)       : which statement the proc sends -- INSERT and REPLACE both read INSERT_PROC
  *
  * Note: The aptrs producing xasl->val_list have already been executed and xasl->list_id set up by the
  *       caller (qexec_execute_insert directly; the DELETE and UPDATE wrappers for theirs, since the local
@@ -12938,6 +12939,7 @@ qexec_execute_remote_dml_sink (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_S
   switch (kind)
     {
     case DBLINK_DML_INSERT:
+    case DBLINK_DML_REPLACE:
       {
 	INSERT_PROC_NODE *insert = &xasl->proc.insert;
 
@@ -13043,6 +13045,7 @@ qexec_execute_remote_dml_sink (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_S
 	  switch (kind)
 	    {
 	    case DBLINK_DML_INSERT:
+	    case DBLINK_DML_REPLACE:
 	      {
 		INSERT_PROC_NODE *insert = &xasl->proc.insert;
 
@@ -13534,7 +13537,8 @@ qexec_execute_insert (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xa
 
   if (insert->sink.is_remote)
     {
-      return qexec_execute_remote_dml_sink (thread_p, xasl, xasl_state, DBLINK_DML_INSERT);
+      return qexec_execute_remote_dml_sink (thread_p, xasl, xasl_state,
+					    insert->do_replace ? DBLINK_DML_REPLACE : DBLINK_DML_INSERT);
     }
 
   /* We might not hold a strong enough lock on the class yet. */
