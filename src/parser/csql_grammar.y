@@ -24131,6 +24131,10 @@ PT_HINT parser_hint_table[] = {
  * where it takes a statement's text). LEVEL and SYS_CONNECT_BY_PATH mean something only inside
  * a hierarchical query, BENCHMARK measures elapsed time, and DEFAULT is not called at all.
  *
+ * A rule is reached by every spelling keyword.c and csql_lexer.l map to its token, so a token
+ * with more than one name needs a row for each - SYSDATE beside SYS_DATE. Deriving the table
+ * one row per token is what left those out to begin with.
+ *
  * Every name left here was measured: each one built and ran in a body, the ones taking a date
  * or a number given an argument of that type. */
 static const struct sp_expr_func
@@ -24172,9 +24176,13 @@ static const struct sp_expr_func
   {"subdate",             PT_SUBDATE,             2},
   {"substring",           PT_SUBSTRING,           3},
   {"sys_date",            PT_SYS_DATE,            0},
+  {"sysdate",             PT_SYS_DATE,            0},
   {"sys_datetime",        PT_SYS_DATETIME,        0},
+  {"sysdatetime",         PT_SYS_DATETIME,        0},
   {"sys_time",            PT_SYS_TIME,            0},
+  {"systime",             PT_SYS_TIME,            0},
   {"sys_timestamp",       PT_SYS_TIMESTAMP,       0},
+  {"systimestamp",        PT_SYS_TIMESTAMP,       0},
   {"system_user",         PT_CURRENT_USER,        0},
   {"translate",           PT_TRANSLATE,           3},
   {"trim",                PT_TRIM,                1},
