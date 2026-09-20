@@ -19811,10 +19811,14 @@ pt_to_insert_xasl_remote_select (PARSER_CONTEXT * parser, PT_NODE * statement)
     }
   else
     {
-      /* positional insert: dblink_dml_open builds INSERT INTO t VALUES (?,?) */
+      /* positional: dblink_dml_open builds INSERT INTO t VALUES (?,?), or REPLACE INTO for a REPLACE */
       insert->remote_attr_names = NULL;
       insert->remote_num_attrs = 0;
     }
+
+  /* the statement kind the sink sends: REPLACE INTO when the statement asked for it, INSERT INTO
+   * otherwise. Already serialized with the rest of INSERT_PROC, so the server reads it as it stands. */
+  insert->do_replace = (statement->info.insert.do_replace ? 1 : 0);
 
   /* no local class for remote INSERT */
   OID_SET_NULL (&insert->class_oid);
