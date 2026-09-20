@@ -24125,6 +24125,14 @@ PT_HINT parser_hint_table[] = {
  * built from a list. Derived from the rules below rather than written by hand, and the names
  * are the ones keyword.c and csql_lexer.l map to those rules.
  *
+ * LEFT, RIGHT and SUBSTRING were here and are not any more. A body reaching them answered
+ * differently from the same call written as SQL, and only where the argument was written as a
+ * negative literal: both arguments being constant, the call is read at compile time, and what
+ * that reading gives back is not what running it gives. SUBSTRING ('12345', -6, 4) is NULL
+ * through the one and '1234' through the other, while the same value passed in a variable is
+ * '1234' either way. The reading is below this table and is answered elsewhere; until then a
+ * body takes these three the way it did before, which is not at all.
+ *
  * Some names the rules do offer are left out because a PL/CSQL body never sends them here.
  * IF, MOD, REPLACE and TIMESTAMP are that grammar's own keywords and INSERT and TRUNCATE begin
  * a SQL statement in it, so all six arrive as tokens rather than as a name (sp_lexer.l says so
@@ -24162,19 +24170,16 @@ static const struct sp_expr_func
   {"index_prefix",        PT_INDEX_PREFIX,        3},
   {"isnull",              PT_ISNULL,              1},
   {"lcase",               PT_LOWER,               1},
-  {"left",                PT_LEFT,                2},
   {"localtime",           PT_CURRENT_TIMESTAMP,   0},
   {"localtimestamp",      PT_CURRENT_TIMESTAMP,   0},
   {"lower",               PT_LOWER,               1},
   {"minute",              PT_MINUTEF,             1},
   {"month",               PT_MONTHF,              1},
   {"octet_length",        PT_OCTET_LENGTH,        1},
-  {"right",               PT_RIGHT,               2},
   {"schema",              PT_SCHEMA,              0},
   {"second",              PT_SECONDF,             1},
   {"str_to_date",         PT_STR_TO_DATE,         2},
   {"subdate",             PT_SUBDATE,             2},
-  {"substring",           PT_SUBSTRING,           3},
   {"sys_date",            PT_SYS_DATE,            0},
   {"sysdate",             PT_SYS_DATE,            0},
   {"sys_datetime",        PT_SYS_DATETIME,        0},
