@@ -30229,7 +30229,7 @@ static XASL_NODE *pt_plcsql_refuse (PARSER_CONTEXT * parser, const char *reason)
 static PT_NODE *pt_plcsql_find_decl (PT_PLCSQL_SCOPE * scope, const char *name);
 static int pt_plcsql_bind_name (PARSER_CONTEXT * parser, PT_NODE * name, PT_PLCSQL_SCOPE * scope, PT_NODE ** value);
 static PT_NODE *pt_plcsql_bind_name_pre (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int *continue_walk);
-static int pt_plcsql_resolve_expr (PARSER_CONTEXT * parser, PT_NODE * expr, PT_PLCSQL_SCOPE * scope);
+static int pt_plcsql_resolve_expr (PARSER_CONTEXT * parser, PT_NODE ** expr, PT_PLCSQL_SCOPE * scope);
 static int pt_plcsql_bind_host_vars (PARSER_CONTEXT * parser, PT_NODE * sql, PT_PLCSQL_SCOPE * scope);
 static int pt_plcsql_cursor_attr_slot (PT_NODE * name);
 static int pt_plcsql_bind_cursor (PARSER_CONTEXT * parser, PT_NODE * stmt, PT_PLCSQL_SCOPE * scope);
@@ -30509,7 +30509,7 @@ pt_plcsql_bind_name_pre (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int
        * local one standing in an expression is not lowered yet. */
       PT_NODE *callee = node->info.method_call.method_name;
 
-      if (pt_plcsql_resolve_expr (parser, node->info.method_call.arg_list, resolve->scope) != NO_ERROR)
+      if (pt_plcsql_resolve_expr (parser, &node->info.method_call.arg_list, resolve->scope) != NO_ERROR)
 	{
 	  resolve->error = ER_FAILED;
 	  *continue_walk = PT_STOP_WALK;
@@ -30558,22 +30558,27 @@ pt_plcsql_bind_name_pre (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int
  * pt_plcsql_resolve_expr () - bind every name in one procedural expression
  *   return: NO_ERROR or ER_FAILED
  *   parser(in) :
- *   expr(in/out) :
+ *   expr(in/out) : where the expression is held, rewritten when its root is replaced
  *   scope(in)  : the innermost scope at the point of reference
  */
 static int
-pt_plcsql_resolve_expr (PARSER_CONTEXT * parser, PT_NODE * expr, PT_PLCSQL_SCOPE * scope)
+pt_plcsql_resolve_expr (PARSER_CONTEXT * parser, PT_NODE ** expr, PT_PLCSQL_SCOPE * scope)
 {
   PT_PLCSQL_RESOLVE_ARG resolve;
 
-  if (expr == NULL)
+  if (expr == NULL || *expr == NULL)
     {
       return NO_ERROR;
     }
 
   resolve.scope = scope;
   resolve.error = NO_ERROR;
-  (void) parser_walk_tree (parser, expr, pt_plcsql_bind_name_pre, &resolve, NULL, NULL);
+
+  /* The hook answers a name with the expression that name stands for, and the walk puts that
+   * answer in the place the name held - except when the name IS the root, which the walk can
+   * only hand back. Dropping it left the name where a body wrote SYSDATE as a whole
+   * expression, and XASL generation has nothing to read a name like that from. */
+  *expr = parser_walk_tree (parser, *expr, pt_plcsql_bind_name_pre, &resolve, NULL, NULL);
 
   return resolve.error;
 }
@@ -30825,7 +30830,7 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
 	  break;
 
 	case PT_SP_ASSIGN:
-	  if (pt_plcsql_resolve_expr (parser, stmt->info.sp_stmt.expr, scope) != NO_ERROR
+	  if (pt_plcsql_resolve_expr (parser, &stmt->info.sp_stmt.expr, scope) != NO_ERROR
 	      || pt_plcsql_bind_name (parser, stmt->info.sp_stmt.name, scope, NULL) != NO_ERROR)
 	    {
 	      return ER_FAILED;
@@ -30833,7 +30838,7 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
 	  break;
 
 	case PT_SP_IF:
-	  if (pt_plcsql_resolve_expr (parser, stmt->info.sp_stmt.expr, scope) != NO_ERROR
+	  if (pt_plcsql_resolve_expr (parser, &stmt->info.sp_stmt.expr, scope) != NO_ERROR
 	      || pt_plcsql_resolve_stmt_list (parser, stmt->info.sp_stmt.body, scope, next_slot, next_cursor,
 					      next_exc, next_routine) != NO_ERROR
 	      || pt_plcsql_resolve_stmt_list (parser, stmt->info.sp_stmt.else_body, scope, next_slot, next_cursor,
@@ -30846,8 +30851,8 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
 	case PT_SP_LOOP:
 	  /* the bounds of a FOR are read once, before the variable exists, so they stand in the
 	   * enclosing scope - the same one a WHILE condition stands in */
-	  if (pt_plcsql_resolve_expr (parser, stmt->info.sp_stmt.expr, scope) != NO_ERROR
-	      || pt_plcsql_resolve_expr (parser, stmt->info.sp_stmt.expr2, scope) != NO_ERROR)
+	  if (pt_plcsql_resolve_expr (parser, &stmt->info.sp_stmt.expr, scope) != NO_ERROR
+	      || pt_plcsql_resolve_expr (parser, &stmt->info.sp_stmt.expr2, scope) != NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }
@@ -30876,7 +30881,7 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
 	  /* the routine's own name is looked for among the declarations first, because one
 	   * declared there hides a catalog routine of the same name. Only when nothing holds it
 	   * is it left to be resolved against the catalog at lowering. */
-	  if (pt_plcsql_resolve_expr (parser, stmt->info.sp_stmt.expr->info.method_call.arg_list, scope) != NO_ERROR
+	  if (pt_plcsql_resolve_expr (parser, &stmt->info.sp_stmt.expr->info.method_call.arg_list, scope) != NO_ERROR
 	      || pt_plcsql_bind_call (parser, stmt, scope) != NO_ERROR)
 	    {
 	      return ER_FAILED;
@@ -30889,7 +30894,7 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
 	  /* a procedure's RETURN carries no value and a jump written without WHEN no condition,
 	   * so there may be nothing to bind. The label is not a name the frame holds - it is
 	   * matched against the loops around it when the jump is lowered. */
-	  if (pt_plcsql_resolve_expr (parser, stmt->info.sp_stmt.expr, scope) != NO_ERROR)
+	  if (pt_plcsql_resolve_expr (parser, &stmt->info.sp_stmt.expr, scope) != NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }
@@ -30908,7 +30913,7 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
 	case PT_SP_OPEN:
 	  /* the arguments are ordinary expressions of the frame; the cursor's name is not one
 	   * of its values and is matched against the declarations instead */
-	  if (pt_plcsql_resolve_expr (parser, stmt->info.sp_stmt.expr, scope) != NO_ERROR
+	  if (pt_plcsql_resolve_expr (parser, &stmt->info.sp_stmt.expr, scope) != NO_ERROR
 	      || pt_plcsql_bind_cursor (parser, stmt, scope) != NO_ERROR)
 	    {
 	      return ER_FAILED;
@@ -30926,7 +30931,7 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
 	  /* the targets are names the statement writes, and they are bound the way a name being
 	   * read is - what tells them apart is only which side of the assignment they sit on */
 	  if (pt_plcsql_bind_cursor (parser, stmt, scope) != NO_ERROR
-	      || pt_plcsql_resolve_expr (parser, stmt->info.sp_stmt.expr, scope) != NO_ERROR)
+	      || pt_plcsql_resolve_expr (parser, &stmt->info.sp_stmt.expr, scope) != NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }
@@ -30942,8 +30947,8 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
 	      return ER_FAILED;
 	    }
 	  if ((stmt->info.sp_stmt.flags & PT_SP_RAISE_APP) != 0
-	      && (pt_plcsql_resolve_expr (parser, stmt->info.sp_stmt.expr, scope) != NO_ERROR
-		  || pt_plcsql_resolve_expr (parser, stmt->info.sp_stmt.expr2, scope) != NO_ERROR))
+	      && (pt_plcsql_resolve_expr (parser, &stmt->info.sp_stmt.expr, scope) != NO_ERROR
+		  || pt_plcsql_resolve_expr (parser, &stmt->info.sp_stmt.expr2, scope) != NO_ERROR))
 	    {
 	      return ER_FAILED;
 	    }
@@ -31045,7 +31050,7 @@ pt_plcsql_resolve_block (PARSER_CONTEXT * parser, PT_NODE * block, PT_PLCSQL_SCO
 	}
 
       /* the default expression first, while this declaration is still out of scope */
-      if (pt_plcsql_resolve_expr (parser, decl->info.sp_stmt.expr, &scope) != NO_ERROR)
+      if (pt_plcsql_resolve_expr (parser, &decl->info.sp_stmt.expr, &scope) != NO_ERROR)
 	{
 	  return ER_FAILED;
 	}
