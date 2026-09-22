@@ -24139,6 +24139,15 @@ PT_HINT parser_hint_table[] = {
  * where it takes a statement's text). LEVEL and SYS_CONNECT_BY_PATH mean something only inside
  * a hierarchical query, BENCHMARK measures elapsed time, and DEFAULT is not called at all.
  *
+ * Others are left out because a row in these tables cannot say what their rules say. The JSON
+ * writers - JSON_INSERT, JSON_REPLACE, JSON_SET, JSON_ARRAY_APPEND, JSON_ARRAY_INSERT and
+ * JSON_OBJECT - are built by parser_make_func_with_arg_count_mod2 (), which takes how the
+ * arguments after the first pair up as well as how many there are; a row has no field for
+ * that, and adding one means every existing row saying it has no such constraint, since the
+ * value for an even count is the one an omitted field would take. COALESCE is not one call at
+ * all: its rule folds the list into a chain of two-argument PT_COALESCE nodes and marks them
+ * continued_case. Both are worth holding when a body asks for them and not before.
+ *
  * A rule is reached by every spelling keyword.c and csql_lexer.l map to its token, so a token
  * with more than one name needs a row for each - SYSDATE beside SYS_DATE. Deriving the table
  * one row per token is what left those out to begin with.
@@ -24165,6 +24174,7 @@ static const struct sp_expr_func
   {"current_timestamp",   PT_CURRENT_TIMESTAMP,   0},
   {"current_user",        PT_CURRENT_USER,        0},
   {"day",                 PT_DAYF,                1},
+  {"dbtimezone",          PT_DBTIMEZONE,          0},
   {"hour",                PT_HOURF,               1},
   {"ifnull",              PT_IFNULL,              2},
   {"index_prefix",        PT_INDEX_PREFIX,        3},
@@ -24175,9 +24185,11 @@ static const struct sp_expr_func
   {"lower",               PT_LOWER,               1},
   {"minute",              PT_MINUTEF,             1},
   {"month",               PT_MONTHF,              1},
+  {"nullif",              PT_NULLIF,              2},
   {"octet_length",        PT_OCTET_LENGTH,        1},
   {"schema",              PT_SCHEMA,              0},
   {"second",              PT_SECONDF,             1},
+  {"sessiontimezone",     PT_SESSIONTIMEZONE,     0},
   {"str_to_date",         PT_STR_TO_DATE,         2},
   {"subdate",             PT_SUBDATE,             2},
   {"sys_date",            PT_SYS_DATE,            0},
