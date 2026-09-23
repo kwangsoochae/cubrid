@@ -1487,9 +1487,11 @@ Check the path of the key file (_keys) and make sure that it includes proper key
 
 1380 A stored procedure/function declared PARALLEL_ENABLE cannot execute SQL on the server-side connection or use DBMS_OUTPUT.
 
-1381 A loop in a PL/CSQL procedure ran %1$d times without ending.
+1381 System metadata is incompatible with this CUBRID version. Run 'cubrid upgradedb'.
+1382 System metadata version is newer than the current CUBRID version supports; downgrade is not supported.
+1383 A loop in a PL/CSQL procedure ran %1$d times without ending.
 
-1382 Last Error
+1384 Last Error
 
 $set 6 MSGCAT_SET_INTERNAL
 1 Error in error subsystem (line %1$d):

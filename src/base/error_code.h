@@ -1777,9 +1777,11 @@
 
 #define ER_SP_PARALLEL_ENABLE_NO_SQL                -1380
 
-#define ER_PL_MAX_LOOP_ITERATIONS_REACHED           -1381
+#define ER_SYSMETA_UPGRADE_REQUIRED                 -1381
+#define ER_SYSMETA_DOWNGRADE_NOT_SUPPORTED          -1382
+#define ER_PL_MAX_LOOP_ITERATIONS_REACHED           -1383
 
-#define ER_LAST_ERROR                               -1382
+#define ER_LAST_ERROR                               -1384
 
 
 /*
