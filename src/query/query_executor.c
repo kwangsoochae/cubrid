@@ -29231,7 +29231,7 @@ qexec_execute_subquery_for_result_cache (THREAD_ENTRY * thread_p, XASL_NODE * xa
  */
 
 /*
- * qexec_plcsql_read_clock () - read the time that SYS_DATETIME and its kin give from here on
+ * qexec_plcsql_read_clock () - read the time that SYS_DATETIME and the other clock functions give
  *   return: NO_ERROR or ER_FAILED
  *   xasl_state(in/out) :
  *
