@@ -6944,7 +6944,7 @@ pt_make_function (PARSER_CONTEXT * parser, int function_code, const REGU_VARIABL
  *   function(in/out):
  *
  */
-static XASL_NODE *pt_plcsql_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig);
+static XASL_NODE *pt_plcsql_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig, bool out_goes_back);
 static bool pt_plcsql_compiling_body (void);
 static bool pt_plcsql_callee_is_builtin (const REGU_VARIABLE * regu);
 static REGU_VARIABLE *pt_plcsql_local_call_to_regu (PARSER_CONTEXT * parser, PT_NODE * node, int number,
@@ -6992,7 +6992,7 @@ pt_stored_procedure_to_regu (PARSER_CONTEXT * parser, PT_NODE * node)
 
       regu_dbval_type_init (sp->value, result_type);
       sp->args = pt_to_regu_variable_list (parser, node->info.method_call.arg_list, UNBOX_AS_VALUE, NULL, NULL);
-      sp->plcsql = pt_plcsql_compile_body (parser, sp->sig);
+      sp->plcsql = pt_plcsql_compile_body (parser, sp->sig, false);
       if (sp->plcsql == NULL && er_errid () == ER_SP_COMPILE_ERROR)
 	{
 	  /* strict mode, and pt_plcsql_refuse () has named what it could not take. The refusal is
@@ -33121,6 +33121,8 @@ pt_plcsql_list_classes (XASL_NODE * xasl, const OID * code_oid)
  *   return: the plan, NULL when the call stays with the PL engine
  *   parser(in) :
  *   sig(in)    : the signature of the call being lowered
+ *   out_goes_back(in) : whether the caller takes OUT and IN OUT parameters back - the CALL a
+ *                       client makes does, a call lowered inside a statement or a body does not
  *
  * note: a NULL return is not an error and leaves nothing on the parser, unless
  *       pl_native_execution_strict is on. Most procedures still have to go to the PL engine -
@@ -33172,7 +33174,7 @@ pt_plcsql_plan_stream (const cubpl::pl_signature * sig, std::string & plan, bool
 
   pt_enter_packing_buf ();
 
-  xasl = pt_plcsql_compile_body (parser, sig);
+  xasl = pt_plcsql_compile_body (parser, sig, true);
   /* strict mode, and pt_plcsql_refuse () has named what it could not take. The error is left
    * standing rather than cleared, and the CALL fails on it. */
   refused = (xasl == NULL && er_errid () == ER_SP_COMPILE_ERROR);
@@ -33315,7 +33317,7 @@ pt_plcsql_is_compiling (const OID * code_oid)
 }
 
 static XASL_NODE *
-pt_plcsql_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig)
+pt_plcsql_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig, bool out_goes_back)
 {
   PARSER_CONTEXT *body_parser;
   PT_NODE *block, *params;
@@ -33348,9 +33350,10 @@ pt_plcsql_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig
       return pt_plcsql_refuse (parser, "the chain of calls is deeper than a plan is carried for");
     }
 
-  /* an OUT parameter has to travel back out of the frame after the call, which the call site
-   * does not do yet */
-  for (int i = 0; i < sig->arg.arg_size; i++)
+  /* An OUT parameter has to travel back out of the frame to the caller's variable. A CALL the
+   * client makes takes it back - the reply carries it the way the PL engine's does - but a call
+   * made from inside a statement or a body does not yet. */
+  for (int i = 0; !out_goes_back && i < sig->arg.arg_size; i++)
     {
       if (sig->arg.arg_mode[i] != SP_MODE_IN)
 	{
