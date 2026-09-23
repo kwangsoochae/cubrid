@@ -160,13 +160,14 @@ struct migrate_heap_stats
 typedef int (*MIGRATE_HEAP_RECORD_FN) (char *rec, int reclen, int rec_type, const OID * src_oid, void *arg);
 
 /*
- * Read the source release and page sizes out of <db_path_prefix>_lgat's log header and fill in
- * the matching row of migrate_Known_formats[].  Fails if the release is not one we have verified.
+ * Open the source: a backup volume taken by backupdb (full level), or else the path prefix of the
+ * database's own volumes.  Either way the release and page sizes come out of the source's active
+ * log header and fill in the matching row of migrate_Known_formats[].  Fails if the release is not
+ * one we have verified.
  */
-extern int migrate_src_detect (const char *db_path_prefix, MIGRATE_SRC_FORMAT * fmt);
+extern int migrate_src_open (const char *src, MIGRATE_SRC_FORMAT * fmt);
 extern const char *migrate_src_supported_releases (void);
 
-extern int migrate_heap_open (const char *vinf_path, const MIGRATE_SRC_FORMAT * fmt);
 extern void migrate_heap_close (void);
 extern int migrate_heap_db_page_size (void);
 

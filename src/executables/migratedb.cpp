@@ -831,7 +831,6 @@ migratedb (UTIL_FUNCTION_ARG *arg)
   const char *plan_path;
   const char *class_name;
   char er_msg_file[PATH_MAX];
-  char vinf_path[PATH_MAX];
   std::vector<class_plan> plan;
   int n_args;
 
@@ -900,26 +899,21 @@ migratedb (UTIL_FUNCTION_ARG *arg)
   snprintf (er_msg_file, sizeof (er_msg_file) - 1, "%s_%s.err", target_db, arg->command_name);
   er_init (er_msg_file, ER_NEVER_EXIT);
 
-  /* the source release and page size come out of the source database itself */
-  if (migrate_src_detect (src_db_path, &g_src_format) != NO_ERROR)
+  /* the source release and page size come out of the source itself, its volumes or a backup of them */
+  if (migrate_src_open (src_db_path, &g_src_format) != NO_ERROR)
     {
+      migrate_heap_close ();
       return EXIT_FAILURE;
     }
   g_scratch_page = (char *) malloc (g_src_format.io_page_size);
   if (g_scratch_page == NULL)
     {
+      migrate_heap_close ();
       return EXIT_FAILURE;
     }
 
   printf ("source: release %s (compatibility %.1f), page %d bytes\n",
 	  g_src_format.release, g_src_format.compatibility, g_src_format.io_page_size);
-
-
-  snprintf (vinf_path, sizeof (vinf_path), "%s_vinf", src_db_path);
-  if (migrate_heap_open (vinf_path, &g_src_format) != NO_ERROR)
-    {
-      return EXIT_FAILURE;
-    }
 
   AU_DISABLE_PASSWORDS ();
   db_set_client_type (DB_CLIENT_TYPE_ADMIN_UTILITY);
