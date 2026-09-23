@@ -34,11 +34,13 @@ set(EXECUTABLE_SOURCES
   ${EXECUTABLES_DIR}/file_hash.c
   ${EXECUTABLES_DIR}/migratedb.cpp
   ${EXECUTABLES_DIR}/migratedb_heap.cpp
+  ${EXECUTABLES_DIR}/migratedb_btree.cpp
   )
 
 set(EXECUTABLE_HEADERS
   ${EXECUTABLES_DIR}/extract_schema.hpp
   ${EXECUTABLES_DIR}/migratedb_heap.h
+  ${EXECUTABLES_DIR}/migratedb_btree.h
   )
 
 set(COMPAT_SOURCES

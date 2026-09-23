@@ -1269,6 +1269,8 @@ typedef struct _ha_config
 #define MIGRATEDB_DRY_RUN_L                     "dry-run"
 #define MIGRATEDB_FORCE_S                       14207
 #define MIGRATEDB_FORCE_L                       "force"
+#define MIGRATEDB_CHECK_INDEX_S                 14208
+#define MIGRATEDB_CHECK_INDEX_L                 "check-index"
 
 /* cleanfiledb option list */
 #define CLEANFILEDB_SA_MODE_S                   'S'

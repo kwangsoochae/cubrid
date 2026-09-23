@@ -54,6 +54,7 @@
 #include "message_catalog.h"
 #include "error_manager.h"
 #include "migratedb_heap.h"
+#include "migratedb_btree.h"
 #include "object_representation.h"
 #include "dbtype.h"
 #include "db.h"
@@ -813,6 +814,88 @@ resolve_src_hfids (std::vector<class_plan> &plan)
   return NO_ERROR;
 }
 
+/* ------------------------------------------------------------------ source index check */
+
+typedef struct index_check INDEX_CHECK;
+struct index_check
+{
+  long mapped;			/* objects whose source OID this run migrated */
+  long unmapped;
+};
+
+static int
+check_index_object (const DB_VALUE *key, const OID *oid, const OID *class_oid, const BTREE_MVCC_INFO *mvcc_info,
+		    void *arg)
+{
+  INDEX_CHECK *check = (INDEX_CHECK *) arg;
+
+  if (g_oid_map.find (oid_key (oid)) != g_oid_map.end ())
+    {
+      check->mapped++;
+    }
+  else
+    {
+      check->unmapped++;
+    }
+  return NO_ERROR;
+}
+
+/*
+ * Walk source indexes given as volid|fileid|root_pageid, comma-separated, and say whether they
+ * could stand in for the heap scan and sort of building the same index in the target: every key
+ * above the one before it, every object one this run migrated.
+ */
+static void
+check_source_indexes (const char *list)
+{
+  std::string rest = list;
+  while (!rest.empty ())
+    {
+      size_t comma = rest.find (',');
+      std::string one = rest.substr (0, comma);
+      rest = comma == std::string::npos ? "" : rest.substr (comma + 1);
+
+      BTID btid;
+      int volid, fileid, root;
+      if (sscanf (one.c_str (), "%d|%d|%d", &volid, &fileid, &root) != 3)
+	{
+	  fprintf (stderr, "--check-index wants volid|fileid|root_pageid, not %s\n", one.c_str ());
+	  continue;
+	}
+      btid.vfid.volid = (VOLID) volid;
+      btid.vfid.fileid = fileid;
+      btid.root_pageid = root;
+
+      MIGRATE_BTREE_STATS st;
+      INDEX_CHECK check = { 0, 0 };
+      struct timeval t0, t1;
+      gettimeofday (&t0, NULL);
+      int error = migrate_btree_walk (g_thread_p, &btid, g_src_format.io_page_size, check_index_object, &check, &st);
+      gettimeofday (&t1, NULL);
+
+      printf ("\n=== source index %s ===\n", one.c_str ());
+      if (error != NO_ERROR)
+	{
+	  printf ("  walk failed\n");
+	  continue;
+	}
+      printf ("  key type %s, %s, levels %d, deduplicate key %s\n", st.key_type,
+	      st.unique_pk ? "unique" : "non-unique", st.levels, st.deduplicate_key_idx >= 0 ? "yes" : "no");
+      printf ("  root says  : keys %lld, oids %lld, nulls %lld\n", (long long) st.root_num_keys,
+	      (long long) st.root_num_oids, (long long) st.root_num_nulls);
+      printf ("  walk found : keys %ld, oids %ld in %ld leaf pages (%ld overflow OID pages, %ld fences, %ld prefix pages)\n",
+	      st.keys, st.oids, st.leaf_pages, st.overflow_oid_pages, st.fence_records, st.prefix_pages);
+      printf ("  order      : %ld key(s) not above the one before\n", st.out_of_order);
+      printf ("  objects    : %ld migrated by this run, %ld not%s\n", check.mapped, check.unmapped,
+	      g_remap_oids ? "" : " (no --plan: nothing was mapped)");
+      printf ("  mvcc       : %ld insert(s) not yet visible to all, %ld delete(s) not vacuumed\n",
+	      st.oids_insid_not_all_visible, st.oids_delid_valid);
+      printf ("  class oids : %ld object(s) of a subclass\n", st.oids_with_class_oid);
+      printf ("  skipped    : %ld overflow key(s)\n", st.overflow_keys);
+      printf ("  elapsed    : %.3f s\n", (t1.tv_sec - t0.tv_sec) + (t1.tv_usec - t0.tv_usec) / 1e6);
+    }
+}
+
 static void
 migratedb_usage (const char *argv0)
 {
@@ -830,6 +913,7 @@ migratedb (UTIL_FUNCTION_ARG *arg)
   const char *target_db;
   const char *plan_path;
   const char *class_name;
+  const char *check_indexes;
   char er_msg_file[PATH_MAX];
   std::vector<class_plan> plan;
   int n_args;
@@ -840,6 +924,7 @@ migratedb (UTIL_FUNCTION_ARG *arg)
   g_commit_every = utility_get_option_int_value (arg_map, MIGRATEDB_COMMIT_EVERY_S);
   g_dry_run = utility_get_option_bool_value (arg_map, MIGRATEDB_DRY_RUN_S);
   g_force = utility_get_option_bool_value (arg_map, MIGRATEDB_FORCE_S);
+  check_indexes = utility_get_option_string_value (arg_map, MIGRATEDB_CHECK_INDEX_S, 0);
 
   n_args = utility_get_option_string_table_size (arg_map);
   if (n_args != 2)
@@ -1046,6 +1131,11 @@ migratedb (UTIL_FUNCTION_ARG *arg)
   printf ("overflow rows     : %ld assembled, %ld unreadable\n", t_ovf, t_big);
   printf ("relocated rows    : %ld followed, %ld unreadable\n", t_reloc, t_rel);
   printf ("elapsed           : %.3f s\n", secs);
+
+  if (check_indexes != NULL)
+    {
+      check_source_indexes (check_indexes);
+    }
 
   db_shutdown ();
   migrate_heap_close ();
