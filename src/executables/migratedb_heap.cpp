@@ -18,6 +18,7 @@
 
 #include "migratedb_heap.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -119,6 +120,12 @@ static std::map<int, int> hp_fds;
  * Opening one walks the stream once and remembers where every block of the data volumes and of
  * the active log is; pages are then read out of those blocks.
  *
+ * A full backup holds every page, in blocks of 32.  An incremental one holds, a page to a block,
+ * only the pages written since the backup a level below it; so it is read together with the full
+ * backup and any levels in between, and a page is taken from the highest level that has it --
+ * what restoredb ends up writing, since it restores the highest level first and lets no lower
+ * level overwrite a page already restored.
+ *
  * FILEIO_BACKUP_HEADER and FILEIO_BACKUP_PAGE come from file_io.h.  The rest file_io.c keeps to
  * itself, so it is spelled out here.  All of it was compared between 11.4 and this release.
  */
@@ -144,7 +151,7 @@ typedef struct migrate_bk_block MIGRATE_BK_BLOCK;
 struct migrate_bk_block
 {
   off_t offset;			/* of the stored bytes; -1 when the backup does not have the block */
-  int length;			/* stored bytes; hp_bk_node_size means stored as is */
+  int length;			/* stored bytes; the backup's node_size means stored as is */
 };
 
 typedef struct migrate_bk_file MIGRATE_BK_FILE;
@@ -154,21 +161,32 @@ struct migrate_bk_file
   std::vector<MIGRATE_BK_BLOCK> blocks;	/* by block number */
 };
 
+/* one backup volume, one level */
+typedef struct migrate_bk_volume MIGRATE_BK_VOLUME;
+struct migrate_bk_volume
+{
+  std::string path;
+  int fd;
+  FILEIO_BACKUP_HEADER hdr;
+  int block_size;		/* bkpagesize */
+  int node_size;		/* a block with the page id tags around it */
+  bool compressed;
+  std::map<int, MIGRATE_BK_FILE> files;
+};
+
 typedef struct migrate_bk_cache_slot MIGRATE_BK_CACHE_SLOT;
 struct migrate_bk_cache_slot
 {
+  int level;
   int volid;
   int block;
   char *node;			/* the block as a FILEIO_BACKUP_PAGE image */
 };
 
-static int hp_bk_fd = -1;
-static int hp_bk_block_size = 0;	/* bkpagesize */
-static int hp_bk_node_size = 0;	/* a block with the page id tags around it */
-static bool hp_bk_compressed = false;
-static std::map<int, MIGRATE_BK_FILE> hp_bk_files;
+static std::vector<MIGRATE_BK_VOLUME> hp_bks;	/* by level, the full backup first */
 static MIGRATE_BK_CACHE_SLOT hp_bk_cache[MIGRATE_BK_CACHE_SLOTS];
 static int hp_bk_cache_next = 0;
+static int hp_bk_node_max = 0;	/* the largest node_size: what a cache slot and hp_bk_zip_buf hold */
 static char *hp_bk_zip_buf = NULL;
 
 int
@@ -369,16 +387,16 @@ migrate_vol_read_page (int volid, PAGEID pageid, char *iopage)
   return iopage;
 }
 
-/* ------------------------------------------------------------------ source: a backup volume */
+/* ------------------------------------------------------------------ source: backup volumes */
 
 static bool
-migrate_bk_pread (off_t offset, void *buf, size_t size)
+migrate_bk_pread (const MIGRATE_BK_VOLUME *bk, off_t offset, void *buf, size_t size)
 {
   char *p = (char *) buf;
 
   while (size > 0)
     {
-      ssize_t n = pread (hp_bk_fd, p, size, offset);
+      ssize_t n = pread (bk->fd, p, size, offset);
       if (n < 0 && errno == EINTR)
 	{
 	  continue;
@@ -396,21 +414,21 @@ migrate_bk_pread (off_t offset, void *buf, size_t size)
 
 /* bring a block's stored bytes back to its FILEIO_BACKUP_PAGE image */
 static int
-migrate_bk_load_block (const MIGRATE_BK_BLOCK *blk, char *node)
+migrate_bk_load_block (const MIGRATE_BK_VOLUME *bk, const MIGRATE_BK_BLOCK *blk, char *node)
 {
-  if (blk->length == hp_bk_node_size)
+  if (blk->length == bk->node_size)
     {
-      return migrate_bk_pread (blk->offset, node, hp_bk_node_size) ? NO_ERROR : ER_FAILED;
+      return migrate_bk_pread (bk, blk->offset, node, bk->node_size) ? NO_ERROR : ER_FAILED;
     }
 
-  if (!migrate_bk_pread (blk->offset, hp_bk_zip_buf, blk->length))
+  if (!migrate_bk_pread (bk, blk->offset, hp_bk_zip_buf, blk->length))
     {
       return ER_FAILED;
     }
   // *INDENT-OFF*
-  int n = cubcompress::decompress<cubcompress::LZ4> (hp_bk_zip_buf, blk->length, node, hp_bk_node_size);
+  int n = cubcompress::decompress<cubcompress::LZ4> (hp_bk_zip_buf, blk->length, node, bk->node_size);
   // *INDENT-ON*
-  return n == hp_bk_node_size ? NO_ERROR : ER_FAILED;
+  return n == bk->node_size ? NO_ERROR : ER_FAILED;
 }
 
 /*
@@ -419,22 +437,22 @@ migrate_bk_load_block (const MIGRATE_BK_BLOCK *blk, char *node)
  * whole; a compressed one has to be decompressed first.
  */
 static int
-migrate_bk_block_id (const MIGRATE_BK_BLOCK *blk, char *node, PAGEID *id)
+migrate_bk_block_id (const MIGRATE_BK_VOLUME *bk, const MIGRATE_BK_BLOCK *blk, char *node, PAGEID *id)
 {
-  const off_t dup_offset = offsetof (FILEIO_BACKUP_PAGE, iopage) + hp_bk_block_size;
+  const off_t dup_offset = offsetof (FILEIO_BACKUP_PAGE, iopage) + bk->block_size;
   PAGEID dup;
 
-  if (blk->length == hp_bk_node_size)
+  if (blk->length == bk->node_size)
     {
-      if (!migrate_bk_pread (blk->offset, id, sizeof (*id))
-	  || !migrate_bk_pread (blk->offset + dup_offset, &dup, sizeof (dup)))
+      if (!migrate_bk_pread (bk, blk->offset, id, sizeof (*id))
+	  || !migrate_bk_pread (bk, blk->offset + dup_offset, &dup, sizeof (dup)))
 	{
 	  return ER_FAILED;
 	}
     }
   else
     {
-      if (migrate_bk_load_block (blk, node) != NO_ERROR)
+      if (migrate_bk_load_block (bk, blk, node) != NO_ERROR)
 	{
 	  return ER_FAILED;
 	}
@@ -446,20 +464,20 @@ migrate_bk_block_id (const MIGRATE_BK_BLOCK *blk, char *node, PAGEID *id)
 
 /*
  * One file of the stream, from just after its FILE_START header through its FILE_END block.
- * A server's backup reads a volume with several threads and writes the blocks as they are done,
- * so the blocks are placed by the number they carry, not by the order they come in.
+ * The blocks are placed by the number they carry, not by where they come: an incremental backup
+ * leaves out the pages that did not change, so the position says nothing about the page.
  */
 static int
-migrate_bk_scan_file (off_t *pos, MIGRATE_BK_FILE *file, char *node)
+migrate_bk_scan_file (const MIGRATE_BK_VOLUME *bk, off_t *pos, MIGRATE_BK_FILE *file, char *node)
 {
   for (;;)
     {
       MIGRATE_BK_BLOCK blk;
 
-      if (hp_bk_compressed)
+      if (bk->compressed)
 	{
 	  int length;
-	  if (!migrate_bk_pread (*pos, &length, sizeof (length)) || length <= 0 || length > hp_bk_node_size)
+	  if (!migrate_bk_pread (bk, *pos, &length, sizeof (length)) || length <= 0 || length > bk->node_size)
 	    {
 	      return ER_FAILED;
 	    }
@@ -469,12 +487,12 @@ migrate_bk_scan_file (off_t *pos, MIGRATE_BK_FILE *file, char *node)
       else
 	{
 	  blk.offset = *pos;
-	  blk.length = hp_bk_node_size;
+	  blk.length = bk->node_size;
 	}
       *pos = blk.offset + blk.length;
 
       PAGEID id;
-      if (migrate_bk_block_id (&blk, node, &id) != NO_ERROR)
+      if (migrate_bk_block_id (bk, &blk, node, &id) != NO_ERROR)
 	{
 	  return ER_FAILED;
 	}
@@ -497,56 +515,70 @@ migrate_bk_scan_file (off_t *pos, MIGRATE_BK_FILE *file, char *node)
     }
 }
 
+/* read one backup volume's header and index its blocks */
 static int
-migrate_bk_open (const char *path, MIGRATE_SRC_FORMAT *fmt)
+migrate_bk_open_one (const char *path, MIGRATE_BK_VOLUME *bk)
 {
-  FILEIO_BACKUP_HEADER hdr;
-
-  hp_bk_fd = open (path, O_RDONLY);
-  if (hp_bk_fd < 0)
+  bk->path = path;
+  bk->fd = open (path, O_RDONLY);
+  if (bk->fd < 0)
     {
       fprintf (stderr, "cannot open the backup volume %s: %s\n", path, strerror (errno));
       return ER_FAILED;
     }
+
+  FILEIO_BACKUP_HEADER *hdr = &bk->hdr;
   struct stat st;
-  if (fstat (hp_bk_fd, &st) != 0 || !migrate_bk_pread (0, &hdr, sizeof (hdr)))
+  if (fstat (bk->fd, &st) != 0 || !migrate_bk_pread (bk, 0, hdr, sizeof (*hdr)))
     {
       fprintf (stderr, "cannot read the backup header from %s\n", path);
       return ER_FAILED;
     }
+  if (strncmp (hdr->magic, CUBRID_MAGIC_DATABASE_BACKUP, sizeof (CUBRID_MAGIC_DATABASE_BACKUP)) != 0)
+    {
+      fprintf (stderr, "%s is not a backup volume\n", path);
+      return ER_FAILED;
+    }
+  if (hdr->bk_hdr_version != MIGRATE_BK_HEADER_VERSION)
+    {
+      fprintf (stderr, "%s: backup header version %d is not one this tool reads (%d)\n", path,
+	       hdr->bk_hdr_version, MIGRATE_BK_HEADER_VERSION);
+      return ER_FAILED;
+    }
+  if (hdr->level < FILEIO_BACKUP_FULL_LEVEL || hdr->level >= FILEIO_BACKUP_UNDEFINED_LEVEL)
+    {
+      fprintf (stderr, "%s: backup level %d is not one this tool knows\n", path, (int) hdr->level);
+      return ER_FAILED;
+    }
+  if (hdr->zip_method != FILEIO_ZIP_NONE_METHOD && hdr->zip_method != FILEIO_ZIP_LZ4_METHOD)
+    {
+      fprintf (stderr, "%s: backup compression method %d is not supported\n", path, (int) hdr->zip_method);
+      return ER_FAILED;
+    }
+  if (hdr->db_iopagesize <= 0 || hdr->bkpagesize <= 0 || hdr->bkpagesize % hdr->db_iopagesize != 0)
+    {
+      fprintf (stderr, "%s: backup page size %d does not hold whole %d byte pages\n", path, hdr->bkpagesize,
+	       hdr->db_iopagesize);
+      return ER_FAILED;
+    }
 
-  if (hdr.bk_hdr_version != MIGRATE_BK_HEADER_VERSION)
-    {
-      fprintf (stderr, "backup header version %d is not one this tool reads (%d)\n", hdr.bk_hdr_version,
-	       MIGRATE_BK_HEADER_VERSION);
-      return ER_FAILED;
-    }
-  /* an incremental backup only has the pages changed since the one below it */
-  if (hdr.level != FILEIO_BACKUP_FULL_LEVEL)
-    {
-      fprintf (stderr, "%s is a level %d backup; only a full (level 0) backup can be read on its own\n", path,
-	       (int) hdr.level);
-      return ER_FAILED;
-    }
-  if (hdr.zip_method != FILEIO_ZIP_NONE_METHOD && hdr.zip_method != FILEIO_ZIP_LZ4_METHOD)
-    {
-      fprintf (stderr, "backup compression method %d is not supported\n", (int) hdr.zip_method);
-      return ER_FAILED;
-    }
-  if (hdr.db_iopagesize <= 0 || hdr.bkpagesize <= 0 || hdr.bkpagesize % hdr.db_iopagesize != 0)
-    {
-      fprintf (stderr, "backup page size %d does not hold whole %d byte pages\n", hdr.bkpagesize, hdr.db_iopagesize);
-      return ER_FAILED;
-    }
+  bk->block_size = hdr->bkpagesize;
+  bk->node_size = hdr->bkpagesize + (int) (offsetof (FILEIO_BACKUP_PAGE, iopage) + sizeof (PAGEID));
+  bk->compressed = hdr->zip_method != FILEIO_ZIP_NONE_METHOD;
 
-  hp_bk_block_size = hdr.bkpagesize;
-  hp_bk_node_size = hdr.bkpagesize + (int) (offsetof (FILEIO_BACKUP_PAGE, iopage) + sizeof (PAGEID));
-  hp_bk_compressed = hdr.zip_method != FILEIO_ZIP_NONE_METHOD;
-  hp_bk_zip_buf = (char *) malloc (hp_bk_node_size);
-  char *node = (char *) malloc (hp_bk_node_size);
-  if (hp_bk_zip_buf == NULL || node == NULL)
+  if (bk->node_size > hp_bk_node_max)
     {
-      free (node);
+      char *buf = (char *) realloc (hp_bk_zip_buf, bk->node_size);
+      if (buf == NULL)
+	{
+	  return ER_FAILED;
+	}
+      hp_bk_zip_buf = buf;
+      hp_bk_node_max = bk->node_size;
+    }
+  char *node = (char *) malloc (bk->node_size);
+  if (node == NULL)
+    {
       return ER_FAILED;
     }
 
@@ -562,7 +594,7 @@ migrate_bk_open (const char *path, MIGRATE_SRC_FORMAT *fmt)
       PAGEID id;
       MIGRATE_BK_FILE_HEADER fh;
 
-      if (!migrate_bk_pread (pos, &id, sizeof (id)))
+      if (!migrate_bk_pread (bk, pos, &id, sizeof (id)))
 	{
 	  fprintf (stderr, "%s ends before its end mark; a backup split over several volumes is not supported\n",
 		   path);
@@ -574,7 +606,7 @@ migrate_bk_open (const char *path, MIGRATE_SRC_FORMAT *fmt)
 	  break;
 	}
       if (id != MIGRATE_BK_FILE_START_PAGE_ID
-	  || !migrate_bk_pread (pos + (off_t) offsetof (FILEIO_BACKUP_PAGE, iopage), &fh, sizeof (fh)))
+	  || !migrate_bk_pread (bk, pos + (off_t) offsetof (FILEIO_BACKUP_PAGE, iopage), &fh, sizeof (fh)))
 	{
 	  fprintf (stderr, "%s is damaged: no file header at offset %lld\n", path, (long long) pos);
 	  error = ER_FAILED;
@@ -585,10 +617,10 @@ migrate_bk_open (const char *path, MIGRATE_SRC_FORMAT *fmt)
       MIGRATE_BK_FILE *file = NULL;
       if (fh.volid >= LOG_DBFIRST_VOLID || fh.volid == LOG_DBLOG_ACTIVE_VOLID)
 	{
-	  file = &hp_bk_files[fh.volid];
+	  file = &bk->files[fh.volid];
 	  file->nbytes = fh.nbytes;
 	}
-      if (migrate_bk_scan_file (&pos, file, node) != NO_ERROR)
+      if (migrate_bk_scan_file (bk, &pos, file, node) != NO_ERROR)
 	{
 	  /* a backup split into several volumes stops in the middle of a block, as a cut one does */
 	  if (pos > st.st_size - (off_t) sizeof (int))
@@ -604,36 +636,127 @@ migrate_bk_open (const char *path, MIGRATE_SRC_FORMAT *fmt)
 	  break;
 	}
     }
+  free (node);
+  return error;
+}
 
-  /* the release is told the same way as for a database: by the active log's header */
-  if (error == NO_ERROR)
+/*
+ * Put the backups in level order and make sure they are one chain: the full backup, then each
+ * level taken on top of the one below -- which it says by starting where the one below stopped.
+ * An incremental backup taken again on top of a later one of the level below does not follow it,
+ * and neither does one of another database.
+ */
+static int
+migrate_bk_check_chain (void)
+{
+  std::sort (hp_bks.begin (), hp_bks.end (), [] (const MIGRATE_BK_VOLUME &a, const MIGRATE_BK_VOLUME &b)
+  {
+    return a.hdr.level < b.hdr.level;
+  });
+
+  for (size_t i = 0; i < hp_bks.size (); i++)
     {
-      auto lit = hp_bk_files.find (LOG_DBLOG_ACTIVE_VOLID);
-      if (lit == hp_bk_files.end () || lit->second.blocks.empty () || lit->second.blocks[0].offset < 0
-	  || migrate_bk_load_block (&lit->second.blocks[0], node) != NO_ERROR)
+      const MIGRATE_BK_VOLUME &bk = hp_bks[i];
+
+      if ((size_t) bk.hdr.level != i)
 	{
-	  fprintf (stderr, "%s has no active log to tell the source release from\n", path);
-	  error = ER_FAILED;
+	  if (i == 0)
+	    {
+	      fprintf (stderr, "no full (level 0) backup given; %s is level %d, which holds only the pages changed"
+		       " since the backup a level below it\n", bk.path.c_str (), (int) bk.hdr.level);
+	    }
+	  else
+	    {
+	      fprintf (stderr, "the backups have to be one of each level from 0 up; %s is level %d after level %d\n",
+		       bk.path.c_str (), (int) bk.hdr.level, (int) hp_bks[i - 1].hdr.level);
+	    }
+	  return ER_FAILED;
 	}
-      else
+      if (i == 0)
 	{
-	  error = migrate_src_detect_log_header (node + offsetof (FILEIO_BACKUP_PAGE, iopage), fmt);
+	  continue;
 	}
+
+      const MIGRATE_BK_VOLUME &below = hp_bks[i - 1];
+      if (bk.hdr.db_creation != below.hdr.db_creation || bk.hdr.db_iopagesize != below.hdr.db_iopagesize)
+	{
+	  fprintf (stderr, "%s and %s are backups of different databases\n", bk.path.c_str (), below.path.c_str ());
+	  return ER_FAILED;
+	}
+      if (!LSA_EQ (&bk.hdr.start_lsa, &below.hdr.chkpt_lsa))
+	{
+	  fprintf (stderr, "%s (level %d) was not taken on top of %s: it starts at %lld|%d, that one stops at"
+		   " %lld|%d\n", bk.path.c_str (), (int) bk.hdr.level, below.path.c_str (),
+		   (long long) bk.hdr.start_lsa.pageid, (int) bk.hdr.start_lsa.offset,
+		   (long long) below.hdr.chkpt_lsa.pageid, (int) below.hdr.chkpt_lsa.offset);
+	  return ER_FAILED;
+	}
+    }
+  return NO_ERROR;
+}
+
+/* paths is one backup volume, or several separated by commas: the full backup and the levels on it */
+static int
+migrate_bk_open (const char *paths, MIGRATE_SRC_FORMAT *fmt)
+{
+  std::string list = paths;
+  size_t start = 0;
+  while (start <= list.size ())
+    {
+      size_t comma = list.find (',', start);
+      std::string path = list.substr (start, comma == std::string::npos ? std::string::npos : comma - start);
+      start = comma == std::string::npos ? list.size () + 1 : comma + 1;
+      if (path.empty ())
+	{
+	  continue;
+	}
+
+      hp_bks.emplace_back ();
+      hp_bks.back ().fd = -1;
+      if (migrate_bk_open_one (path.c_str (), &hp_bks.back ()) != NO_ERROR)
+	{
+	  return ER_FAILED;
+	}
+    }
+  if (hp_bks.empty () || migrate_bk_check_chain () != NO_ERROR)
+    {
+      return ER_FAILED;
+    }
+
+  /* the release is told the same way as for a database: by the active log's header, the latest one */
+  const MIGRATE_BK_VOLUME &top = hp_bks.back ();
+  auto lit = top.files.find (LOG_DBLOG_ACTIVE_VOLID);
+  char *node = (char *) malloc (top.node_size);
+  int error = NO_ERROR;
+  if (node == NULL)
+    {
+      return ER_FAILED;
+    }
+  if (lit == top.files.end () || lit->second.blocks.empty () || lit->second.blocks[0].offset < 0
+      || migrate_bk_load_block (&top, &lit->second.blocks[0], node) != NO_ERROR)
+    {
+      fprintf (stderr, "%s has no active log to tell the source release from\n", top.path.c_str ());
+      error = ER_FAILED;
+    }
+  else
+    {
+      error = migrate_src_detect_log_header (node + offsetof (FILEIO_BACKUP_PAGE, iopage), fmt);
     }
   free (node);
   if (error != NO_ERROR)
     {
       return error;
     }
-  if (fmt->io_page_size != hdr.db_iopagesize)
+  if (fmt->io_page_size != top.hdr.db_iopagesize)
     {
-      fprintf (stderr, "the backup header says %d byte pages, its log header %d\n", hdr.db_iopagesize,
+      fprintf (stderr, "the backup header says %d byte pages, its log header %d\n", top.hdr.db_iopagesize,
 	       fmt->io_page_size);
       return ER_FAILED;
     }
 
   for (int i = 0; i < MIGRATE_BK_CACHE_SLOTS; i++)
     {
+      hp_bk_cache[i].level = -1;
       hp_bk_cache[i].volid = NULL_VOLID;
       hp_bk_cache[i].block = -1;
       hp_bk_cache[i].node = NULL;
@@ -642,13 +765,16 @@ migrate_bk_open (const char *path, MIGRATE_SRC_FORMAT *fmt)
 
   migrate_heap_set_format (fmt);
 
-  int n_volumes = 0;
-  for (auto &it : hp_bk_files)
+  for (const MIGRATE_BK_VOLUME &bk : hp_bks)
     {
-      n_volumes += it.first >= LOG_DBFIRST_VOLID ? 1 : 0;
+      int n_volumes = 0;
+      for (auto &it : bk.files)
+	{
+	  n_volumes += it.first >= LOG_DBFIRST_VOLID ? 1 : 0;
+	}
+      printf ("source backup level %d: %s, %s, %d data volume(s)\n", (int) bk.hdr.level, bk.path.c_str (),
+	      bk.compressed ? "LZ4" : "not compressed", n_volumes);
     }
-  printf ("source is a backup volume: level 0, %s, %d data volume(s)\n", hp_bk_compressed ? "LZ4" : "not compressed",
-	  n_volumes);
   /*
    * Nothing replays the backup's log, so its pages are taken as they were copied.  A backup taken
    * while transactions ran is only made consistent by restoredb replaying that log.
@@ -658,38 +784,70 @@ migrate_bk_open (const char *path, MIGRATE_SRC_FORMAT *fmt)
   return NO_ERROR;
 }
 
+/* where page volid|pageid is in one level, or NULL when that level does not have it */
+static const MIGRATE_BK_BLOCK *
+migrate_bk_find_block (const MIGRATE_BK_VOLUME *bk, int volid, PAGEID pageid, int *block, off_t *in_block)
+{
+  auto fit = bk->files.find (volid);
+  if (fit == bk->files.end ())
+    {
+      return NULL;
+    }
+
+  const int per_block = bk->block_size / hp_io_page_size;
+  *block = pageid / per_block;
+  *in_block = offsetof (FILEIO_BACKUP_PAGE, iopage) + (off_t) (pageid % per_block) * hp_io_page_size;
+  if ((size_t) *block >= fit->second.blocks.size () || fit->second.blocks[*block].offset < 0)
+    {
+      return NULL;
+    }
+  return &fit->second.blocks[*block];
+}
+
 static char *
 migrate_bk_read_page (int volid, PAGEID pageid, char *iopage)
 {
-  auto fit = hp_bk_files.find (volid);
-  if (fit == hp_bk_files.end ())
+  /* the latest level that has the volume says how big it is; volumes do not shrink */
+  const MIGRATE_BK_FILE *latest = NULL;
+  for (size_t i = hp_bks.size (); i-- > 0 && latest == NULL;)
+    {
+      auto fit = hp_bks[i].files.find (volid);
+      latest = fit == hp_bks[i].files.end () ? NULL : &fit->second;
+    }
+  if (latest == NULL)
     {
       fprintf (stderr, "no volume for volid %d in the backup\n", volid);
       return NULL;
     }
-
-  const MIGRATE_BK_FILE &file = fit->second;
-  const int per_block = hp_bk_block_size / hp_io_page_size;
-  if (pageid < 0 || (INT64) (pageid + 1) * hp_io_page_size > file.nbytes)
+  if (pageid < 0 || (INT64) (pageid + 1) * hp_io_page_size > latest->nbytes)
     {
       fprintf (stderr, "page %d|%d is past the end of the backed up volume\n", volid, pageid);
       return NULL;
     }
 
-  const int block = pageid / per_block;
-  const off_t in_block = offsetof (FILEIO_BACKUP_PAGE, iopage) + (off_t) (pageid % per_block) * hp_io_page_size;
-  if ((size_t) block >= file.blocks.size () || file.blocks[block].offset < 0)
+  int level = -1, block = -1;
+  off_t in_block = 0;
+  const MIGRATE_BK_BLOCK *blk = NULL;
+  for (level = (int) hp_bks.size () - 1; level >= 0; level--)
+    {
+      blk = migrate_bk_find_block (&hp_bks[level], volid, pageid, &block, &in_block);
+      if (blk != NULL)
+	{
+	  break;
+	}
+    }
+  if (blk == NULL)
     {
       fprintf (stderr, "the backup does not have page %d|%d\n", volid, pageid);
       return NULL;
     }
 
-  const MIGRATE_BK_BLOCK *blk = &file.blocks[block];
-  if (blk->length == hp_bk_node_size)
+  const MIGRATE_BK_VOLUME *bk = &hp_bks[level];
+  if (blk->length == bk->node_size)
     {
-      if (!migrate_bk_pread (blk->offset + in_block, iopage, hp_io_page_size))
+      if (!migrate_bk_pread (bk, blk->offset + in_block, iopage, hp_io_page_size))
 	{
-	  fprintf (stderr, "short read at %d|%d in the backup (%s)\n", volid, pageid, strerror (errno));
+	  fprintf (stderr, "short read at %d|%d in %s (%s)\n", volid, pageid, bk->path.c_str (), strerror (errno));
 	  return NULL;
 	}
       return iopage;
@@ -699,7 +857,7 @@ migrate_bk_read_page (int volid, PAGEID pageid, char *iopage)
   MIGRATE_BK_CACHE_SLOT *slot = NULL;
   for (int i = 0; i < MIGRATE_BK_CACHE_SLOTS; i++)
     {
-      if (hp_bk_cache[i].volid == volid && hp_bk_cache[i].block == block)
+      if (hp_bk_cache[i].level == level && hp_bk_cache[i].volid == volid && hp_bk_cache[i].block == block)
 	{
 	  slot = &hp_bk_cache[i];
 	  break;
@@ -711,18 +869,20 @@ migrate_bk_read_page (int volid, PAGEID pageid, char *iopage)
       hp_bk_cache_next = (hp_bk_cache_next + 1) % MIGRATE_BK_CACHE_SLOTS;
       if (slot->node == NULL)
 	{
-	  slot->node = (char *) malloc (hp_bk_node_size);
+	  slot->node = (char *) malloc (hp_bk_node_max);
 	  if (slot->node == NULL)
 	    {
 	      return NULL;
 	    }
 	}
-      slot->volid = NULL_VOLID;
-      if (migrate_bk_load_block (blk, slot->node) != NO_ERROR)
+      slot->level = -1;
+      if (migrate_bk_load_block (bk, blk, slot->node) != NO_ERROR)
 	{
-	  fprintf (stderr, "cannot decompress the block holding page %d|%d\n", volid, pageid);
+	  fprintf (stderr, "cannot decompress the block holding page %d|%d in %s\n", volid, pageid,
+		   bk->path.c_str ());
 	  return NULL;
 	}
+      slot->level = level;
       slot->volid = volid;
       slot->block = block;
     }
@@ -739,33 +899,42 @@ migrate_bk_close (void)
 	{
 	  free_and_init (hp_bk_cache[i].node);
 	}
-      hp_bk_cache[i].volid = NULL_VOLID;
+      hp_bk_cache[i].level = -1;
     }
   if (hp_bk_zip_buf != NULL)
     {
       free_and_init (hp_bk_zip_buf);
     }
-  if (hp_bk_fd >= 0)
+  hp_bk_node_max = 0;
+  for (MIGRATE_BK_VOLUME &bk : hp_bks)
     {
-      close (hp_bk_fd);
-      hp_bk_fd = -1;
+      if (bk.fd >= 0)
+	{
+	  close (bk.fd);
+	}
     }
-  hp_bk_files.clear ();
+  hp_bks.clear ();
 }
 
 /* ------------------------------------------------------------------ source: either */
 
-/* a backup volume starts with its header, and the header's magic tells it from a database volume */
+/*
+ * A backup volume starts with its header, and the header's magic tells it from a database volume.
+ * Several backups come separated by commas; the first one decides.
+ */
 static bool
 migrate_src_is_backup (const char *src)
 {
+  std::string first = src;
+  first = first.substr (0, first.find (','));
+
   struct stat st;
-  if (stat (src, &st) != 0 || !S_ISREG (st.st_mode))
+  if (stat (first.c_str (), &st) != 0 || !S_ISREG (st.st_mode))
     {
       return false;
     }
 
-  int fd = open (src, O_RDONLY);
+  int fd = open (first.c_str (), O_RDONLY);
   if (fd < 0)
     {
       return false;
@@ -802,7 +971,7 @@ migrate_heap_close (void)
 char *
 migrate_heap_read_page (int volid, PAGEID pageid, char *iopage)
 {
-  char *page = hp_bk_fd >= 0 ? migrate_bk_read_page (volid, pageid, iopage)
+  char *page = !hp_bks.empty () ? migrate_bk_read_page (volid, pageid, iopage)
 	       : migrate_vol_read_page (volid, pageid, iopage);
 
   return page == NULL ? NULL : page + hp_format.page_prefix_size;

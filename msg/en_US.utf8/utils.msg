@@ -1389,7 +1389,8 @@ usage: %1$s migratedb [OPTION] source-db-path database-name\n\
   source-db-path  path prefix of the source database, e.g. /data/olddb/mydb\n\
                   the release and page size are read from <source-db-path>_lgat\n\
                   or a full (level 0) backup volume of it, e.g. /backup/mydb_bk0v000,\n\
-                  taken stand-alone or while nothing wrote to the database\n\
+                  with any incremental ones on it after commas: full,level-1[,level-2]\n\
+                  backups taken stand-alone or while nothing wrote to the database\n\
   database-name   the target database, already created and loaded with the schema\n\
 \n\
 This is the data load step only. Creating the target database, loading the schema\n\

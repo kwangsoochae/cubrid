@@ -1375,6 +1375,7 @@ usage: %1$s migratedb [OPTION] source-db-path database-name\n\
   source-db-path  원본 데이터베이스의 경로 접두. 예: /data/olddb/mydb\n\
                   릴리스와 페이지 크기는 <source-db-path>_lgat 에서 읽습니다.\n\
                   또는 그 데이터베이스의 전체(레벨 0) 백업 볼륨. 예: /backup/mydb_bk0v000\n\
+                  증분 백업은 그 아래 레벨과 함께 쉼표로 이어 줍니다: 전체,레벨1[,레벨2]\n\
                   백업은 독립 모드로, 또는 쓰기가 없는 동안 받은 것이어야 합니다.\n\
   database-name   대상 데이터베이스. 미리 생성하고 스키마를 적재해 두어야 합니다.\n\
 \n\
