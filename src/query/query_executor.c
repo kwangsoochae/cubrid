@@ -439,6 +439,7 @@ static int qexec_plcsql_fetch_row (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XA
 				   PLCSQL_CURSOR * cursor);
 static int qexec_plcsql_cursor (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
 static int qexec_plcsql_sql (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
+static int qexec_plcsql_read_clock (XASL_STATE * xasl_state);
 static int qexec_plcsql_read_into (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
 static int qexec_execute_plcsql_loop (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
 static void qexec_clear_plcsql_turn (THREAD_ENTRY * thread_p, XASL_NODE * body);
@@ -29230,6 +29231,41 @@ qexec_execute_subquery_for_result_cache (THREAD_ENTRY * thread_p, XASL_NODE * xa
  */
 
 /*
+ * qexec_plcsql_read_clock () - read the time that SYS_DATETIME and its kin give from here on
+ *   return: NO_ERROR or ER_FAILED
+ *   xasl_state(in/out) :
+ *
+ * note: a query reads the clock once, as it starts, and every mention of SYS_DATETIME in it
+ *       gives that one time. A body is not one query: the reference implementation runs each
+ *       built-in it meets as a "select f from dual" of its own, and each SQL statement as a
+ *       statement of its own, so each of them reads the clock again. Here the whole body runs
+ *       on the one XASL_STATE its call was given, and it is read again before each expression
+ *       and each SQL statement to come to the same thing. Two mentions in one expression give
+ *       the one time, where the reference implementation's two queries may be a millisecond
+ *       apart.
+ */
+static int
+qexec_plcsql_read_clock (XASL_STATE * xasl_state)
+{
+  struct tm *c_time_struct, tm_val;
+  time_t sec;
+  int millisec;
+
+  util_get_second_and_ms_since_epoch (&sec, &millisec);
+  c_time_struct = localtime_r (&sec, &tm_val);
+  if (c_time_struct == NULL)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_DATE_CONVERSION, 0);
+      return ER_FAILED;
+    }
+
+  xasl_state->vd.sys_epochtime = (DB_TIMESTAMP) sec;
+  return db_datetime_encode (&xasl_state->vd.sys_datetime, c_time_struct->tm_mon + 1, c_time_struct->tm_mday,
+			     c_time_struct->tm_year + 1900, c_time_struct->tm_hour, c_time_struct->tm_min,
+			     c_time_struct->tm_sec, millisec);
+}
+
+/*
  * qexec_plcsql_fetch_value () - evaluate one procedural expression
  *   return: NO_ERROR or ER_FAILED
  *   thread_p(in) :
@@ -29240,6 +29276,11 @@ qexec_execute_subquery_for_result_cache (THREAD_ENTRY * thread_p, XASL_NODE * xa
 static int
 qexec_plcsql_fetch_value (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu, XASL_STATE * xasl_state, DB_VALUE ** value)
 {
+  if (qexec_plcsql_read_clock (xasl_state) != NO_ERROR)
+    {
+      return ER_FAILED;
+    }
+
   if (fetch_peek_dbval (thread_p, regu, &xasl_state->vd, NULL, NULL, NULL, value) != NO_ERROR)
     {
       return ER_FAILED;
@@ -30372,7 +30413,8 @@ qexec_plcsql_cursor (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xas
 	    }
 	}
 
-      if (qexec_execute_mainblock (thread_p, cursor->query, xasl_state, NULL) != NO_ERROR)
+      if (qexec_plcsql_read_clock (xasl_state) != NO_ERROR
+	  || qexec_execute_mainblock (thread_p, cursor->query, xasl_state, NULL) != NO_ERROR)
 	{
 	  return ER_FAILED;
 	}
@@ -30424,7 +30466,8 @@ qexec_plcsql_cursor (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xas
 static int
 qexec_plcsql_sql (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state)
 {
-  if (qexec_execute_mainblock (thread_p, xasl->proc.plcsql.children[0], xasl_state, NULL) != NO_ERROR)
+  if (qexec_plcsql_read_clock (xasl_state) != NO_ERROR
+      || qexec_execute_mainblock (thread_p, xasl->proc.plcsql.children[0], xasl_state, NULL) != NO_ERROR)
     {
       return ER_FAILED;
     }

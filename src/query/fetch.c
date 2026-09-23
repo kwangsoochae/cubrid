@@ -91,6 +91,7 @@ static bool fetch_agg_expr_eval_dbl (THREAD_ENTRY * thread_p, REGU_VARIABLE * re
 				     OID * obj_oid, QFILE_TUPLE tpl, double *out);
 
 static bool is_argument_wrapped_with_cast_op (const REGU_VARIABLE * regu_var);
+static bool fetch_arith_reads_clock_in_plcsql (OPERATOR_TYPE opcode, const val_descr * vd);
 static int get_hour_minute_or_second (const DB_VALUE * datetime, OPERATOR_TYPE op_type, DB_VALUE * db_value);
 static int get_year_month_or_day (const DB_VALUE * src_date, OPERATOR_TYPE op, DB_VALUE * result);
 static int get_date_weekday (const DB_VALUE * src_date, OPERATOR_TYPE op, DB_VALUE * result);
@@ -627,6 +628,46 @@ fetch_agg_expr_eval_dbl (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_
 
   *out = result;
   return true;
+}
+
+/*
+ * fetch_arith_reads_clock_in_plcsql () - whether an operator reads the clock of a procedure body
+ *   return: true for the operators that give the value descriptor's time, evaluated in a body
+ *   opcode(in) : the operator
+ *   vd(in)     : the value descriptor it is evaluated with
+ *
+ * note: an operator that reads nothing but the clock is taken for a constant, and its value
+ *       is kept on the node for the rest of the query - which is right for a query, since the
+ *       clock is read once as it starts. A procedure body reads the clock again before each
+ *       expression and each SQL statement, and a loop, or a routine called twice, evaluates
+ *       the same node again: what was kept would be the time of the first turn.
+ */
+static bool
+fetch_arith_reads_clock_in_plcsql (OPERATOR_TYPE opcode, const val_descr * vd)
+{
+  if (vd == NULL || vd->xasl_state == NULL || vd->xasl_state->plcsql_frame == NULL)
+    {
+      return false;
+    }
+
+  switch (opcode)
+    {
+    case T_SYS_DATE:
+    case T_SYS_TIME:
+    case T_SYS_TIMESTAMP:
+    case T_SYS_DATETIME:
+    case T_CURRENT_DATE:
+    case T_CURRENT_TIME:
+    case T_CURRENT_TIMESTAMP:
+    case T_CURRENT_DATETIME:
+    case T_UTC_TIME:
+    case T_UTC_DATE:
+    case T_UTC_TIMESTAMP:
+    case T_TZ_OFFSET:
+      return true;
+    default:
+      return false;
+    }
 }
 
 /*
@@ -4501,6 +4542,11 @@ fetch_peek_arith (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr *
 
       assert (arithptr->pred == NULL);
 
+      if (fetch_arith_reads_clock_in_plcsql (arithptr->opcode, vd))
+	{
+	  not_const++;
+	}
+
       if (arithptr->leftptr == NULL || REGU_VARIABLE_IS_FLAGED (arithptr->leftptr, REGU_VARIABLE_FETCH_ALL_CONST))
 	{
 	  ;			/* is_const, go ahead */
@@ -4626,6 +4672,8 @@ fetch_execute_plcsql (THREAD_ENTRY * thread_p, SP_TYPE * sp, val_descr * vd, OID
   XASL_STATE *xasl_state = vd->xasl_state;
   PLCSQL_FRAME *caller, *frame;
   REGU_VARIABLE_LIST arg;
+  DB_DATETIME caller_datetime;
+  DB_TIMESTAMP caller_epochtime;
   int error, i;
 
   if (xasl_state == NULL)
@@ -4676,10 +4724,19 @@ fetch_execute_plcsql (THREAD_ENTRY * thread_p, SP_TYPE * sp, val_descr * vd, OID
 	}
     }
 
+  /* the body reads the clock again as it goes, on the XASL_STATE of the statement making the
+   * call, and that statement still has to give the one time it started with once the call is
+   * back */
+  caller_datetime = xasl_state->vd.sys_datetime;
+  caller_epochtime = xasl_state->vd.sys_epochtime;
+
   caller = xasl_state->plcsql_frame;
   xasl_state->plcsql_frame = frame;
   error = qexec_execute_plcsql (thread_p, sp->plcsql, xasl_state);
   xasl_state->plcsql_frame = caller;
+
+  xasl_state->vd.sys_datetime = caller_datetime;
+  xasl_state->vd.sys_epochtime = caller_epochtime;
 
   /* what a RETURN left, which is NULL for a procedure and for a function that reached its end
    * without one. The caller cleared the value before the call. */
