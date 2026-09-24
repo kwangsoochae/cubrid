@@ -5100,6 +5100,15 @@ fetch_peek_dbval_slow (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_de
 	error = executor.fetch_args_peek (regu_var->value.sp_ptr->args, vd, obj_oid, tpl);
 	if (error != NO_ERROR || er_errid () != NO_ERROR)
 	  {
+	    /* An argument a PL/CSQL body evaluates natively fails before the routine is called,
+	     * and the PL engine raises that failure as it is - ZERO_DIVIDE for a division by
+	     * zero, which a handler in the body may catch. Wrapped as the routine's own failure it
+	     * would reach the body as SQL_ERROR instead. A query calling a routine keeps the
+	     * wrapper it has always had. */
+	    if (vd != NULL && vd->xasl_state != NULL && vd->xasl_state->plcsql_frame != NULL && er_errid () != NO_ERROR)
+	      {
+		goto exit_on_error;
+	      }
 	    /* the stack can be null when the executor refused to start (interrupt, expired session) */
 	    er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_SP_EXECUTE_ERROR, 1,
 		    executor.get_stack ()? executor.get_stack ()->get_error_message ().c_str () : "");
