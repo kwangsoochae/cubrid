@@ -3832,6 +3832,7 @@ qexec_alloc_plcsql_frame (THREAD_ENTRY * thread_p, int locals_cnt, int cursors_c
 
   frame->locals = NULL;
   frame->locals_cnt = locals_cnt;
+  frame->alias = NULL;
   frame->cursors = NULL;
   frame->cursors_cnt = cursors_cnt;
   frame->routines = NULL;
@@ -3901,6 +3902,17 @@ qexec_alloc_plcsql_frame (THREAD_ENTRY * thread_p, int locals_cnt, int cursors_c
 	{
 	  db_make_null (&frame->locals[i]);
 	}
+
+      frame->alias = (int *) db_private_alloc (thread_p, sizeof (int) * locals_cnt);
+      if (frame->alias == NULL)
+	{
+	  qexec_free_plcsql_frame (thread_p, frame);
+	  return NULL;
+	}
+      for (i = 0; i < locals_cnt; i++)
+	{
+	  frame->alias[i] = -1;
+	}
     }
 
   /* what a body reads before anything has failed, and again once every handler is done */
@@ -3961,6 +3973,10 @@ qexec_free_plcsql_frame (THREAD_ENTRY * thread_p, PLCSQL_FRAME * frame)
 	  pr_clear_value (&frame->locals[i]);
 	}
       db_private_free_and_init (thread_p, frame->locals);
+    }
+  if (frame->alias != NULL)
+    {
+      db_private_free_and_init (thread_p, frame->alias);
     }
   pr_clear_value (&frame->retval);
   if (frame->placed != NULL)
@@ -29320,6 +29336,35 @@ qexec_plcsql_set_retval (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE *
 }
 
 /*
+ * qexec_plcsql_slot_of () - the slot that holds a local's value
+ *   return: slot itself, or the slot it stands for while it is an aliased parameter
+ *   frame(in) :
+ *   slot(in)  :
+ *
+ * note: an alias can name another one - a routine passing its own aliased parameter on to a
+ *       routine of its own - so it is followed to the end. Never further than there are slots,
+ *       which a well-formed table cannot need.
+ */
+int
+qexec_plcsql_slot_of (const PLCSQL_FRAME * frame, int slot)
+{
+  int steps;
+
+  if (frame == NULL || frame->alias == NULL)
+    {
+      return slot;
+    }
+
+  for (steps = 0; steps < frame->locals_cnt && slot >= 0 && slot < frame->locals_cnt && frame->alias[slot] >= 0;
+       steps++)
+    {
+      slot = frame->alias[slot];
+    }
+
+  return slot;
+}
+
+/*
  * qexec_plcsql_assign () - write one slot
  *   return: NO_ERROR or ER_FAILED
  */
@@ -29329,7 +29374,7 @@ qexec_plcsql_assign (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xas
   PLCSQL_FRAME *frame = xasl_state->plcsql_frame;
   DB_VALUE *value = NULL;
   DB_VALUE copy;
-  int slot = xasl->proc.plcsql.target_slot;
+  int slot = qexec_plcsql_slot_of (xasl_state->plcsql_frame, xasl->proc.plcsql.target_slot);
 
   assert (frame != NULL && slot >= 0 && slot < frame->locals_cnt);
 
@@ -29780,6 +29825,9 @@ qexec_plcsql_run_local (THREAD_ENTRY * thread_p, XASL_STATE * xasl_state, int nu
   PLCSQL_ROUTINE *routine;
   REGU_VARIABLE_LIST arg;
   DB_VALUE *saved = NULL, *argv = NULL;
+  int *saved_alias = NULL;
+  bool *aliased = NULL;
+  int *targets = NULL;
   DB_VALUE outer_retval;
   PLCSQL_SIGNAL outer_signal;
   int outer_level, base, cnt, argc = 0, i, rc = NO_ERROR;
@@ -29838,7 +29886,8 @@ qexec_plcsql_run_local (THREAD_ENTRY * thread_p, XASL_STATE * xasl_state, int nu
 	{
 	  DB_VALUE *value = NULL;
 
-	  if (qexec_plcsql_mode_of (routine, i) == PLCSQL_PARAM_OUT)
+	  if (qexec_plcsql_mode_of (routine, i) == PLCSQL_PARAM_OUT
+	      || REGU_VARIABLE_IS_FLAGED (&arg->value, REGU_VARIABLE_PLCSQL_BY_ALIAS))
 	    {
 	      /* nothing goes in: the reference implementation starts one at NULL, which is what a
 	       * body that never writes it leaves the caller's variable at */
@@ -29883,6 +29932,66 @@ qexec_plcsql_run_local (THREAD_ENTRY * thread_p, XASL_STATE * xasl_state, int nu
       db_make_null (&argv[i]);
     }
 
+  /* The run's aliases are put aside with its slots, so a routine calling itself starts with
+   * parameters of its own. Then each aliased argument makes its parameter stand for the
+   * variable itself: what the body writes to the parameter lands there, and what it writes to
+   * the variable under another name is what the parameter reads. The PL engine passes that
+   * variable's own storage (JavaCodeWriter.getLocalCallCodeSnippets, Coercion.Identity), and an
+   * OUT parameter it passes that way is set NULL on entry - the variable with it. A target
+   * inside the run being put aside is not aliased: its value is in the buffer, not in a slot,
+   * and it goes the copying way instead. */
+  saved_alias = (int *) db_private_alloc (thread_p, sizeof (int) * (cnt > 0 ? cnt : 1));
+  aliased = (bool *) db_private_alloc (thread_p, sizeof (bool) * (argc > 0 ? argc : 1));
+  targets = (int *) db_private_alloc (thread_p, sizeof (int) * (argc > 0 ? argc : 1));
+  if (saved_alias == NULL || aliased == NULL || targets == NULL)
+    {
+      rc = ER_FAILED;
+      goto restore;
+    }
+
+  /* what each argument stands for is read while the caller's own aliases are still in place:
+   * a routine handing its aliased parameter on hands on the variable behind it */
+  i = 0;
+  for (arg = args; arg != NULL; arg = arg->next, i++)
+    {
+      aliased[i] = false;
+      targets[i] = (arg->value.type == TYPE_PLCSQL_SLOT) ? qexec_plcsql_slot_of (frame, arg->value.value.plcsql_slot) : -1;
+    }
+  for (i = 0; i < cnt; i++)
+    {
+      saved_alias[i] = frame->alias[base + i];
+      frame->alias[base + i] = -1;
+    }
+  i = 0;
+  for (arg = args; arg != NULL; arg = arg->next, i++)
+    {
+      int mode = qexec_plcsql_mode_of (routine, i);
+      int target;
+
+      if (!REGU_VARIABLE_IS_FLAGED (&arg->value, REGU_VARIABLE_PLCSQL_BY_ALIAS)
+	  || (mode != PLCSQL_PARAM_OUT && mode != PLCSQL_PARAM_IN_OUT) || arg->value.type != TYPE_PLCSQL_SLOT)
+	{
+	  continue;
+	}
+      target = targets[i];
+      if (target < 0 || target >= frame->locals_cnt || (target >= base && target < base + cnt))
+	{
+	  if (mode == PLCSQL_PARAM_IN_OUT && target >= base && target < base + cnt)
+	    {
+	      pr_clear_value (&frame->locals[base + i]);
+	      (void) pr_clone_value (&saved[target - base], &frame->locals[base + i]);
+	    }
+	  continue;
+	}
+      frame->alias[base + i] = target;
+      aliased[i] = true;
+      if (mode == PLCSQL_PARAM_OUT)
+	{
+	  pr_clear_value (&frame->locals[target]);
+	  db_make_null (&frame->locals[target]);
+	}
+    }
+
   frame->signal = PLCSQL_SIGNAL_NONE;
   frame->signal_level = 0;
   frame->call_depth++;
@@ -29904,26 +30013,40 @@ qexec_plcsql_run_local (THREAD_ENTRY * thread_p, XASL_STATE * xasl_state, int nu
       int mode = qexec_plcsql_mode_of (routine, i);
       int target;
 
-      if ((mode != PLCSQL_PARAM_OUT && mode != PLCSQL_PARAM_IN_OUT) || arg->value.type != TYPE_PLCSQL_SLOT)
+      if ((mode != PLCSQL_PARAM_OUT && mode != PLCSQL_PARAM_IN_OUT) || arg->value.type != TYPE_PLCSQL_SLOT
+	  || aliased[i])
 	{
+	  /* an aliased one has nothing to give back: it wrote the variable all along */
 	  continue;
 	}
 
-      target = arg->value.value.plcsql_slot;
+      target = qexec_plcsql_slot_of (frame, arg->value.value.plcsql_slot);
       if (target < 0 || target >= frame->locals_cnt)
 	{
 	  continue;
 	}
-      if (target >= base && target < base + cnt)
-	{
-	  pr_clear_value (&saved[target - base]);
-	  (void) pr_clone_value (&frame->locals[base + i], &saved[target - base]);
-	}
-      else
-	{
-	  pr_clear_value (&frame->locals[target]);
-	  (void) pr_clone_value (&frame->locals[base + i], &frame->locals[target]);
-	}
+
+      /* A copy goes back as the variable's type, which is what the PL engine's reverse coercion
+       * does (cRev in getLocalCallCodeSnippets): an OUT NUMERIC(6,2) handed back into a
+       * NUMERIC(10,4) variable comes back with four places. */
+      {
+	DB_VALUE *dest = (target >= base && target < base + cnt) ? &saved[target - base] : &frame->locals[target];
+	DB_VALUE back;
+
+	db_make_null (&back);
+	if (arg->value.domain != NULL
+	    && tp_value_cast (&frame->locals[base + i], &back, arg->value.domain, false) == DOMAIN_COMPATIBLE)
+	  {
+	    pr_clear_value (dest);
+	    *dest = back;
+	  }
+	else
+	  {
+	    pr_clear_value (&back);
+	    pr_clear_value (dest);
+	    (void) pr_clone_value (&frame->locals[base + i], dest);
+	  }
+      }
     }
 
   /* what a RETURN left has to be read before the run is given back, because the outer frame's
@@ -29939,6 +30062,23 @@ qexec_plcsql_run_local (THREAD_ENTRY * thread_p, XASL_STATE * xasl_state, int nu
       rc = pr_clone_value (&frame->retval, result);
     }
 
+restore:
+  if (saved_alias != NULL)
+    {
+      for (i = 0; i < cnt; i++)
+	{
+	  frame->alias[base + i] = saved_alias[i];
+	}
+      db_private_free_and_init (thread_p, saved_alias);
+    }
+  if (aliased != NULL)
+    {
+      db_private_free_and_init (thread_p, aliased);
+    }
+  if (targets != NULL)
+    {
+      db_private_free_and_init (thread_p, targets);
+    }
   for (i = 0; i < cnt; i++)
     {
       pr_clear_value (&frame->locals[base + i]);

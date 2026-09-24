@@ -126,6 +126,8 @@ struct plcsql_frame
 {
   DB_VALUE *locals;
   int locals_cnt;
+  int *alias;			/* per slot: the slot this one stands for while a local routine runs
+				 * with it as an aliased OUT or IN OUT parameter, -1 otherwise */
 
   PLCSQL_CURSOR *cursors;
   int cursors_cnt;
@@ -205,6 +207,7 @@ extern int qexec_plcsql_run_local (THREAD_ENTRY * thread_p, xasl_state * xasl_st
 extern PLCSQL_FRAME *qexec_alloc_plcsql_frame (THREAD_ENTRY * thread_p, int locals_cnt, int cursors_cnt,
 					       int routines_cnt, PLCSQL_FRAME * caller);
 extern void qexec_free_plcsql_frame (THREAD_ENTRY * thread_p, PLCSQL_FRAME * frame);
+extern int qexec_plcsql_slot_of (const PLCSQL_FRAME * frame, int slot);
 extern int qexec_execute_plcsql (THREAD_ENTRY * thread_p, xasl_node * xasl, xasl_state * xstate);
 extern int qexec_call_plcsql (THREAD_ENTRY * thread_p, xasl_node * xasl, DB_VALUE * args, int args_cnt,
 			      DB_VALUE * result, char **placed_msg);
