@@ -3475,6 +3475,7 @@ struct pt_sp_stmt_info
 				 * CALL: the PT_METHOD_CALL, so that the SQL side's own lowering
 				 * of a stored procedure call can be reused whole */
   PT_NODE *expr2;		/* upper bound of a FOR range */
+  PT_NODE *expr3;		/* step of a FOR range, the expression after BY; NULL when none was written */
   PT_NODE *params;		/* BLOCK: the routine's parameters, when the header was parsed.
 				 * Only the outermost block of a routine has any.
 				 * CURSOR: the parameters its query is written against */

@@ -30860,7 +30860,8 @@ pt_plcsql_resolve_stmt_list (PARSER_CONTEXT * parser, PT_NODE * list, PT_PLCSQL_
 	  /* the bounds of a FOR are read once, before the variable exists, so they stand in the
 	   * enclosing scope - the same one a WHILE condition stands in */
 	  if (pt_plcsql_resolve_expr (parser, &stmt->info.sp_stmt.expr, scope) != NO_ERROR
-	      || pt_plcsql_resolve_expr (parser, &stmt->info.sp_stmt.expr2, scope) != NO_ERROR)
+	      || pt_plcsql_resolve_expr (parser, &stmt->info.sp_stmt.expr2, scope) != NO_ERROR
+	      || pt_plcsql_resolve_expr (parser, &stmt->info.sp_stmt.expr3, scope) != NO_ERROR)
 	    {
 	      return ER_FAILED;
 	    }
@@ -32910,6 +32911,27 @@ pt_to_plcsql_stmt_inner (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * re
       if (buf[0] == NULL)
 	{
 	  return NULL;
+	}
+
+      /* a FOR's step rides as a second child that only carries the expression - the node has no
+       * third expression of its own, and a child is already serialized with it */
+      if (stmt->info.sp_stmt.expr3 != NULL)
+	{
+	  buf[1] = pt_plcsql_new_node (PLCSQL_OP_ASSIGN);
+	  if (buf[1] == NULL)
+	    {
+	      return NULL;
+	    }
+	  /* a step that is not positive is reported where the loop begins, which is where the PL
+	   * engine reports it (checkForLoopIterStep runs as part of the FOR statement) */
+	  buf[1]->proc.plcsql.line = stmt->line_number;
+	  buf[1]->proc.plcsql.column = stmt->column_number;
+	  buf[1]->proc.plcsql.expr = pt_plcsql_expr_to_regu (parser, &stmt->info.sp_stmt.expr3);
+	  if (buf[1]->proc.plcsql.expr == NULL)
+	    {
+	      return NULL;
+	    }
+	  return pt_plcsql_set_children (parser, xasl, buf, 2) == NO_ERROR ? xasl : NULL;
 	}
       return pt_plcsql_set_children (parser, xasl, buf, 1) == NO_ERROR ? xasl : NULL;
 

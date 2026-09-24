@@ -8304,6 +8304,7 @@ pt_apply_sp_stmt (PARSER_CONTEXT * parser, PT_NODE * p, void *arg)
   PT_APPLY_WALK (parser, p->info.sp_stmt.label, arg);
   PT_APPLY_WALK (parser, p->info.sp_stmt.expr, arg);
   PT_APPLY_WALK (parser, p->info.sp_stmt.expr2, arg);
+  PT_APPLY_WALK (parser, p->info.sp_stmt.expr3, arg);
   PT_APPLY_WALK (parser, p->info.sp_stmt.decl_list, arg);
   PT_APPLY_WALK (parser, p->info.sp_stmt.body, arg);
   PT_APPLY_WALK (parser, p->info.sp_stmt.else_body, arg);
@@ -8459,6 +8460,12 @@ pt_print_sp_stmt (PARSER_CONTEXT * parser, PT_NODE * p)
 	  q = pt_append_nulstring (parser, q, " .. ");
 	  r1 = pt_print_bytes (parser, p->info.sp_stmt.expr2);
 	  q = pt_append_varchar (parser, q, r1);
+	  if (p->info.sp_stmt.expr3 != NULL)
+	    {
+	      q = pt_append_nulstring (parser, q, " by ");
+	      r1 = pt_print_bytes (parser, p->info.sp_stmt.expr3);
+	      q = pt_append_varchar (parser, q, r1);
+	    }
 	  q = pt_append_nulstring (parser, q, " ");
 	}
       q = pt_append_nulstring (parser, q, "loop ");

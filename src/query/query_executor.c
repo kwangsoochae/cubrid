@@ -30621,7 +30621,7 @@ qexec_execute_plcsql_loop (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE
   bool reverse = (xasl->proc.plcsql.flags & PLCSQL_LOOP_REVERSE) != 0;
   int max_turns = prm_get_integer_value (PRM_ID_PL_MAX_LOOP_ITERATIONS);
   int turns = 0;
-  int lower = 0, upper = 0, counter = 0;
+  int lower = 0, upper = 0, counter = 0, step = 1;
   bool is_null = false;
   bool taken;
 
@@ -30638,6 +30638,30 @@ qexec_execute_plcsql_loop (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE
 	{
 	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_DATATYPE, 0);
 	  return ER_FAILED;
+	}
+
+      /* the step is read after both bounds and checked before the first turn, even for a range
+       * that runs none - the PL engine's order (checkForLoopIterStep) */
+      if (xasl->proc.plcsql.children_cnt > 1)
+	{
+	  if (qexec_plcsql_as_int (thread_p, xasl->proc.plcsql.children[1]->proc.plcsql.expr, xasl_state, &step,
+				   &is_null) != NO_ERROR)
+	    {
+	      return ER_FAILED;
+	    }
+	  if (is_null)
+	    {
+	      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_DATATYPE, 0);
+	      return ER_FAILED;
+	    }
+	  if (step <= 0)
+	    {
+	      frame->raising = PLCSQL_EXC_VALUE_ERROR;
+	      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_PT_ERROR, 1,
+		      "FOR loop iteration steps must be positive integers");
+	      qexec_plcsql_place (thread_p, frame, xasl->proc.plcsql.children[1], er_msg ());
+	      return ER_FAILED;
+	    }
 	}
       counter = reverse ? upper : lower;
     }
@@ -30715,7 +30739,14 @@ qexec_execute_plcsql_loop (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE
 
       if (form == PLCSQL_LOOP_FOR)
 	{
-	  counter += reverse ? -1 : 1;
+	  /* stepped in 64 bits: a step past either bound ends the loop rather than wrapping round */
+	  INT64 next = (INT64) counter + (reverse ? -step : step);
+
+	  if (next > upper || next < lower)
+	    {
+	      return NO_ERROR;
+	    }
+	  counter = (int) next;
 	}
 
       qexec_clear_plcsql_turn (thread_p, body);

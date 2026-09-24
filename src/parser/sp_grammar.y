@@ -110,6 +110,7 @@ static PT_NODE *sp_make_case_stmt (PT_NODE * selector, PT_NODE * arms, PT_NODE *
 %type <number> param_mode_opt
 %type <node> routine param_list_opt param_list param
 %type <number> constant_opt reverse_opt
+%type <node> for_step_opt
 
 %left OR_
 %left AND_
@@ -855,12 +856,34 @@ loop_stmt
 
 		  $$ = sp_make_loop (PT_SP_LOOP_WHILE, $1, NULL, $3, NULL, $5, at.first_line, at.first_column);
 		}
-	| label_decl_opt FOR_ IDENT IN_ reverse_opt expr DOTDOT expr LOOP_ stmt_list END_ LOOP_ label_opt ';'
+	| label_decl_opt FOR_ IDENT IN_ reverse_opt expr DOTDOT expr for_step_opt LOOP_ stmt_list END_ LOOP_ label_opt ';'
 		{
 		  YYLTYPE at = ($1 != NULL) ? @1 : @2;
 
-		  $$ = sp_make_loop (PT_SP_LOOP_FOR | $5, $1, SP_AT (pt_name (sp_Parser, $3), @3), $6, $8, $10,
+		  $$ = sp_make_loop (PT_SP_LOOP_FOR | $5, $1, SP_AT (pt_name (sp_Parser, $3), @3), $6, $8, $11,
 				     at.first_line, at.first_column);
+		  if ($$ != NULL)
+		    {
+		      $$->info.sp_stmt.expr3 = $9;
+		    }
+		}
+	;
+
+/* BY is not made a keyword: it is read as the identifier it looks like and checked for here, so a
+ * body may still name a variable by. Nothing else can stand between a range and LOOP. */
+for_step_opt
+	: /* empty */
+		{
+		  $$ = NULL;
+		}
+	| IDENT expr
+		{
+		  if (strcasecmp ($1, "by") != 0)
+		    {
+		      sp_yyerror ("syntax error");
+		      YYERROR;
+		    }
+		  $$ = $2;
 		}
 	;
 
