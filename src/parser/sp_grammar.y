@@ -269,6 +269,19 @@ param_default_opt
 		{
 		  parser_free_tree (sp_Parser, $2);
 		}
+	/* the catalog keeps a routine's header the way CREATE printed it, and it prints a default
+	 * with DEFAULT whichever way it was written - so the text a CALL compiles says DEFAULT even
+	 * for a body that wrote :=. DEFAULT is read as the identifier it looks like and checked, so
+	 * no word is reserved for it. */
+	| IDENT expr
+		{
+		  parser_free_tree (sp_Parser, $2);
+		  if (strcasecmp ($1, "default") != 0)
+		    {
+		      sp_yyerror ("syntax error");
+		      YYERROR;
+		    }
+		}
 	;
 
 /* The body of a procedure: its declaration part is the text between AS and BEGIN, so it
@@ -1060,7 +1073,14 @@ expr
 		{
 		  PT_NODE *call = NULL;
 
-		  if (!PT_NAME_RESOLVED ($1))
+		  if (!PT_NAME_RESOLVED ($1) && $3 == NULL && strcasecmp (PT_NAME_ORIGINAL ($1), "user") == 0)
+		    {
+		      /* USER written bare is the current user and USER () the user and host - the SQL
+		       * grammar makes the two different nodes, and the table below has only the bare
+		       * one, for it is keyed by name alone */
+		      call = SP_AT (parser_make_expression (sp_Parser, PT_USER, NULL, NULL, NULL), @$);
+		    }
+		  else if (!PT_NAME_RESOLVED ($1))
 		    {
 		      call = parser_plcsql_builtin_func (sp_Parser, PT_NAME_ORIGINAL ($1), $3);
 		    }
@@ -1761,15 +1781,24 @@ sp_make_real_literal (const char *text, int line, int column)
     {
       double d;
 
-      /* the SQL grammar's own reading of a number too large to hold, down to the sentence:
-       * without the check strtod () hands back an infinity and the body goes on computing
-       * with it, which no CUBRID type has a value for */
+      /* A number too large to hold is not refused here: the PL engine takes the body and
+       * raises the overflow when the literal is evaluated. The text is kept and cast to
+       * DOUBLE instead, so that the conversion - and its error - happens at the same point.
+       * Left as a value, strtod () would hand back an infinity for the body to go on with,
+       * which no CUBRID type has a value for. */
       errno = 0;
       d = strtod (text, NULL);
       if (errno == ERANGE)
 	{
-	  PT_ERRORmf2 (sp_Parser, val, MSGCAT_SET_PARSER_SYNTAX, MSGCAT_SYNTAX_FLT_DBL_OVERFLOW, text,
-		       pt_show_type_enum (PT_TYPE_DOUBLE));
+	  PT_NODE *str = sp_at (pt_make_string_value (sp_Parser, text), line, column);
+	  PT_NODE *cast = sp_at (pt_wrap_with_cast_op (sp_Parser, str, PT_TYPE_DOUBLE, 0, 0, NULL), line, column);
+
+	  /* folded, the cast would fail while the body compiles - the point is that it does not */
+	  if (cast != NULL)
+	    {
+	      cast->flag.do_not_fold = 1;
+	    }
+	  return cast;
 	}
 
       val->type_enum = PT_TYPE_DOUBLE;
