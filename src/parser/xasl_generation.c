@@ -31568,6 +31568,9 @@ static PT_NODE *
 pt_plcsql_type_expr (PARSER_CONTEXT * parser, PT_NODE * expr)
 {
   int error = NO_ERROR;
+  int places[16][2];
+  int cnt = 0, i;
+  PT_NODE *node, *typed;
 
   (void) parser_walk_tree (parser, expr, pt_plcsql_type_call_pre, &error, NULL, NULL);
   if (error != NO_ERROR)
@@ -31575,7 +31578,25 @@ pt_plcsql_type_expr (PARSER_CONTEXT * parser, PT_NODE * expr)
       return NULL;
     }
 
-  return pt_semantic_type (parser, expr, NULL);
+  /* Folding and casting hand back new nodes, and a new node takes its place from the SQL
+   * lexer's globals - a position in some other text. Where an error is reported from is read
+   * off the expression the statement evaluates, so each top-level expression keeps the place
+   * the body wrote it at. */
+  for (node = expr; node != NULL && cnt < 16; node = node->next, cnt++)
+    {
+      places[cnt][0] = node->line_number;
+      places[cnt][1] = node->column_number;
+    }
+
+  typed = pt_semantic_type (parser, expr, NULL);
+
+  for (node = typed, i = 0; node != NULL && i < cnt; node = node->next, i++)
+    {
+      node->line_number = places[i][0];
+      node->column_number = places[i][1];
+    }
+
+  return typed;
 }
 
 /*
