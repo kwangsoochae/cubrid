@@ -71,6 +71,7 @@ static PT_NODE *sp_make_boolean_literal (bool value);
 static PT_NODE *sp_make_typed_literal (PT_TYPE_ENUM type, const char *text);
 static PT_NODE *sp_make_data_type (PT_TYPE_ENUM type, int precision, int scale);
 static PT_NODE *sp_make_case (PT_NODE * operand, PT_NODE * when_list, PT_NODE * else_expr);
+static PT_NODE *sp_as_condition (PT_NODE * operand);
 
 /* The location bison built for a rule, put on the node that rule returns. It is a macro
  * because @$ is only a location inside an action - bison rewrites it there, and would leave
@@ -889,17 +890,20 @@ expr
 		{
 		  $$ = SP_AT (sp_make_reserved (PT_SP_RESERVED_SQLERRM), @$);
 		}
+	/* the operands of a logical operator are conditions - see sp_as_condition () */
 	| expr OR_ expr
 		{
-		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_OR, $1, $3, NULL), @$);
+		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_OR, sp_as_condition ($1), sp_as_condition ($3), NULL),
+			      @$);
 		}
 	| expr AND_ expr
 		{
-		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_AND, $1, $3, NULL), @$);
+		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_AND, sp_as_condition ($1), sp_as_condition ($3), NULL),
+			      @$);
 		}
 	| NOT_ expr
 		{
-		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_NOT, $2, NULL, NULL), @$);
+		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_NOT, sp_as_condition ($2), NULL, NULL), @$);
 		}
 	| expr '=' expr
 		{
@@ -1335,6 +1339,51 @@ sp_make_data_type (PT_TYPE_ENUM type, int precision, int scale)
     }
 
   return dt;
+}
+
+/*
+ * sp_as_condition () - an operand of AND, OR or NOT, in the shape the predicate builder reads
+ *   return: operand itself when it is AND, OR or NOT already, otherwise (operand) = TRUE
+ *   operand(in) : what was written on one side of the operator
+ *
+ * note: the predicate builder makes a condition of a PT_EXPR and a constant of anything else,
+ *       from a field only a PT_VALUE has (xasl_generation.c, pt_to_pred_expr_local_with_arg ()).
+ *       A boolean variable, a parameter or a function call written beside AND or OR was read
+ *       that way, as whatever that field held, and so was a comparison once folding had made a
+ *       NULL value of it (a = NULL), which came out false.
+ *
+ *       Compared with TRUE, an operand is the condition it stands for: true on true, false on
+ *       false and unknown on NULL, and AND, OR and NOT then carry SQL's three-valued logic -
+ *       which is the rule here, not the PL engine's "NULL when either side is" (the manual has
+ *       the operators behave as they do in SQL). The comparison is kept from folding: folded, a
+ *       NULL side would make a NULL value of it again and the constant would be back.
+ */
+static PT_NODE *
+sp_as_condition (PT_NODE * operand)
+{
+  PT_NODE *eq, *yes;
+
+  if (operand == NULL
+      || (operand->node_type == PT_EXPR
+	  && (operand->info.expr.op == PT_AND || operand->info.expr.op == PT_OR || operand->info.expr.op == PT_NOT)))
+    {
+      return operand;
+    }
+
+  eq = parser_new_node (sp_Parser, PT_EXPR);
+  yes = sp_make_boolean_literal (true);
+  if (eq == NULL || yes == NULL)
+    {
+      return operand;
+    }
+  eq->info.expr.op = PT_EQ;
+  eq->info.expr.arg1 = operand;
+  eq->info.expr.arg2 = yes;
+  eq->flag.do_not_fold = 1;
+  eq->line_number = operand->line_number;
+  eq->column_number = operand->column_number;
+
+  return eq;
 }
 
 /*
