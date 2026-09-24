@@ -11194,6 +11194,26 @@ cdc_check_client_connection ()
 }
 #endif /* ENABLE_UNUSED_FUNCTION */
 
+/*
+ * spl_blank_out_args () - start every OUT parameter at NULL before a procedure runs natively
+ *
+ * note: the client sends the value its variable holds for every argument, OUT ones included, and
+ *       the PL engine does not hand an OUT parameter that value - it starts at NULL. An IN OUT one
+ *       keeps it.
+ */
+static void
+spl_blank_out_args (const cubpl::pl_signature &sig, std::vector < DB_VALUE > &args)
+{
+  for (int i = 0; i < sig.arg.arg_size && i < (int) args.size (); i++)
+    {
+      if (sig.arg.arg_mode[i] == SP_MODE_OUT)
+	{
+	  pr_clear_value (&args[i]);
+	  db_make_null (&args[i]);
+	}
+    }
+}
+
 void
 spl_call (THREAD_ENTRY *thread_p, unsigned int rid, char *request, int reqlen)
 {
@@ -11216,7 +11236,10 @@ spl_call (THREAD_ENTRY *thread_p, unsigned int rid, char *request, int reqlen)
   /* 2) invoke. The executor is raised only on the PL engine path - building one opens an
    *    execution stack on the session, which a natively run procedure has no use for. */
   std::optional < cubpl::executor > executor;
-  std::vector < DB_VALUE > no_out_args;
+  /* what OUT and IN OUT parameters hold when a natively run procedure ends, in the order the
+   * reply carries them - the order the PL engine's executor fills its own */
+  std::vector < DB_VALUE > native_out_args;
+  bool ran_native = false;
   char *placed_msg = NULL;
 
   if (plan_op == cubpl::PL_PLAN_USE_FILED && plan.empty ())
@@ -11260,8 +11283,10 @@ spl_call (THREAD_ENTRY *thread_p, unsigned int rid, char *request, int reqlen)
 	}
       else
 	{
+	  spl_blank_out_args (sig, args);
 	  error_code = qexec_call_plcsql (thread_p, xclone.xasl, args.data (), (int) args.size (), &ret_value,
 					  &placed_msg);
+	  ran_native = true;
 	  xcache_retire_clone (thread_p, xcache_entry, &xclone);
 	  xcache_unfix (thread_p, xcache_entry);
 	}
@@ -11337,7 +11362,9 @@ spl_call (THREAD_ENTRY *thread_p, unsigned int rid, char *request, int reqlen)
 					   &unpack_info);
       if (error_code == NO_ERROR && xasl != NULL)
 	{
+	  spl_blank_out_args (sig, args);
 	  error_code = qexec_call_plcsql (thread_p, xasl, args.data (), (int) args.size (), &ret_value, &placed_msg);
+	  ran_native = true;
 	}
       else if (error_code == NO_ERROR)
 	{
@@ -11359,12 +11386,25 @@ spl_call (THREAD_ENTRY *thread_p, unsigned int rid, char *request, int reqlen)
 	}
     }
 
+  /* qexec_call_plcsql () has written what the parameters ended with back over the arguments */
+  for (int i = 0; ran_native && error_code == NO_ERROR && i < sig.arg.arg_size && i < (int) args.size (); i++)
+    {
+      if (sig.arg.arg_mode[i] != SP_MODE_IN)
+	{
+	  DB_VALUE out_val;
+
+	  db_make_null (&out_val);
+	  error_code = pr_clone_value (&args[i], &out_val);
+	  native_out_args.push_back (out_val);
+	}
+    }
+
   packing_packer packer;
   cubmem::extensible_block eb;
   if (error_code == NO_ERROR)
     {
       /* 3) pack */
-      packer.set_buffer_and_pack_all (eb, ret_value, executor ? executor->get_out_args () : no_out_args);
+      packer.set_buffer_and_pack_all (eb, ret_value, executor ? executor->get_out_args () : native_out_args);
     }
   else
     {
@@ -11442,6 +11482,7 @@ spl_call (THREAD_ENTRY *thread_p, unsigned int rid, char *request, int reqlen)
     {
       db_private_free_and_init (thread_p, placed_msg);
     }
+  pr_clear_value_vector (native_out_args);
   pr_clear_value_vector (args);
   db_value_clear (&ret_value);
 }

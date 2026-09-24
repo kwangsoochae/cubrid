@@ -30872,6 +30872,14 @@ qexec_call_plcsql (THREAD_ENTRY * thread_p, XASL_NODE * xasl, DB_VALUE * args, i
 	{
 	  error = pr_clone_value (&frame->retval, result);
 	}
+      /* what the parameters hold at the end goes back over the arguments, which is how an OUT or
+       * IN OUT parameter reaches the caller. The caller knows the modes and takes only those;
+       * an IN parameter written back is a copy nobody reads. */
+      for (i = 0; error == NO_ERROR && i < args_cnt; i++)
+	{
+	  pr_clear_value (&args[i]);
+	  error = pr_clone_value (&frame->locals[PLCSQL_RESERVED_SLOTS + i], &args[i]);
+	}
     }
   *placed_msg = frame->placed;
   frame->placed = NULL;
