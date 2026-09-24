@@ -1073,7 +1073,14 @@ expr
 		{
 		  PT_NODE *call = NULL;
 
-		  if (!PT_NAME_RESOLVED ($1))
+		  if (!PT_NAME_RESOLVED ($1) && $3 == NULL && strcasecmp (PT_NAME_ORIGINAL ($1), "user") == 0)
+		    {
+		      /* USER written bare is the current user and USER () the user and host - the SQL
+		       * grammar makes the two different nodes, and the table below has only the bare
+		       * one, for it is keyed by name alone */
+		      call = SP_AT (parser_make_expression (sp_Parser, PT_USER, NULL, NULL, NULL), @$);
+		    }
+		  else if (!PT_NAME_RESOLVED ($1))
 		    {
 		      call = parser_plcsql_builtin_func (sp_Parser, PT_NAME_ORIGINAL ($1), $3);
 		    }
