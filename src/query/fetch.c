@@ -3198,7 +3198,11 @@ fetch_peek_arith (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr *
 	}
       else
 	{
-	  if (REGU_VARIABLE_IS_FLAGED (regu_var, REGU_VARIABLE_STRICT_TYPE_CAST) && arithptr->opcode == T_CAST_WRAP)
+	  /* a CAST a PL/CSQL body wrote refuses a value it would have to cut, as the PL engine's does -
+	   * it runs the CAST with the value bound to a host variable, and binding does not truncate */
+	  if ((REGU_VARIABLE_IS_FLAGED (regu_var, REGU_VARIABLE_STRICT_TYPE_CAST) && arithptr->opcode == T_CAST_WRAP)
+	      || (arithptr->opcode == T_CAST && vd != NULL && vd->xasl_state != NULL
+		  && vd->xasl_state->plcsql_frame != NULL))
 	    {
 	      dom_status = tp_value_cast (peek_right, arithptr->value, arithptr->domain, false);
 	    }
