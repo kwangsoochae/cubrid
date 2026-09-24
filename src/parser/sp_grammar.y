@@ -1092,6 +1092,28 @@ expr
 	 * catalog being asked about it. A qualified name is never a builtin: those have no owner.
 	 * The call node is the same PT_METHOD_CALL the statement form builds, so
 	 * pt_stored_procedure_to_regu () lowers it without knowing where it came from. */
+	/* CAST is not made a keyword: it is read as the name it looks like and checked, and AS after
+	 * the first argument is what tells it from a call - a call's list goes on with , or ). The
+	 * node is the one the SQL grammar builds for CAST, so the conversion is the server's own. */
+	| sp_name '(' expr AS_ type_spec ')'
+		{
+		  PT_NODE *cast = NULL;
+
+		  if (!PT_NAME_RESOLVED ($1) && strcasecmp (PT_NAME_ORIGINAL ($1), "cast") == 0)
+		    {
+		      cast = parser_make_expression (sp_Parser, PT_CAST, $3, NULL, NULL);
+		      if (cast != NULL)
+			{
+			  cast->info.expr.cast_type = $5;
+			}
+		    }
+		  if (cast == NULL)
+		    {
+		      sp_yyerror ("syntax error");
+		      YYERROR;
+		    }
+		  $$ = SP_AT (cast, @$);
+		}
 	| sp_name '(' arg_list_opt ')'
 		{
 		  PT_NODE *call = NULL;
