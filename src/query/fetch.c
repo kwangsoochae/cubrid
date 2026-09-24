@@ -4911,6 +4911,33 @@ fetch_peek_dbval_slow (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_de
 	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_XASLNODE, 0);
 	  goto exit_on_error;
 	}
+      if (REGU_VARIABLE_IS_FLAGED (regu_var, REGU_VARIABLE_PLCSQL_CURSOR_ATTR))
+	{
+	  /* the PL engine raises INVALID_CURSOR for %FOUND, %NOTFOUND and %ROWCOUNT of a shut
+	   * cursor rather than answering; the slot knows only its number, so the cursor owning it
+	   * is found by range */
+	  PLCSQL_FRAME *frame = vd->xasl_state->plcsql_frame;
+	  int slot = regu_var->value.plcsql_slot, i;
+
+	  for (i = 0; i < frame->cursors_cnt; i++)
+	    {
+	      PLCSQL_CURSOR *cursor = &frame->cursors[i];
+
+	      if (slot >= cursor->base_slot && slot < cursor->base_slot + PLCSQL_CURSOR_ATTR_CNT)
+		{
+		  if (!cursor->is_open)
+		    {
+		      /* named here rather than read off the error code later, because a call the
+		       * read stands inside wraps the error in its own before the statement sees it */
+		      frame->raising = PLCSQL_EXC_INVALID_CURSOR;
+		      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_PT_ERROR, 1,
+			      "attempted to read an attribute of an unopened cursor");
+		      goto exit_on_error;
+		    }
+		  break;
+		}
+	    }
+	}
       *peek_dbval = &vd->xasl_state->plcsql_frame->locals[regu_var->value.plcsql_slot];
       break;
 
