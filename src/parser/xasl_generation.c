@@ -31554,6 +31554,20 @@ pt_plcsql_type_call_pre (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int
 }
 
 /*
+ * pt_plcsql_no_fold_pre () - keep a node from being folded while it is typed
+ *   return: node
+ */
+static PT_NODE *
+pt_plcsql_no_fold_pre (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int *continue_walk)
+{
+  if (node != NULL)
+    {
+      node->flag.do_not_fold = 1;
+    }
+  return node;
+}
+
+/*
  * pt_plcsql_type_expr () - settle the types in one procedural expression
  *   return: the expression, NULL on error; folding can replace the node, so the answer is what
  *           the caller keeps
@@ -31571,7 +31585,7 @@ pt_plcsql_type_expr (PARSER_CONTEXT * parser, PT_NODE * expr)
   int error = NO_ERROR;
   int places[16][2];
   int cnt = 0, i;
-  PT_NODE *node, *typed;
+  PT_NODE *node, *typed, *backup;
 
   (void) parser_walk_tree (parser, expr, pt_plcsql_type_call_pre, &error, NULL, NULL);
   if (error != NO_ERROR)
@@ -31589,7 +31603,21 @@ pt_plcsql_type_expr (PARSER_CONTEXT * parser, PT_NODE * expr)
       places[cnt][1] = node->column_number;
     }
 
+  /* A constant part of an expression is folded here, and one that fails to fold - a zero date
+   * plus a day, TO_NUMBER of a letter - fails while the body compiles and takes the whole body
+   * with it. The PL engine takes such a body and raises the failure when the expression is
+   * evaluated, after whatever ran before it, where a handler may catch it. So a failure here
+   * is tried once more with folding off: typed without folding, the same expression fails when
+   * it runs instead. A body that fails the second time as well has a fault folding did not
+   * cause, and is refused as before. */
+  backup = parser_copy_tree_list (parser, expr);
   typed = pt_semantic_type (parser, expr, NULL);
+  if ((typed == NULL || pt_has_error (parser)) && backup != NULL)
+    {
+      pt_reset_error (parser);
+      (void) parser_walk_tree (parser, backup, pt_plcsql_no_fold_pre, NULL, NULL, NULL);
+      typed = pt_semantic_type (parser, backup, NULL);
+    }
 
   for (node = typed, i = 0; node != NULL && i < cnt; node = node->next, i++)
     {
