@@ -31807,7 +31807,18 @@ pt_to_plcsql_open_local (PARSER_CONTEXT * parser, PT_NODE * decl)
 
   if (decl->info.sp_stmt.expr != NULL)
     {
-      return pt_to_plcsql_assign (parser, name->info.name.plcsql_slot, &decl->info.sp_stmt.expr, name, false);
+      /* An error the default raises is reported where the default is written, the way an
+       * assignment's is: the node would otherwise carry no place, and the error would go out
+       * without one. Taken before lowering, which may fold the expression into a new node. */
+      int line = decl->info.sp_stmt.expr->line_number, column = decl->info.sp_stmt.expr->column_number;
+
+      xasl = pt_to_plcsql_assign (parser, name->info.name.plcsql_slot, &decl->info.sp_stmt.expr, name, false);
+      if (xasl != NULL)
+	{
+	  xasl->proc.plcsql.line = line;
+	  xasl->proc.plcsql.column = column;
+	}
+      return xasl;
     }
 
   /* no default: the slot opens as NULL of the declared type, not as the untyped NULL
