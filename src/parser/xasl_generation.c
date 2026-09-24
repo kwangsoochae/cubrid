@@ -32922,6 +32922,10 @@ pt_to_plcsql_stmt_inner (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * re
 	    {
 	      return NULL;
 	    }
+	  /* a step that is not positive is reported where the loop begins, which is where the PL
+	   * engine reports it (checkForLoopIterStep runs as part of the FOR statement) */
+	  buf[1]->proc.plcsql.line = stmt->line_number;
+	  buf[1]->proc.plcsql.column = stmt->column_number;
 	  buf[1]->proc.plcsql.expr = pt_plcsql_expr_to_regu (parser, &stmt->info.sp_stmt.expr3);
 	  if (buf[1]->proc.plcsql.expr == NULL)
 	    {

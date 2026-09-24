@@ -30656,8 +30656,10 @@ qexec_execute_plcsql_loop (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE
 	    }
 	  if (step <= 0)
 	    {
+	      frame->raising = PLCSQL_EXC_VALUE_ERROR;
 	      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_PT_ERROR, 1,
 		      "FOR loop iteration steps must be positive integers");
+	      qexec_plcsql_place (thread_p, frame, xasl->proc.plcsql.children[1], er_msg ());
 	      return ER_FAILED;
 	    }
 	}
