@@ -72,6 +72,7 @@ static PT_NODE *sp_make_typed_literal (PT_TYPE_ENUM type, const char *text);
 static PT_NODE *sp_make_data_type (PT_TYPE_ENUM type, int precision, int scale);
 static PT_NODE *sp_make_case (PT_NODE * operand, PT_NODE * when_list, PT_NODE * else_expr);
 static PT_NODE *sp_as_condition (PT_NODE * operand);
+static PT_NODE *sp_make_case_stmt (PT_NODE * selector, PT_NODE * arms, PT_NODE * else_body, int line, int column);
 
 /* The location bison built for a rule, put on the node that rule returns. It is a macro
  * because @$ is only a location inside an action - bison rewrites it there, and would leave
@@ -102,6 +103,7 @@ static PT_NODE *sp_as_condition (PT_NODE * operand);
 %type <node> assign_stmt block_stmt null_stmt return_stmt return_opt expr expr_list_opt type_spec
 %type <node> call_stmt sp_name arg_list_opt arg_list
 %type <node> when_clause_list when_clause case_else_opt
+%type <node> case_stmt case_stmt_arms case_stmt_arm case_stmt_else_opt
 %type <node> jump_stmt label_decl_opt label_opt when_opt sql_stmt
 %type <node> raise_stmt handler_part_opt handler_list handler handler_name_list
 %type <node> cursor_decl cursor_params_opt open_stmt close_stmt fetch_stmt fetch_targets
@@ -535,6 +537,7 @@ stmt_list
 
 stmt
 	: assign_stmt
+	| case_stmt
 	| raise_stmt
 	| call_stmt
 	| if_stmt
@@ -728,6 +731,62 @@ semi_opt
 	;
 
 /* An ELSIF becomes an IF of its own in the else branch, so the executor sees one shape. */
+/* A CASE statement runs the statements of the first arm that matches. It is the IF chain it
+ * stands for - see sp_make_case_stmt () - so nothing below the parser learns a new statement. */
+case_stmt
+	: CASE_ expr case_stmt_arms case_stmt_else_opt END_ CASE_ ';'
+		{
+		  $$ = sp_make_case_stmt ($2, $3, $4, @$.first_line, @$.first_column);
+		  if ($$ == NULL)
+		    {
+		      YYERROR;
+		    }
+		}
+	| CASE_ case_stmt_arms case_stmt_else_opt END_ CASE_ ';'
+		{
+		  $$ = sp_make_case_stmt (NULL, $2, $3, @$.first_line, @$.first_column);
+		  if ($$ == NULL)
+		    {
+		      YYERROR;
+		    }
+		}
+	;
+
+/* each arm is a PT_SP_IF with its WHEN in expr and its THEN in body, not yet chained */
+case_stmt_arms
+	: case_stmt_arm
+	| case_stmt_arms case_stmt_arm
+		{
+		  $$ = parser_append_node ($2, $1);
+		}
+	;
+
+case_stmt_arm
+	: WHEN_ expr THEN_ stmt_list
+		{
+		  PT_NODE *node = sp_make_stmt (PT_SP_IF, @$.first_line, @$.first_column);
+
+		  if (node)
+		    {
+		      node->info.sp_stmt.expr = $2;
+		      node->info.sp_stmt.body = $4;
+		    }
+		  $$ = node;
+		}
+	;
+
+/* NULL when no ELSE was written, which sp_make_case_stmt () turns into CASE_NOT_FOUND */
+case_stmt_else_opt
+	: /* empty */
+		{
+		  $$ = NULL;
+		}
+	| ELSE_ stmt_list
+		{
+		  $$ = $2;
+		}
+	;
+
 if_stmt
 	: IF_ expr THEN_ stmt_list else_part_opt END_ IF_ ';'
 		{
@@ -1384,6 +1443,90 @@ sp_as_condition (PT_NODE * operand)
   eq->column_number = operand->column_number;
 
   return eq;
+}
+
+/*
+ * sp_make_case_stmt () - a CASE statement, as the IF chain it stands for
+ *   return: the first IF, which is the whole statement; NULL after recording why it cannot be run
+ *   selector(in)  : what was written between CASE and the first WHEN, NULL for the searched form.
+ *                   It is consumed here
+ *   arms(in)      : PT_SP_IF nodes in the order written, each with its WHEN in expr and its THEN
+ *                   in body
+ *   else_body(in) : the statements ELSE named, NULL when no ELSE was written
+ *   line(in) / column(in) : where the statement begins
+ *
+ * note: the PL engine evaluates the selector once and compares it with each arm's value, and an
+ *       arm is taken only when the comparison is true - so a NULL on either side takes none.
+ *       Each arm here gets its own copy of the selector in an equality instead, which reads the
+ *       same only when evaluating the selector again cannot give another answer. A name or a
+ *       literal is taken; anything else is refused for now rather than run twice.
+ *
+ *       With no arm taken and no ELSE written the PL engine raises CASE_NOT_FOUND, so that is
+ *       what the missing ELSE becomes. A searched arm's condition is left as written: IF takes
+ *       its branch only on true, which is the reference implementation's rule as well.
+ */
+static PT_NODE *
+sp_make_case_stmt (PT_NODE * selector, PT_NODE * arms, PT_NODE * else_body, int line, int column)
+{
+  PT_NODE *arm;
+
+  if (arms == NULL)
+    {
+      return NULL;
+    }
+
+  if (selector != NULL)
+    {
+      if (selector->node_type != PT_NAME && selector->node_type != PT_VALUE)
+	{
+	  sp_yyerror ("a CASE statement's selector that is not a name or a literal is not run here yet");
+	  return NULL;
+	}
+
+      for (arm = arms; arm != NULL; arm = arm->next)
+	{
+	  PT_NODE *eq = parser_new_node (sp_Parser, PT_EXPR);
+
+	  if (eq == NULL)
+	    {
+	      return NULL;
+	    }
+	  eq->info.expr.op = PT_EQ;
+	  eq->info.expr.arg1 = parser_copy_tree (sp_Parser, selector);
+	  eq->info.expr.arg2 = arm->info.sp_stmt.expr;
+	  eq->line_number = arm->info.sp_stmt.expr->line_number;
+	  eq->column_number = arm->info.sp_stmt.expr->column_number;
+	  arm->info.sp_stmt.expr = eq;
+	}
+      parser_free_node (sp_Parser, selector);
+    }
+
+  if (else_body == NULL)
+    {
+      else_body = sp_make_stmt (PT_SP_RAISE, line, column);
+      if (else_body == NULL)
+	{
+	  return NULL;
+	}
+      else_body->info.sp_stmt.name = sp_at (pt_name (sp_Parser, "case_not_found"), line, column);
+    }
+
+  /* each arm's else is the next arm, the last arm's is ELSE */
+  for (arm = arms; arm != NULL; arm = arm->next)
+    {
+      arm->info.sp_stmt.else_body = (arm->next != NULL) ? arm->next : else_body;
+    }
+  for (arm = arms; arm != NULL;)
+    {
+      PT_NODE *next = arm->next;
+
+      arm->next = NULL;
+      arm = next;
+    }
+
+  arms->line_number = line;
+  arms->column_number = column;
+  return arms;
 }
 
 /*
