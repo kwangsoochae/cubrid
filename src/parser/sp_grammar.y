@@ -269,6 +269,19 @@ param_default_opt
 		{
 		  parser_free_tree (sp_Parser, $2);
 		}
+	/* the catalog keeps a routine's header the way CREATE printed it, and it prints a default
+	 * with DEFAULT whichever way it was written - so the text a CALL compiles says DEFAULT even
+	 * for a body that wrote :=. DEFAULT is read as the identifier it looks like and checked, so
+	 * no word is reserved for it. */
+	| IDENT expr
+		{
+		  parser_free_tree (sp_Parser, $2);
+		  if (strcasecmp ($1, "default") != 0)
+		    {
+		      sp_yyerror ("syntax error");
+		      YYERROR;
+		    }
+		}
 	;
 
 /* The body of a procedure: its declaration part is the text between AS and BEGIN, so it
