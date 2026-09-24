@@ -1761,15 +1761,24 @@ sp_make_real_literal (const char *text, int line, int column)
     {
       double d;
 
-      /* the SQL grammar's own reading of a number too large to hold, down to the sentence:
-       * without the check strtod () hands back an infinity and the body goes on computing
-       * with it, which no CUBRID type has a value for */
+      /* A number too large to hold is not refused here: the PL engine takes the body and
+       * raises the overflow when the literal is evaluated. The text is kept and cast to
+       * DOUBLE instead, so that the conversion - and its error - happens at the same point.
+       * Left as a value, strtod () would hand back an infinity for the body to go on with,
+       * which no CUBRID type has a value for. */
       errno = 0;
       d = strtod (text, NULL);
       if (errno == ERANGE)
 	{
-	  PT_ERRORmf2 (sp_Parser, val, MSGCAT_SET_PARSER_SYNTAX, MSGCAT_SYNTAX_FLT_DBL_OVERFLOW, text,
-		       pt_show_type_enum (PT_TYPE_DOUBLE));
+	  PT_NODE *str = sp_at (pt_make_string_value (sp_Parser, text), line, column);
+	  PT_NODE *cast = sp_at (pt_wrap_with_cast_op (sp_Parser, str, PT_TYPE_DOUBLE, 0, 0, NULL), line, column);
+
+	  /* folded, the cast would fail while the body compiles - the point is that it does not */
+	  if (cast != NULL)
+	    {
+	      cast->flag.do_not_fold = 1;
+	    }
+	  return cast;
 	}
 
       val->type_enum = PT_TYPE_DOUBLE;
