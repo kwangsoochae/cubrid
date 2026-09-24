@@ -182,6 +182,7 @@ real		{digit}+"."{digit}+([eE][+-]?{digit}+)?|"."{digit}+([eE][+-]?{digit}+)?|{d
 "<>"			{ return NE; }
 "!="			{ return NE; }
 ">="			{ return GE; }
+"<=>"			{ return NULLSAFE_EQ; }
 "<="			{ return LE; }
 
 {integer}		{ sp_yylval.cptr = sp_copy_token (yytext); return UNSIGNED_INTEGER; }

@@ -91,7 +91,7 @@ static PT_NODE *sp_make_case (PT_NODE * operand, PT_NODE * when_list, PT_NODE * 
 %token CLOSE_ CURSOR_ FETCH_ INTO_ OPEN_
 %token AS_ AUTHID_ CREATE_ FUNCTION_ OUT_ PROCEDURE_ REPLACE_ RETURN_
 %token AND_ DIV_ IS_ MOD_ OR_
-%token ASSIGN DOTDOT CONCAT NE GE LE LABEL_BEGIN LABEL_END
+%token ASSIGN DOTDOT CONCAT NE GE LE NULLSAFE_EQ LABEL_BEGIN LABEL_END
 %token PERCENT_FOUND PERCENT_ISOPEN PERCENT_NOTFOUND PERCENT_ROWCOUNT PERCENT_ROWTYPE PERCENT_TYPE
 
 %token <cptr> IDENT UNSIGNED_INTEGER UNSIGNED_REAL CHAR_STRING SQL_TEXT
@@ -111,7 +111,7 @@ static PT_NODE *sp_make_case (PT_NODE * operand, PT_NODE * when_list, PT_NODE * 
 %left OR_
 %left AND_
 %right NOT_
-%nonassoc '=' NE '<' '>' LE GE IS_
+%nonassoc '=' NE '<' '>' LE GE NULLSAFE_EQ IS_
 %left CONCAT
 %left '+' '-'
 %left '*' '/' DIV_ MOD_
@@ -920,6 +920,12 @@ expr
 	| expr LE expr
 		{
 		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_LE, $1, $3, NULL), @$);
+		}
+	/* true when both sides are NULL, false when one is - never NULL itself, which is what the
+	 * PL engine's opNullSafeEq gives and what the SQL operator of the same spelling does */
+	| expr NULLSAFE_EQ expr
+		{
+		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_NULLSAFE_EQ, $1, $3, NULL), @$);
 		}
 	| expr GE expr
 		{
