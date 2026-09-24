@@ -3210,6 +3210,14 @@ fetch_peek_arith (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr *
 	  if (dom_status != DOMAIN_COMPATIBLE)
 	    {
 	      (void) tp_domain_status_er_set (dom_status, ARG_FILE_LINE, peek_right, arithptr->domain);
+	      /* A CAST a PL/CSQL body wrote is run by the PL engine as a query of its own, so its
+	       * failure is SQL_ERROR there; a conversion the compiler put in is T_CAST_WRAP and is
+	       * read as VALUE_ERROR as before */
+	      if (arithptr->opcode == T_CAST && vd != NULL && vd->xasl_state != NULL
+		  && vd->xasl_state->plcsql_frame != NULL && vd->xasl_state->plcsql_frame->raising < 0)
+		{
+		  vd->xasl_state->plcsql_frame->raising = PLCSQL_EXC_SQL_ERROR;
+		}
 	      goto error;
 	    }
 	}
