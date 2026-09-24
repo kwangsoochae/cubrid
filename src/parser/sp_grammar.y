@@ -73,6 +73,7 @@ static PT_NODE *sp_make_data_type (PT_TYPE_ENUM type, int precision, int scale);
 static PT_NODE *sp_make_case (PT_NODE * operand, PT_NODE * when_list, PT_NODE * else_expr);
 static PT_NODE *sp_as_condition (PT_NODE * operand);
 static PT_NODE *sp_make_case_stmt (PT_NODE * selector, PT_NODE * arms, PT_NODE * else_body, int line, int column);
+static PT_NODE *sp_make_in_chain (PT_NODE * lhs, PT_NODE * list, bool negate);
 
 /* The location bison built for a rule, put on the node that rule returns. It is a macro
  * because @$ is only a location inside an action - bison rewrites it there, and would leave
@@ -114,10 +115,14 @@ static PT_NODE *sp_make_case_stmt (PT_NODE * selector, PT_NODE * arms, PT_NODE *
 %left OR_
 %left AND_
 %right NOT_
-%nonassoc '=' NE '<' '>' LE GE NULLSAFE_EQ IS_
+%nonassoc '=' NE '<' '>' LE GE NULLSAFE_EQ IS_ IN_
 %left CONCAT
+%left '|'
+%left '&'
+%left LABEL_BEGIN LABEL_END
 %left '+' '-'
 %left '*' '/' DIV_ MOD_
+%left '^'
 %right UMINUS
 
 /* A statement is placed where it begins rather than where the parser stood when the reduce
@@ -1034,6 +1039,48 @@ expr
 		{
 		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_UNARY_MINUS, $2, NULL, NULL), @$);
 		}
+	/* A plus written before a value is the value, which is what the SQL grammar does with
+	 * one: there is no node for it and nothing downstream would know what to do with one. */
+	| '+' expr %prec UMINUS
+		{
+		  $$ = $2;
+		}
+	| '~' expr %prec UMINUS
+		{
+		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_BIT_NOT, $2, NULL, NULL), @$);
+		}
+	/* IN is not one operator here - see sp_make_in_chain () */
+	| expr IN_ '(' arg_list ')' %prec IN_
+		{
+		  $$ = SP_AT (sp_make_in_chain ($1, $4, false), @$);
+		}
+	| expr NOT_ IN_ '(' arg_list ')' %prec IN_
+		{
+		  $$ = SP_AT (sp_make_in_chain ($1, $5, true), @$);
+		}
+	| expr '|' expr
+		{
+		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_BIT_OR, $1, $3, NULL), @$);
+		}
+	| expr '&' expr
+		{
+		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_BIT_AND, $1, $3, NULL), @$);
+		}
+	| expr '^' expr
+		{
+		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_BIT_XOR, $1, $3, NULL), @$);
+		}
+	/* The shift operators are spelled the way a label is, and the two do not meet: a label
+	 * stands where a statement begins and a shift between two values. The parser tells them
+	 * apart with one token of lookahead, so they share the token the lexer already returns. */
+	| expr LABEL_BEGIN expr
+		{
+		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_BITSHIFT_LEFT, $1, $3, NULL), @$);
+		}
+	| expr LABEL_END expr
+		{
+		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_BITSHIFT_RIGHT, $1, $3, NULL), @$);
+		}
 	| CASE_ when_clause_list case_else_opt END_
 		{
 		  $$ = SP_AT (sp_make_case (NULL, $2, $3), @$);
@@ -1527,6 +1574,57 @@ sp_make_case_stmt (PT_NODE * selector, PT_NODE * arms, PT_NODE * else_body, int 
   arms->line_number = line;
   arms->column_number = column;
   return arms;
+}
+
+/*
+ * sp_make_in_chain () - an IN written in a body, as the comparisons it stands for
+ *   return: the expression, or NULL when it could not be built
+ *   lhs(in)  : what was written before IN. Copied once per element
+ *   list(in) : the expressions between the parentheses, in the order written
+ *   negate(in) : true for NOT IN
+ *
+ * note: the engine reads IS_IN on the predicate side of a statement, where the list becomes a
+ *       term of its own. A body's expression is lowered to a regu variable instead, and that
+ *       side takes the list for a value and tries to read it while the plan is built - which a
+ *       name written in the list cannot answer. So the operator is spelled out: IN is the
+ *       equalities joined by OR, NOT IN the inequalities joined by AND. NULL keeps its meaning
+ *       either way, because a comparison against it is unknown and OR and AND carry that
+ *       through - measured against the reference implementation, which answers the same.
+ *
+ *       The left side is copied for each element rather than shared, because the arms are
+ *       separate trees from here on and freeing one must not reach into another.
+ */
+static PT_NODE *
+sp_make_in_chain (PT_NODE * lhs, PT_NODE * list, bool negate)
+{
+  PT_OP_TYPE cmp = negate ? PT_NE : PT_EQ;
+  PT_OP_TYPE join = negate ? PT_AND : PT_OR;
+  PT_NODE *chain = NULL;
+  PT_NODE *item, *next;
+
+  for (item = list; item != NULL; item = next)
+    {
+      PT_NODE *one;
+
+      next = item->next;
+      item->next = NULL;
+
+      one = parser_make_expression (sp_Parser, cmp, parser_copy_tree (sp_Parser, lhs), item, NULL);
+      if (one == NULL)
+	{
+	  return NULL;
+	}
+
+      chain = (chain == NULL) ? one : parser_make_expression (sp_Parser, join, chain, one, NULL);
+      if (chain == NULL)
+	{
+	  return NULL;
+	}
+    }
+
+  parser_free_node (sp_Parser, lhs);
+
+  return chain;
 }
 
 /*
