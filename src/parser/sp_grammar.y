@@ -73,6 +73,8 @@ static PT_NODE *sp_make_boolean_literal (bool value);
 static PT_NODE *sp_make_typed_literal (PT_TYPE_ENUM type, const char *text);
 static PT_NODE *sp_make_data_type (PT_TYPE_ENUM type, int precision, int scale);
 static PT_NODE *sp_make_column_type (const char *owner, const char *table, const char *column);
+static PT_NODE *sp_column_value_type (PT_NODE * dt, bool keep_numeric);
+static PT_NODE *sp_make_param (PT_NODE * name, int mode, PT_NODE * dt);
 static PT_NODE *sp_make_case (PT_NODE * operand, PT_NODE * when_list, PT_NODE * else_expr);
 
 /* The location bison built for a rule, put on the node that rule returns. It is a macro
@@ -102,7 +104,7 @@ static PT_NODE *sp_make_case (PT_NODE * operand, PT_NODE * when_list, PT_NODE * 
 
 %type <node> block decl_list decl_list_opt decl stmt_list stmt if_stmt else_part_opt loop_stmt
 %type <node> assign_stmt block_stmt null_stmt return_stmt return_opt expr expr_list_opt type_spec
-%type <node> var_type_spec
+%type <node> var_type_spec column_type
 %type <node> call_stmt sp_name arg_list_opt arg_list
 %type <node> when_clause_list when_clause case_else_opt
 %type <node> jump_stmt label_decl_opt label_opt when_opt sql_stmt
@@ -182,6 +184,11 @@ return_opt
 		  sp_unbound_char ($2);
 		  $$ = $2;
 		}
+	| RETURN_ column_type
+		{
+		  $$ = sp_column_value_type ($2, true);
+		  sp_unbound_char ($$);
+		}
 	;
 
 /* OWNER and CALLER are taken as identifiers rather than made keywords - they are ordinary
@@ -227,18 +234,12 @@ param_list
 param
 	: IDENT param_mode_opt type_spec param_default_opt
 		{
-		  PT_NODE *name = SP_AT (pt_name (sp_Parser, $1), @$);
-
-		  if (name != NULL)
-		    {
-		      name->info.name.plcsql_param_mode = $2;
-		      name->data_type = $3;
-		      name->type_enum = ($3 != NULL) ? $3->type_enum : PT_TYPE_NONE;
-
-		      sp_unbound_char (name->data_type);
-		      name->type_enum = ($3 != NULL) ? $3->type_enum : PT_TYPE_NONE;
-		    }
-		  $$ = name;
+		  $$ = sp_make_param (SP_AT (pt_name (sp_Parser, $1), @$), $2, $3);
+		}
+	| IDENT param_mode_opt column_type param_default_opt
+		{
+		  $$ = sp_make_param (SP_AT (pt_name (sp_Parser, $1), @$), $2,
+				      sp_column_value_type ($3, $2 != PT_SP_PARAM_IN));
 		}
 	;
 
@@ -503,12 +504,16 @@ type_spec
 		}
 	;
 
-/* A variable or a constant may also take its type from a column. Parameters and return types
- * may not yet: the PL engine drops the length and precision there except for a NUMERIC one
- * that is OUT or returned, which a data type node written here would not tell apart. */
+/* A variable or a constant may also take its type from a column, length and precision
+ * included. A parameter or a return type does too, but keeps less of it - param and
+ * return_opt say how much. */
 var_type_spec
 	: type_spec
-	| IDENT '.' IDENT PERCENT_TYPE
+	| column_type
+	;
+
+column_type
+	: IDENT '.' IDENT PERCENT_TYPE
 		{
 		  $$ = SP_AT (sp_make_column_type (NULL, $1, $3), @$);
 		  if ($$ == NULL)
@@ -1429,6 +1434,49 @@ sp_make_column_type (const char *owner, const char *table, const char *column)
     }
 
   return sp_make_data_type (type, precision, scale);
+}
+
+/*
+ * sp_column_value_type () - what a parameter or a return type keeps of a column's type
+ *   return: dt itself, or a node of the same type with the length and precision dropped
+ *   dt(in)           : what sp_make_column_type () built
+ *   keep_numeric(in) : true for an OUT or IN OUT parameter and for a return type
+ *
+ * note: the PL engine gives a parameter and a return type the type alone, the way a keyword
+ *       written there without a length reads, except that a NUMERIC one that is OUT or
+ *       returned keeps the column's precision and scale. This is the same split.
+ */
+static PT_NODE *
+sp_column_value_type (PT_NODE * dt, bool keep_numeric)
+{
+  if (dt == NULL || (keep_numeric && dt->type_enum == PT_TYPE_NUMERIC))
+    {
+      return dt;
+    }
+
+  return sp_at (sp_make_data_type (dt->type_enum, DB_DEFAULT_PRECISION, DB_DEFAULT_SCALE), dt->line_number,
+		dt->column_number);
+}
+
+/*
+ * sp_make_param () - one parameter of a routine header
+ *   return: the name node carrying the mode and the declared type
+ *   name(in) : the parameter's name, already placed
+ *   mode(in) : PT_SP_PARAM_IN, _OUT or _INOUT
+ *   dt(in)   : the declared type
+ */
+static PT_NODE *
+sp_make_param (PT_NODE * name, int mode, PT_NODE * dt)
+{
+  if (name != NULL)
+    {
+      name->info.name.plcsql_param_mode = mode;
+      name->data_type = dt;
+      sp_unbound_char (name->data_type);
+      name->type_enum = (dt != NULL) ? dt->type_enum : PT_TYPE_NONE;
+    }
+
+  return name;
 }
 
 /*
