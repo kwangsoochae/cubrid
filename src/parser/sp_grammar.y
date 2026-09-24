@@ -37,6 +37,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "dbi.h"
+#include "error_manager.h"
 #include "parser.h"
 #include "parse_tree.h"
 #include "parser_message.h"
@@ -70,6 +72,9 @@ static PT_NODE *sp_make_null_literal (void);
 static PT_NODE *sp_make_boolean_literal (bool value);
 static PT_NODE *sp_make_typed_literal (PT_TYPE_ENUM type, const char *text);
 static PT_NODE *sp_make_data_type (PT_TYPE_ENUM type, int precision, int scale);
+static PT_NODE *sp_make_column_type (const char *owner, const char *table, const char *column);
+static PT_NODE *sp_column_value_type (PT_NODE * dt, bool keep_numeric);
+static PT_NODE *sp_make_param (PT_NODE * name, int mode, PT_NODE * dt);
 static PT_NODE *sp_make_case (PT_NODE * operand, PT_NODE * when_list, PT_NODE * else_expr);
 
 /* The location bison built for a rule, put on the node that rule returns. It is a macro
@@ -99,6 +104,7 @@ static PT_NODE *sp_make_case (PT_NODE * operand, PT_NODE * when_list, PT_NODE * 
 
 %type <node> block decl_list decl_list_opt decl stmt_list stmt if_stmt else_part_opt loop_stmt
 %type <node> assign_stmt block_stmt null_stmt return_stmt return_opt expr expr_list_opt type_spec
+%type <node> var_type_spec column_type
 %type <node> call_stmt sp_name arg_list_opt arg_list
 %type <node> when_clause_list when_clause case_else_opt
 %type <node> jump_stmt label_decl_opt label_opt when_opt sql_stmt
@@ -178,6 +184,11 @@ return_opt
 		  sp_unbound_char ($2);
 		  $$ = $2;
 		}
+	| RETURN_ column_type
+		{
+		  $$ = sp_column_value_type ($2, true);
+		  sp_unbound_char ($$);
+		}
 	;
 
 /* OWNER and CALLER are taken as identifiers rather than made keywords - they are ordinary
@@ -223,18 +234,12 @@ param_list
 param
 	: IDENT param_mode_opt type_spec param_default_opt
 		{
-		  PT_NODE *name = SP_AT (pt_name (sp_Parser, $1), @$);
-
-		  if (name != NULL)
-		    {
-		      name->info.name.plcsql_param_mode = $2;
-		      name->data_type = $3;
-		      name->type_enum = ($3 != NULL) ? $3->type_enum : PT_TYPE_NONE;
-
-		      sp_unbound_char (name->data_type);
-		      name->type_enum = ($3 != NULL) ? $3->type_enum : PT_TYPE_NONE;
-		    }
-		  $$ = name;
+		  $$ = sp_make_param (SP_AT (pt_name (sp_Parser, $1), @$), $2, $3);
+		}
+	| IDENT param_mode_opt column_type param_default_opt
+		{
+		  $$ = sp_make_param (SP_AT (pt_name (sp_Parser, $1), @$), $2,
+				      sp_column_value_type ($3, $2 != PT_SP_PARAM_IN));
 		}
 	;
 
@@ -402,7 +407,7 @@ decl
 		    }
 		  $$ = node;
 		}
-	| IDENT constant_opt type_spec expr_list_opt ';'
+	| IDENT constant_opt var_type_spec expr_list_opt ';'
 		{
 		  PT_NODE *node = sp_make_stmt (PT_SP_DECL, @$.first_line, @$.first_column);
 
@@ -496,6 +501,33 @@ type_spec
 	| TYPE_KEYWORD '(' UNSIGNED_INTEGER ',' UNSIGNED_INTEGER ')'
 		{
 		  $$ = SP_AT (sp_make_data_type ((PT_TYPE_ENUM) $1, atoi ($3), atoi ($5)), @$);
+		}
+	;
+
+/* A variable or a constant may also take its type from a column, length and precision
+ * included. A parameter or a return type does too, but keeps less of it - param and
+ * return_opt say how much. */
+var_type_spec
+	: type_spec
+	| column_type
+	;
+
+column_type
+	: IDENT '.' IDENT PERCENT_TYPE
+		{
+		  $$ = SP_AT (sp_make_column_type (NULL, $1, $3), @$);
+		  if ($$ == NULL)
+		    {
+		      YYERROR;
+		    }
+		}
+	| IDENT '.' IDENT '.' IDENT PERCENT_TYPE
+		{
+		  $$ = SP_AT (sp_make_column_type ($1, $3, $5), @$);
+		  if ($$ == NULL)
+		    {
+		      YYERROR;
+		    }
 		}
 	;
 
@@ -1329,6 +1361,122 @@ sp_make_data_type (PT_TYPE_ENUM type, int precision, int scale)
     }
 
   return dt;
+}
+
+/*
+ * sp_make_column_type () - the type of a column, for a declaration written tbl.col%TYPE
+ *   return: a PT_DATA_TYPE node, NULL after recording why the column gives none
+ *   owner(in)  : the owner the declaration named, NULL when it named none
+ *   table(in)  : the table
+ *   column(in) : the column
+ *
+ * note: the column is looked up when the body is compiled, which for a native run is the
+ *       CALL. The PL engine looked it up at CREATE, so a column whose type changed in
+ *       between gives the two a different type - that difference is the one taken on purpose.
+ *       The node is the one sp_make_data_type () builds for the type written out by hand,
+ *       length and precision included, which is what the PL engine does for a variable.
+ *       A column of a type no PL/CSQL keyword names is refused rather than approximated.
+ */
+static PT_NODE *
+sp_make_column_type (const char *owner, const char *table, const char *column)
+{
+  char name[DB_MAX_IDENTIFIER_LENGTH * 2 + 2];
+  DB_OBJECT *class_obj;
+  DB_ATTRIBUTE *attr;
+  DB_DOMAIN *domain;
+  PT_TYPE_ENUM type;
+  int precision = DB_DEFAULT_PRECISION, scale = DB_DEFAULT_SCALE;
+
+  if (owner != NULL)
+    {
+      snprintf (name, sizeof (name), "%s.%s", owner, table);
+    }
+  else
+    {
+      snprintf (name, sizeof (name), "%s", table);
+    }
+
+  class_obj = db_find_class (name);
+  attr = (class_obj != NULL) ? db_get_attribute (class_obj, column) : NULL;
+  domain = (attr != NULL) ? db_attribute_domain (attr) : NULL;
+  if (domain == NULL)
+    {
+      /* the lookup's own error would outlive this parse; the refusal below is what explains it */
+      er_clear ();
+      sp_yyerror ("the column a %TYPE names is not there");
+      return NULL;
+    }
+
+  type = pt_db_to_type_enum (db_domain_type (domain));
+  switch (type)
+    {
+    case PT_TYPE_CHAR:
+    case PT_TYPE_VARCHAR:
+      precision = db_domain_precision (domain);
+      break;
+    case PT_TYPE_NUMERIC:
+      precision = db_domain_precision (domain);
+      scale = db_domain_scale (domain);
+      break;
+    case PT_TYPE_SMALLINT:
+    case PT_TYPE_INTEGER:
+    case PT_TYPE_BIGINT:
+    case PT_TYPE_FLOAT:
+    case PT_TYPE_DOUBLE:
+    case PT_TYPE_DATE:
+    case PT_TYPE_TIME:
+    case PT_TYPE_TIMESTAMP:
+    case PT_TYPE_DATETIME:
+      break;
+    default:
+      sp_yyerror ("the column a %TYPE names has a type PL/CSQL does not declare");
+      return NULL;
+    }
+
+  return sp_make_data_type (type, precision, scale);
+}
+
+/*
+ * sp_column_value_type () - what a parameter or a return type keeps of a column's type
+ *   return: dt itself, or a node of the same type with the length and precision dropped
+ *   dt(in)           : what sp_make_column_type () built
+ *   keep_numeric(in) : true for an OUT or IN OUT parameter and for a return type
+ *
+ * note: the PL engine gives a parameter and a return type the type alone, the way a keyword
+ *       written there without a length reads, except that a NUMERIC one that is OUT or
+ *       returned keeps the column's precision and scale. This is the same split.
+ */
+static PT_NODE *
+sp_column_value_type (PT_NODE * dt, bool keep_numeric)
+{
+  if (dt == NULL || (keep_numeric && dt->type_enum == PT_TYPE_NUMERIC))
+    {
+      return dt;
+    }
+
+  return sp_at (sp_make_data_type (dt->type_enum, DB_DEFAULT_PRECISION, DB_DEFAULT_SCALE), dt->line_number,
+		dt->column_number);
+}
+
+/*
+ * sp_make_param () - one parameter of a routine header
+ *   return: the name node carrying the mode and the declared type
+ *   name(in) : the parameter's name, already placed
+ *   mode(in) : PT_SP_PARAM_IN, _OUT or _INOUT
+ *   dt(in)   : the declared type
+ */
+static PT_NODE *
+sp_make_param (PT_NODE * name, int mode, PT_NODE * dt)
+{
+  if (name != NULL)
+    {
+      name->info.name.plcsql_param_mode = mode;
+      name->data_type = dt;
+      sp_unbound_char (name->data_type);
+      name->type_enum = (dt != NULL) ? dt->type_enum : PT_TYPE_NONE;
+    }
+
+  return name;
 }
 
 /*
