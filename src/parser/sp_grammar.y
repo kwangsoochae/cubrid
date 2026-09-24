@@ -93,7 +93,7 @@ static PT_NODE *sp_make_in_chain (PT_NODE * lhs, PT_NODE * list, bool negate);
 %token CASE_ FALSE_ THEN_ TRUE_ WHEN_ WHILE_
 %token CLOSE_ CURSOR_ FETCH_ INTO_ OPEN_
 %token AS_ AUTHID_ CREATE_ FUNCTION_ OUT_ PROCEDURE_ REPLACE_ RETURN_
-%token AND_ DIV_ IS_ MOD_ OR_
+%token AND_ DIV_ ESCAPE_ IS_ LIKE_ MOD_ OR_ XOR_
 %token ASSIGN DOTDOT CONCAT NE GE LE NULLSAFE_EQ LABEL_BEGIN LABEL_END
 %token PERCENT_FOUND PERCENT_ISOPEN PERCENT_NOTFOUND PERCENT_ROWCOUNT PERCENT_ROWTYPE PERCENT_TYPE
 
@@ -110,12 +110,14 @@ static PT_NODE *sp_make_in_chain (PT_NODE * lhs, PT_NODE * list, bool negate);
 %type <node> cursor_decl cursor_params_opt open_stmt close_stmt fetch_stmt fetch_targets
 %type <number> param_mode_opt
 %type <node> routine param_list_opt param_list param
-%type <number> constant_opt reverse_opt
+%type <number> constant_opt reverse_opt like_op
 
 %left OR_
+%left XOR_
 %left AND_
 %right NOT_
-%nonassoc '=' NE '<' '>' LE GE NULLSAFE_EQ IS_ IN_
+%nonassoc '=' NE '<' '>' LE GE NULLSAFE_EQ IS_ IN_ LIKE_
+%left ESCAPE_
 %left CONCAT
 %left '|'
 %left '&'
@@ -613,6 +615,13 @@ arg_list_opt
 		}
 	;
 
+/* NOT belongs to the operator here rather than to the expression, which is what lets one
+ * lookahead token tell `NOT x` from `x NOT LIKE y`. */
+like_op
+	: LIKE_			{ $$ = PT_LIKE; }
+	| NOT_ LIKE_		{ $$ = PT_NOT_LIKE; }
+	;
+
 arg_list
 	: expr
 		{
@@ -1081,6 +1090,20 @@ expr
 		{
 		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_BITSHIFT_RIGHT, $1, $3, NULL), @$);
 		}
+	| expr XOR_ expr
+		{
+		  $$ = SP_AT (parser_make_expression (sp_Parser, PT_XOR, sp_as_condition ($1), sp_as_condition ($3), NULL), @$);
+		}
+	| expr like_op expr %prec LIKE_
+		{
+		  $$ = SP_AT (parser_make_expression (sp_Parser, $2, $1, $3, NULL), @$);
+		}
+	/* ESCAPE rides under the pattern rather than beside it, so the operator keeps two arguments */
+	| expr like_op expr ESCAPE_ expr %prec LIKE_
+		{
+		  PT_NODE *pat = parser_make_expression (sp_Parser, PT_LIKE_ESCAPE, $3, $5, NULL);
+		  $$ = SP_AT (parser_make_expression (sp_Parser, $2, $1, pat, NULL), @$);
+		}
 	| CASE_ when_clause_list case_else_opt END_
 		{
 		  $$ = SP_AT (sp_make_case (NULL, $2, $3), @$);
@@ -1448,8 +1471,8 @@ sp_make_data_type (PT_TYPE_ENUM type, int precision, int scale)
 }
 
 /*
- * sp_as_condition () - an operand of AND, OR or NOT, in the shape the predicate builder reads
- *   return: operand itself when it is AND, OR or NOT already, otherwise (operand) = TRUE
+ * sp_as_condition () - an operand of AND, OR, XOR or NOT, in the shape the predicate builder reads
+ *   return: operand itself when it is AND, OR, XOR or NOT already, otherwise (operand) = TRUE
  *   operand(in) : what was written on one side of the operator
  *
  * note: the predicate builder makes a condition of a PT_EXPR and a constant of anything else,
@@ -1471,7 +1494,8 @@ sp_as_condition (PT_NODE * operand)
 
   if (operand == NULL
       || (operand->node_type == PT_EXPR
-	  && (operand->info.expr.op == PT_AND || operand->info.expr.op == PT_OR || operand->info.expr.op == PT_NOT)))
+	  && (operand->info.expr.op == PT_AND || operand->info.expr.op == PT_OR || operand->info.expr.op == PT_NOT
+	      || operand->info.expr.op == PT_XOR)))
     {
       return operand;
     }
@@ -1615,6 +1639,8 @@ sp_make_in_chain (PT_NODE * lhs, PT_NODE * list, bool negate)
 	  return NULL;
 	}
 
+      /* each comparison is a condition the way AND and OR take one - see sp_as_condition () */
+      one = sp_as_condition (one);
       chain = (chain == NULL) ? one : parser_make_expression (sp_Parser, join, chain, one, NULL);
       if (chain == NULL)
 	{
