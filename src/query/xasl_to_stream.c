@@ -3699,7 +3699,7 @@ static char *
 xts_process_plcsql_proc (char *ptr, const PLCSQL_PROC_NODE * plcsql_proc)
 {
   int offset;
-  int i;
+  int i, cnt;
 
   ptr = or_pack_int (ptr, plcsql_proc->op);
   ptr = or_pack_int (ptr, plcsql_proc->flags);
@@ -3758,6 +3758,29 @@ xts_process_plcsql_proc (char *ptr, const PLCSQL_PROC_NODE * plcsql_proc)
 	  return NULL;
 	}
       ptr = or_pack_int (ptr, offset);
+    }
+
+  /* Only what the statement's tree has packed already is named, by the offset it was packed at.
+   * Lowering may have kept an expression the tree then dropped, and packing that here would
+   * restore something nothing clears. The count goes first, so it is counted before */
+  for (i = 0, cnt = 0; i < plcsql_proc->places_cnt; i++)
+    {
+      if (xts_get_offset_visited_ptr (plcsql_proc->place_keys[i]) != ER_FAILED)
+	{
+	  cnt++;
+	}
+    }
+  ptr = or_pack_int (ptr, cnt);
+  for (i = 0; i < plcsql_proc->places_cnt; i++)
+    {
+      offset = xts_get_offset_visited_ptr (plcsql_proc->place_keys[i]);
+      if (offset == ER_FAILED)
+	{
+	  continue;
+	}
+      ptr = or_pack_int (ptr, offset);
+      ptr = or_pack_int (ptr, plcsql_proc->place_pos[2 * i]);
+      ptr = or_pack_int (ptr, plcsql_proc->place_pos[2 * i + 1]);
     }
 
   return ptr;
@@ -6797,7 +6820,9 @@ xts_sizeof_plcsql_proc (const PLCSQL_PROC_NODE * plcsql_proc)
 	   + PTR_SIZE		/* expr2 */
 	   + PTR_SIZE		/* call_args */
 	   + OR_INT_SIZE	/* children_cnt */
-	   + (plcsql_proc->children_cnt * PTR_SIZE));	/* children */
+	   + (plcsql_proc->children_cnt * PTR_SIZE)	/* children */
+	   + OR_INT_SIZE	/* places_cnt */
+	   + (plcsql_proc->places_cnt * (PTR_SIZE + 2 * OR_INT_SIZE)));	/* place_keys, place_pos */
 
   return size;
 }

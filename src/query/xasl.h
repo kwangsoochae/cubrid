@@ -655,7 +655,39 @@ struct plcsql_proc_node
    * hangs here as a child. */
   XASL_NODE **children;
   int children_cnt;
+  /* Where each expression the statement evaluates was written. An error an expression raises is
+   * reported from the innermost one that fails, as the PL engine does, rather than from the
+   * statement: put_line (CAST (s AS CHAR)) that fails at the CAST is named at the CAST.
+   * An expression is known by what its regu variable evaluates - the arithptr, funcp or sp_ptr
+   * (see plcsql_place_key ()) - and not by the regu variable itself, because a list of
+   * arguments holds copies of those, and a copy shares what it evaluates. place_pos keeps a line
+   * and a column for each, in that order */
+  void **place_keys;
+  int *place_pos;
+  int places_cnt;
 };
+
+/*
+ * plcsql_place_key () - what a PLCSQL_PROC_NODE's place_keys knows an expression by
+ *   return: what the regu variable evaluates, NULL for one that evaluates nothing of its own
+ *   regu(in) :
+ */
+static inline void *
+plcsql_place_key (const REGU_VARIABLE * regu)
+{
+  switch (regu->type)
+    {
+    case TYPE_INARITH:
+    case TYPE_OUTARITH:
+      return regu->value.arithptr;
+    case TYPE_FUNC:
+      return regu->value.funcp;
+    case TYPE_SP:
+      return regu->value.sp_ptr;
+    default:
+      return NULL;
+    }
+}
 
 /*
  * Macros for xasl structure

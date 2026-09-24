@@ -3846,6 +3846,7 @@ qexec_alloc_plcsql_frame (THREAD_ENTRY * thread_p, int locals_cnt, int cursors_c
   frame->positioned = false;
   frame->placed = NULL;
   frame->msg = NULL;
+  frame->failed_cnt = 0;
   frame->call_depth = (caller != NULL) ? caller->call_depth + 1 : 0;
   frame->caller = caller;
 
@@ -29598,6 +29599,7 @@ qexec_plcsql_handle (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xas
       frame->exc = caught;
       frame->raising = -1;
       frame->positioned = false;
+      frame->failed_cnt = 0;
       frame->caught = frame->placed;
       frame->placed = NULL;
       er_clear ();
@@ -29639,7 +29641,10 @@ static int
 qexec_execute_plcsql_stmt (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state)
 {
   PLCSQL_FRAME *frame = xasl_state->plcsql_frame;
-  int rc = qexec_execute_plcsql_stmt_inner (thread_p, xasl, xasl_state);
+  int rc;
+
+  frame->failed_cnt = 0;
+  rc = qexec_execute_plcsql_stmt_inner (thread_p, xasl, xasl_state);
 
   if (rc == NO_ERROR)
     {
@@ -29697,13 +29702,34 @@ static void
 qexec_plcsql_place (THREAD_ENTRY * thread_p, PLCSQL_FRAME * frame, XASL_NODE * xasl, const char *msg)
 {
   char inner[1024], placed[1120];
+  int line = xasl->proc.plcsql.line, column = xasl->proc.plcsql.column;
+  int i, j;
 
   /* er_set below writes over what er_msg () points at, so the sentence is copied out first */
   strncpy (inner, (msg != NULL) ? msg : "", sizeof (inner) - 1);
   inner[sizeof (inner) - 1] = '\0';
 
-  snprintf (placed, sizeof (placed), "\n  (line %d, column %d) %s", xasl->proc.plcsql.line,
-	    xasl->proc.plcsql.column, inner);
+  /* the innermost expression that failed and has a place of its own is where the PL engine
+   * names the failure; the statement's place is for one that came from nowhere written */
+  for (i = 0; i < frame->failed_cnt; i++)
+    {
+      for (j = 0; j < xasl->proc.plcsql.places_cnt; j++)
+	{
+	  if (xasl->proc.plcsql.place_keys[j] == plcsql_place_key (frame->failed[i]))
+	    {
+	      break;
+	    }
+	}
+      if (j < xasl->proc.plcsql.places_cnt)
+	{
+	  line = xasl->proc.plcsql.place_pos[2 * j];
+	  column = xasl->proc.plcsql.place_pos[2 * j + 1];
+	  break;
+	}
+    }
+  frame->failed_cnt = 0;
+
+  snprintf (placed, sizeof (placed), "\n  (line %d, column %d) %s", line, column, inner);
   er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_SP_EXECUTE_ERROR, 1, placed);
   frame->positioned = true;
   frame->placed = db_private_strdup (thread_p, placed);

@@ -6945,6 +6945,23 @@ pt_make_function (PARSER_CONTEXT * parser, int function_code, const REGU_VARIABL
  *
  */
 static XASL_NODE *pt_plcsql_compile_body (PARSER_CONTEXT * parser, const cubpl::pl_signature * sig);
+
+/* The expressions one statement is lowering, with where each was written - see
+ * pt_plcsql_note_place (). Only a statement being lowered has one, and a subquery it holds is
+ * lowered with none, because what the SQL parser wrote on those nodes is a place in the
+ * query's own text, not in the body. */
+typedef struct pt_plcsql_places PT_PLCSQL_PLACES;
+struct pt_plcsql_places
+{
+  REGU_VARIABLE **regus;
+  int *pos;			/* a line and a column for each of regus, in that order */
+  int cnt;
+  int cap;
+};
+static PT_PLCSQL_PLACES *pt_plcsql_collecting = NULL;
+
+static void pt_plcsql_note_place (REGU_VARIABLE * regu, const PT_NODE * node);
+static void pt_plcsql_attach_places (XASL_NODE * xasl, PT_PLCSQL_PLACES * places);
 static bool pt_plcsql_compiling_body (void);
 static bool pt_plcsql_callee_is_builtin (const REGU_VARIABLE * regu);
 static REGU_VARIABLE *pt_plcsql_local_call_to_regu (PARSER_CONTEXT * parser, PT_NODE * node, int number,
@@ -9757,7 +9774,12 @@ pt_to_regu_variable (PARSER_CONTEXT * parser, PT_NODE * node, UNBOX unbox)
 
 	      if (xasl == NULL && !pt_has_error (parser))
 		{
+		  PT_PLCSQL_PLACES *places = pt_plcsql_collecting;
+
+		  /* a subquery's nodes stand in its own text - see pt_plcsql_note_place () */
+		  pt_plcsql_collecting = NULL;
 		  xasl = parser_generate_xasl (parser, node);
+		  pt_plcsql_collecting = places;
 		}
 
 	      if (xasl)
@@ -9794,6 +9816,10 @@ pt_to_regu_variable (PARSER_CONTEXT * parser, PT_NODE * node, UNBOX unbox)
 	{
 	  PT_INTERNAL_ERROR (parser, "generate var");
 	}
+    }
+  else if (pt_plcsql_collecting != NULL)
+    {
+      pt_plcsql_note_place (regu, node);
     }
 
   if (val != NULL)
@@ -31706,6 +31732,9 @@ pt_plcsql_new_node (PLCSQL_OP op)
       xasl->proc.plcsql.column = 0;
       xasl->proc.plcsql.children = NULL;
       xasl->proc.plcsql.children_cnt = 0;
+      xasl->proc.plcsql.place_keys = NULL;
+      xasl->proc.plcsql.place_pos = NULL;
+      xasl->proc.plcsql.places_cnt = 0;
     }
 
   return xasl;
@@ -32678,10 +32707,120 @@ pt_plcsql_place (XASL_NODE * xasl, PT_NODE * stmt)
 static XASL_NODE *
 pt_to_plcsql_stmt (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * ret_domain, PT_PLCSQL_LOOP * loops)
 {
-  XASL_NODE *xasl = pt_to_plcsql_stmt_inner (parser, stmt, ret_domain, loops);
+  PT_PLCSQL_PLACES places = { NULL, NULL, 0, 0 };
+  PT_PLCSQL_PLACES *outer = pt_plcsql_collecting;
+  XASL_NODE *xasl;
+
+  pt_plcsql_collecting = &places;
+  xasl = pt_to_plcsql_stmt_inner (parser, stmt, ret_domain, loops);
+  pt_plcsql_collecting = outer;
 
   pt_plcsql_place (xasl, stmt);
+  pt_plcsql_attach_places (xasl, &places);
+  free_and_init (places.regus);
+  free_and_init (places.pos);
   return xasl;
+}
+
+/*
+ * pt_plcsql_note_place () - keep where an expression the statement evaluates was written
+ *   return: nothing; a place that cannot be kept is left out, and a failure there is then
+ *           named at the statement, as before
+ *   regu(in) : what the expression lowered to
+ *   node(in) : the expression
+ *
+ * note: the PL engine names a failure at the innermost expression it was raised in, and the
+ *       expressions that have a place are operators, casts and calls (JavaCodeWriter gives
+ *       those one; a CASE, a literal or a name has none and leaves it to what encloses it).
+ *       PT_EXPR, PT_FUNCTION and PT_METHOD_CALL are that set here, less CASE and DECODE.
+ */
+static void
+pt_plcsql_note_place (REGU_VARIABLE * regu, const PT_NODE * node)
+{
+  PT_PLCSQL_PLACES *places = pt_plcsql_collecting;
+  REGU_VARIABLE **regus;
+  int *pos;
+  int cap;
+
+  if (node == NULL || node->line_number <= 0)
+    {
+      return;
+    }
+  if (node->node_type == PT_EXPR)
+    {
+      if (node->info.expr.op == PT_CASE || node->info.expr.op == PT_DECODE)
+	{
+	  return;
+	}
+    }
+  else if (node->node_type != PT_FUNCTION && node->node_type != PT_METHOD_CALL)
+    {
+      return;
+    }
+
+  if (places->cnt == places->cap)
+    {
+      cap = (places->cap == 0) ? 8 : places->cap * 2;
+      regus = (REGU_VARIABLE **) realloc (places->regus, sizeof (REGU_VARIABLE *) * cap);
+      if (regus == NULL)
+	{
+	  return;
+	}
+      places->regus = regus;
+      pos = (int *) realloc (places->pos, sizeof (int) * 2 * cap);
+      if (pos == NULL)
+	{
+	  return;
+	}
+      places->pos = pos;
+      places->cap = cap;
+    }
+
+  places->regus[places->cnt] = regu;
+  places->pos[2 * places->cnt] = node->line_number;
+  places->pos[2 * places->cnt + 1] = node->column_number;
+  places->cnt++;
+}
+
+/*
+ * pt_plcsql_attach_places () - hand the statement the places its expressions were written at
+ *   return: nothing; without them the statement names its own place, as it did before
+ *   xasl(in/out) : the statement
+ *   places(in)   : what lowering it kept
+ */
+static void
+pt_plcsql_attach_places (XASL_NODE * xasl, PT_PLCSQL_PLACES * places)
+{
+  void *key;
+  int i, cnt;
+
+  if (xasl == NULL || xasl->type != PLCSQL_PROC || places->cnt == 0)
+    {
+      return;
+    }
+
+  regu_array_alloc (&xasl->proc.plcsql.place_keys, (size_t) places->cnt);
+  regu_array_alloc (&xasl->proc.plcsql.place_pos, (size_t) (2 * places->cnt));
+  if (xasl->proc.plcsql.place_keys == NULL || xasl->proc.plcsql.place_pos == NULL)
+    {
+      xasl->proc.plcsql.place_keys = NULL;
+      xasl->proc.plcsql.place_pos = NULL;
+      return;
+    }
+
+  for (i = 0, cnt = 0; i < places->cnt; i++)
+    {
+      key = plcsql_place_key (places->regus[i]);
+      if (key == NULL)
+	{
+	  continue;
+	}
+      xasl->proc.plcsql.place_keys[cnt] = key;
+      xasl->proc.plcsql.place_pos[2 * cnt] = places->pos[2 * i];
+      xasl->proc.plcsql.place_pos[2 * cnt + 1] = places->pos[2 * i + 1];
+      cnt++;
+    }
+  xasl->proc.plcsql.places_cnt = cnt;
 }
 
 static XASL_NODE *
