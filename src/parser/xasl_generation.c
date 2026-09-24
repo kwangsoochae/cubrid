@@ -9695,6 +9695,14 @@ pt_to_regu_variable (PARSER_CONTEXT * parser, PT_NODE * node, UNBOX unbox)
 		      regu->type = TYPE_PLCSQL_SLOT;
 		      regu->domain = pt_xasl_node_to_domain (parser, node);
 		      regu->value.plcsql_slot = node->info.name.plcsql_slot;
+
+		      /* %ISOPEN answers whether or not the cursor is open; the other three have
+		       * nothing to answer until it is, and reading one then is an error */
+		      if (node->info.name.plcsql_cursor_attr != PT_SP_CURSOR_ATTR_NONE
+			  && node->info.name.plcsql_cursor_attr != PT_SP_CURSOR_ATTR_ISOPEN)
+			{
+			  REGU_VARIABLE_SET_FLAG (regu, REGU_VARIABLE_PLCSQL_CURSOR_ATTR);
+			}
 		    }
 		}
 	      else if (node->info.name.meta_class == PT_PARAMETER)
