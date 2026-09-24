@@ -70,6 +70,7 @@ static SP_KEYWORD sp_Keywords[] = {
   {"else", ELSE_, PT_TYPE_NONE},
   {"elsif", ELSIF_, PT_TYPE_NONE},
   {"end", END_, PT_TYPE_NONE},
+  {"escape", ESCAPE_, PT_TYPE_NONE},
   {"exception", EXCEPTION_, PT_TYPE_NONE},
   {"exit", EXIT_, PT_TYPE_NONE},
   {"false", FALSE_, PT_TYPE_NONE},
@@ -83,6 +84,7 @@ static SP_KEYWORD sp_Keywords[] = {
   {"integer", TYPE_KEYWORD, PT_TYPE_INTEGER},
   {"into", INTO_, PT_TYPE_NONE},
   {"is", IS_, PT_TYPE_NONE},
+  {"like", LIKE_, PT_TYPE_NONE},
   {"loop", LOOP_, PT_TYPE_NONE},
   {"mod", MOD_, PT_TYPE_NONE},
   {"not", NOT_, PT_TYPE_NONE},
@@ -110,7 +112,8 @@ static SP_KEYWORD sp_Keywords[] = {
   {"true", TRUE_, PT_TYPE_NONE},
   {"varchar", TYPE_KEYWORD, PT_TYPE_VARCHAR},
   {"when", WHEN_, PT_TYPE_NONE},
-  {"while", WHILE_, PT_TYPE_NONE}
+  {"while", WHILE_, PT_TYPE_NONE},
+  {"xor", XOR_, PT_TYPE_NONE}
 };
 
 static char *sp_unquote_string (const char *text);
