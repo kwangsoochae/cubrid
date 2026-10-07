@@ -4188,7 +4188,7 @@ static char *
 stx_build_plcsql_proc (THREAD_ENTRY * thread_p, char *ptr, PLCSQL_PROC_NODE * plcsql_proc)
 {
   int offset;
-  int i;
+  int i, cnt;
   int tmp;
   XASL_UNPACK_INFO *xasl_unpack_info = get_xasl_unpack_info_ptr (thread_p);
 
@@ -4312,6 +4312,42 @@ stx_build_plcsql_proc (THREAD_ENTRY * thread_p, char *ptr, PLCSQL_PROC_NODE * pl
 	    {
 	      goto error;
 	    }
+	}
+    }
+
+  ptr = or_unpack_int (ptr, &cnt);
+  plcsql_proc->place_keys = NULL;
+  plcsql_proc->place_pos = NULL;
+  plcsql_proc->places_cnt = 0;
+  if (cnt > 0)
+    {
+      plcsql_proc->place_keys = (void **) stx_alloc_struct (thread_p, sizeof (void *) * cnt);
+      plcsql_proc->place_pos = (int *) stx_alloc_struct (thread_p, sizeof (int) * 2 * cnt);
+      if (plcsql_proc->place_keys == NULL || plcsql_proc->place_pos == NULL)
+	{
+	  goto error;
+	}
+
+      for (i = 0; i < cnt; i++)
+	{
+	  int line, column;
+	  void *key;
+
+	  ptr = or_unpack_int (ptr, &offset);
+	  ptr = or_unpack_int (ptr, &line);
+	  ptr = or_unpack_int (ptr, &column);
+
+	  /* The statement's tree was restored ahead of this, so what it evaluates is looked up and
+	   * never built here. One the tree did not restore is left out */
+	  key = stx_get_struct_visited_ptr (thread_p, &xasl_unpack_info->packed_xasl[offset]);
+	  if (key == NULL)
+	    {
+	      continue;
+	    }
+	  plcsql_proc->place_keys[plcsql_proc->places_cnt] = key;
+	  plcsql_proc->place_pos[2 * plcsql_proc->places_cnt] = line;
+	  plcsql_proc->place_pos[2 * plcsql_proc->places_cnt + 1] = column;
+	  plcsql_proc->places_cnt++;
 	}
     }
 

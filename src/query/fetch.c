@@ -5513,6 +5513,15 @@ fetch_peek_dbval_slow (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_de
   return NO_ERROR;
 
 exit_on_error:
+  /* the statement that fails names the innermost expression it was raised in - see
+   * qexec_plcsql_place (). What fails first is the deepest, so the list is innermost first */
+  if (vd != NULL && vd->xasl_state != NULL && vd->xasl_state->plcsql_frame != NULL
+      && vd->xasl_state->plcsql_frame->failed_cnt < PLCSQL_FAILED_MAX)
+    {
+      PLCSQL_FRAME *frame = vd->xasl_state->plcsql_frame;
+
+      frame->failed[frame->failed_cnt++] = regu_var;
+    }
 
   return ER_FAILED;
 }

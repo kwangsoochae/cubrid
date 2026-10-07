@@ -119,6 +119,8 @@ struct plcsql_routine
   int modes_cnt;
 };
 
+#define PLCSQL_FAILED_MAX 16
+
 typedef struct plcsql_frame PLCSQL_FRAME;
 struct plcsql_frame
 {
@@ -154,6 +156,10 @@ struct plcsql_frame
   char *msg;			/* the same sentence without the place, which is what SQLERRM shows:
 				 * the reference implementation answers with what the failure said,
 				 * and only a RAISE makes that the exception's own wording */
+  regu_variable_node *failed[PLCSQL_FAILED_MAX];	/* the expressions the failure in hand came out
+							 * through, innermost first. The statement names
+							 * the first of them it knows a place for */
+  int failed_cnt;
 
   int call_depth;
   PLCSQL_FRAME *caller;
