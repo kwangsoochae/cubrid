@@ -176,6 +176,8 @@ const int REGU_VARIABLE_FAST_PEEK = 0x1000;	/* inline fetch_peek_dbval () may re
 const int REGU_VARIABLE_AGG_OPERAND = 0x2000;	/* output expression whose value is consumed as an aggregate operand */
 const int REGU_VARIABLE_PLCSQL_CURSOR_ATTR = 0x4000;	/* PL/CSQL: a %FOUND, %NOTFOUND or %ROWCOUNT slot, which may
 							 * not be read while its cursor is shut */
+const int REGU_VARIABLE_PLCSQL_BY_ALIAS = 0x8000;	/* PL/CSQL: an OUT or IN OUT argument of a local routine that
+							 * the parameter stands for, rather than a copy */
 
 class regu_variable_node
 {

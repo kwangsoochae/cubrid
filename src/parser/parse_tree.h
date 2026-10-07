@@ -2723,6 +2723,9 @@ struct pt_name_info
   int plcsql_param_mode;	/* PT_SP_PARAM_IN, _OUT or _IN_OUT where the name is a routine's
 				 * parameter. A catalog routine's modes come from its signature; a
 				 * local one has none, so its header is where they are read */
+  int plcsql_by_alias;		/* where the name is an OUT or IN OUT argument of a local routine: true
+				 * when the parameter stands for the variable itself rather than for a
+				 * copy of it - see pt_plcsql_mark_aliases () */
   PT_NODE *default_value;	/* PT_VALUE the default value of the attribute */
   PT_NODE *constant_value;	/* constant value derived from qo_reduce_equality_terms () */
   unsigned int custom_print;

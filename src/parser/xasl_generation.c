@@ -6964,6 +6964,8 @@ static void pt_plcsql_note_place (REGU_VARIABLE * regu, const PT_NODE * node);
 static void pt_plcsql_attach_places (XASL_NODE * xasl, PT_PLCSQL_PLACES * places);
 static bool pt_plcsql_compiling_body (void);
 static bool pt_plcsql_callee_is_builtin (const REGU_VARIABLE * regu);
+static void pt_plcsql_mark_aliases (PT_NODE * args, PT_NODE * params);
+static void pt_plcsql_carry_aliases (PT_NODE * args, REGU_VARIABLE_LIST arg_regus);
 static REGU_VARIABLE *pt_plcsql_local_call_to_regu (PARSER_CONTEXT * parser, PT_NODE * node, int number,
 						    PT_NODE * args);
 
@@ -30560,6 +30562,7 @@ pt_plcsql_bind_name_pre (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int
 	      node->type_enum =
 		(decl->info.sp_stmt.ret_type != NULL) ? decl->info.sp_stmt.ret_type->type_enum : PT_TYPE_NONE;
 	      node->data_type = parser_copy_tree (parser, decl->info.sp_stmt.ret_type);
+	      pt_plcsql_mark_aliases (node->info.method_call.arg_list, decl->info.sp_stmt.params);
 	    }
 	  *continue_walk = PT_LIST_WALK;
 	}
@@ -30833,6 +30836,7 @@ pt_plcsql_bind_call (PARSER_CONTEXT * parser, PT_NODE * stmt, PT_PLCSQL_SCOPE * 
   stmt->info.sp_stmt.flags |= PT_SP_CALL_LOCAL;
   name->info.name.plcsql_slot = decl->info.sp_stmt.name->info.name.plcsql_slot;
   stmt->info.sp_stmt.slot_base = decl->info.sp_stmt.slot_base;
+  pt_plcsql_mark_aliases (stmt->info.sp_stmt.expr->info.method_call.arg_list, decl->info.sp_stmt.params);
 
   return NO_ERROR;
 }
@@ -32875,6 +32879,7 @@ pt_to_plcsql_stmt_inner (PARSER_CONTEXT * parser, PT_NODE * stmt, TP_DOMAIN * re
 	    {
 	      return NULL;
 	    }
+	  pt_plcsql_carry_aliases (call->info.method_call.arg_list, xasl->proc.plcsql.call_args);
 	  return xasl;
 	}
 
@@ -33425,6 +33430,82 @@ pt_plcsql_compiling_body (void)
 }
 
 /*
+ * pt_plcsql_carry_aliases () - carry pt_plcsql_mark_aliases ()'s decision to where the call runs
+ *   return:
+ *   args(in)      : the call's arguments
+ *   arg_regus(in/out) : what they were lowered to, one for one
+ */
+static void
+pt_plcsql_carry_aliases (PT_NODE * args, REGU_VARIABLE_LIST arg_regus)
+{
+  PT_NODE *arg;
+  REGU_VARIABLE_LIST arg_regu;
+
+  for (arg = args, arg_regu = arg_regus; arg != NULL && arg_regu != NULL; arg = arg->next, arg_regu = arg_regu->next)
+    {
+      if (arg->node_type == PT_NAME && arg->info.name.plcsql_by_alias)
+	{
+	  REGU_VARIABLE_SET_FLAG (&arg_regu->value, REGU_VARIABLE_PLCSQL_BY_ALIAS);
+	}
+    }
+}
+
+/*
+ * pt_plcsql_type_family () - which of the PL engine's types a native type falls in
+ *   return: the family, PT_TYPE_NONE for a type the PL engine has none for
+ *   type(in) :
+ *
+ * note: the PL engine has one string type for CHAR and VARCHAR alike, told apart only by the
+ *       length a declaration may give it.
+ */
+static PT_TYPE_ENUM
+pt_plcsql_type_family (PT_TYPE_ENUM type)
+{
+  return (type == PT_TYPE_CHAR) ? PT_TYPE_VARCHAR : type;
+}
+
+/*
+ * pt_plcsql_mark_aliases () - say which OUT and IN OUT arguments of a local call are aliases
+ *   return:
+ *   args(in/out) : the call's arguments, resolved
+ *   params(in)   : the routine's parameters, as its header declared them
+ *
+ * note: the PL engine passes an OUT or IN OUT argument's own storage when converting the
+ *       variable's type to the parameter's is the identity, and a copy it converts both ways
+ *       otherwise (JavaCodeWriter.getLocalCallCodeSnippets, Coercion.getCoercion). A parameter's
+ *       type there carries no length or precision, so a variable of the same family - any
+ *       string for a CHAR or VARCHAR parameter, any NUMERIC for a NUMERIC one - is passed
+ *       itself, and one of another family (INT to BIGINT) is copied. The one parameter that does
+ *       carry a precision is a NUMERIC written %TYPE and OUT, and that one is copied and
+ *       checked; it is told here by a precision other than the default a keyword gives.
+ */
+static void
+pt_plcsql_mark_aliases (PT_NODE * args, PT_NODE * params)
+{
+  PT_NODE *arg, *param;
+
+  for (arg = args, param = params; arg != NULL && param != NULL; arg = arg->next, param = param->next)
+    {
+      bool precise;
+
+      if (arg->node_type != PT_NAME || arg->info.name.meta_class != PT_PLCSQL_LOCAL
+	  || (param->info.name.plcsql_param_mode != PT_SP_PARAM_OUT
+	      && param->info.name.plcsql_param_mode != PT_SP_PARAM_IN_OUT))
+	{
+	  continue;
+	}
+
+      precise = (param->type_enum == PT_TYPE_NUMERIC && param->data_type != NULL
+		 && (param->data_type->info.data_type.precision != DB_DEFAULT_NUMERIC_PRECISION
+		     || param->data_type->info.data_type.dec_precision != DB_DEFAULT_NUMERIC_SCALE));
+
+      arg->info.name.plcsql_by_alias = (param->type_enum != PT_TYPE_NONE && !precise
+					&& pt_plcsql_type_family (arg->type_enum) ==
+					pt_plcsql_type_family (param->type_enum));
+    }
+}
+
+/*
  * pt_plcsql_local_call_to_regu () - a call of a local routine, as a value
  *   return: the regu variable, NULL on error
  *   parser(in) :
@@ -33468,6 +33549,8 @@ pt_plcsql_local_call_to_regu (PARSER_CONTEXT * parser, PT_NODE * node, int numbe
 	{
 	  return NULL;
 	}
+
+      pt_plcsql_carry_aliases (args, regu->value.sp_ptr->args);
     }
 
   return regu;
