@@ -4952,7 +4952,7 @@ fetch_peek_dbval_slow (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_de
 	}
       /* an aliased OUT parameter reads the variable it stands for */
       *peek_dbval = &vd->xasl_state->plcsql_frame->locals[qexec_plcsql_slot_of (vd->xasl_state->plcsql_frame,
-										  regu_var->value.plcsql_slot)];
+										regu_var->value.plcsql_slot)];
       break;
 
     case TYPE_CONSTANT:	/* fetch constant-column value */
