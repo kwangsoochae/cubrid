@@ -29955,7 +29955,8 @@ qexec_plcsql_run_local (THREAD_ENTRY * thread_p, XASL_STATE * xasl_state, int nu
   for (arg = args; arg != NULL; arg = arg->next, i++)
     {
       aliased[i] = false;
-      targets[i] = (arg->value.type == TYPE_PLCSQL_SLOT) ? qexec_plcsql_slot_of (frame, arg->value.value.plcsql_slot) : -1;
+      targets[i] =
+	(arg->value.type == TYPE_PLCSQL_SLOT) ? qexec_plcsql_slot_of (frame, arg->value.value.plcsql_slot) : -1;
     }
   for (i = 0; i < cnt; i++)
     {
