@@ -12617,7 +12617,7 @@ pt_dblink_odku_max_sort_position (PT_NODE * sort_list)
 static int
 pt_dblink_odku_append_bound_values (PARSER_CONTEXT * parser, PT_NODE * stmt, PT_NODE * subq)
 {
-  PT_NODE *assign, *copy, *copies = NULL;
+  PT_NODE *assign, *copy, *copies = NULL, *first = NULL;
   int cnt = 0;
 
   for (assign = stmt->info.insert.odku_assignments; assign != NULL; assign = assign->next)
@@ -12635,6 +12635,10 @@ pt_dblink_odku_append_bound_values (PARSER_CONTEXT * parser, PT_NODE * stmt, PT_
 	  return -1;
 	}
       copies = parser_append_node (copy, copies);
+      if (first == NULL)
+	{
+	  first = assign->info.expr.arg2;
+	}
       cnt++;
     }
 
@@ -12647,6 +12651,17 @@ pt_dblink_odku_append_bound_values (PARSER_CONTEXT * parser, PT_NODE * stmt, PT_
   if (subq->node_type != PT_SELECT)
     {
       PT_INTERNAL_ERROR (parser, "remote INSERT SELECT: bound ODKU values need a single SELECT source");
+      return -1;
+    }
+
+  /* An aggregate without GROUP BY makes one row out of many. A source column has no single value in it.
+   * The copy would fail binding with a message about a column the user never selected, so say it here. */
+  if (subq->info.query.q.select.group_by == NULL && pt_has_aggregate (parser, subq))
+    {
+      PT_ERRORf2 (parser, first, "dblink: remote INSERT ... SELECT with a local source cannot bind %s.%s in ON "
+		  "DUPLICATE KEY UPDATE, as the source SELECT aggregates without GROUP BY and the column has no single "
+		  "value; aggregate it in the source SELECT", first->info.dot.arg1->info.name.original,
+		  first->info.dot.arg2->info.name.original);
       return -1;
     }
 
