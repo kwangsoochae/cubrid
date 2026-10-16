@@ -12580,6 +12580,80 @@ pt_bind_remote_dml_subq (PARSER_CONTEXT * parser, PT_NODE * subq, SEMANTIC_CHK_I
   return pt_has_error (parser) ? NULL : subq;
 }
 
+/* the largest position a sort list names (ORDER BY 2), or 0 when it names none */
+static int
+pt_dblink_odku_max_sort_position (PT_NODE * sort_list)
+{
+  PT_NODE *spec, *expr;
+  int max_pos = 0;
+
+  for (spec = sort_list; spec != NULL; spec = spec->next)
+    {
+      if (spec->node_type != PT_SORT_SPEC)
+	{
+	  continue;
+	}
+      expr = spec->info.sort_spec.expr;
+      if (expr != NULL && expr->node_type == PT_VALUE && expr->type_enum == PT_TYPE_INTEGER
+	  && expr->alias_print == NULL && expr->info.value.data_value.i > max_pos)
+	{
+	  max_pos = expr->info.value.data_value.i;
+	}
+    }
+
+  return max_pos;
+}
+
+/*
+ * pt_dblink_odku_append_bound_values () - Append a copy of each bound ODKU value to the source SELECT of a
+ *   remote INSERT, so that it is resolved and evaluated with the source row. The clause keeps the values as
+ *   written. pt_dblink_odku_value_is_bound () must still see them unresolved at XASL generation.
+ *   return: the number of copies appended, or -1 with the parser error set
+ *   parser(in): parser context
+ *   stmt(in): the PT_INSERT
+ *   subq(in/out): its source SELECT, not yet bound. The copies go after its select list, so the hidden sort
+ *                 keys binding adds (for ORDER BY and analytic functions) come after them.
+ */
+static int
+pt_dblink_odku_append_bound_values (PARSER_CONTEXT * parser, PT_NODE * stmt, PT_NODE * subq)
+{
+  PT_NODE *assign, *copy, *copies = NULL;
+  int cnt = 0;
+
+  for (assign = stmt->info.insert.odku_assignments; assign != NULL; assign = assign->next)
+    {
+      if (assign->node_type != PT_EXPR || assign->info.expr.op != PT_ASSIGN
+	  || !pt_dblink_odku_value_is_bound (assign->info.expr.arg2))
+	{
+	  continue;
+	}
+
+      copy = parser_copy_tree (parser, assign->info.expr.arg2);
+      if (copy == NULL)
+	{
+	  PT_ERRORm (parser, assign, MSGCAT_SET_PARSER_SEMANTIC, MSGCAT_SEMANTIC_OUT_OF_MEMORY);
+	  return -1;
+	}
+      copies = parser_append_node (copy, copies);
+      cnt++;
+    }
+
+  if (cnt == 0)
+    {
+      return 0;
+    }
+
+  /* A set operation has a select list per operand. The gate lets through only a single SELECT. */
+  if (subq->node_type != PT_SELECT)
+    {
+      PT_INTERNAL_ERROR (parser, "remote INSERT SELECT: bound ODKU values need a single SELECT source");
+      return -1;
+    }
+
+  subq->info.query.q.select.list = parser_append_node (copies, subq->info.query.q.select.list);
+  return cnt;
+}
+
 /*
  * pt_check_with_info () -  do name resolution & semantic checks on this tree
  *   return:  statement if no errors, NULL otherwise
@@ -12697,6 +12771,36 @@ pt_check_with_info (PARSER_CONTEXT * parser, PT_NODE * node, SEMANTIC_CHK_INFO *
 		  && node->info.insert.spec->info.spec.remote_server_name->info.dblink_table.qstr == NULL)
 		{
 		  PT_NODE *subq = pt_get_subquery_of_insert_select (node);
+		  int odku_bind_cnt = 0, max_position = 0;
+
+		  /* A source column in the ON DUPLICATE KEY UPDATE clause is bound from the source row. A copy of
+		   * it joins the SELECT before binding, so it is resolved there. The count is recorded at once, so
+		   * a statement checked again does not get the copies twice, even when the first check failed. */
+		  if (subq != NULL && node->info.insert.remote_odku_bind_cnt == 0)
+		    {
+		      odku_bind_cnt = pt_dblink_odku_append_bound_values (parser, node, subq);
+		      if (odku_bind_cnt < 0)
+			{
+			  subq = NULL;
+			}
+		      else
+			{
+			  node->info.insert.remote_odku_bind_cnt = odku_bind_cnt;
+			}
+		    }
+		  else
+		    {
+		      odku_bind_cnt = node->info.insert.remote_odku_bind_cnt;
+		    }
+
+		  /* The copies are visible columns, so binding would let ORDER BY 2 or GROUP BY 2 name one. Keep
+		   * the largest position the user wrote, to be checked against the select list the user wrote. */
+		  if (subq != NULL && odku_bind_cnt > 0 && subq->node_type == PT_SELECT)
+		    {
+		      max_position = MAX (pt_dblink_odku_max_sort_position (subq->info.query.order_by),
+					  pt_dblink_odku_max_sort_position (subq->info.query.q.select.group_by));
+		    }
+
 		  if (subq != NULL)
 		    {
 		      subq = pt_bind_remote_dml_subq (parser, subq, sc_info_ptr,
@@ -12705,15 +12809,23 @@ pt_check_with_info (PARSER_CONTEXT * parser, PT_NODE * node, SEMANTIC_CHK_INFO *
 			{
 			  node->info.insert.value_clauses->info.node_list.list = subq;
 
+			  /* the same range error a position past the user's select list gets without the copies */
+			  if (max_position > pt_length_of_select_list (pt_get_select_list (parser, subq),
+								       EXCLUDE_HIDDEN_COLUMNS) - odku_bind_cnt)
+			    {
+			      PT_ERRORmf (parser, node, MSGCAT_SET_PARSER_SEMANTIC, MSGCAT_SEMANTIC_SORT_SPEC_RANGE_ERR,
+					  max_position);
+			    }
+
 			  /* The remote path also skips the INSERT-level attribute/value count check, so an
 			   * explicit column list whose size differs from the SELECT projection would reach
 			   * XASL generation and abort there. Validate it here with the same semantic error a
-			   * local INSERT uses. */
+			   * local INSERT uses. The ODKU copies are not part of the projection the user wrote. */
 			  if (node->info.insert.attr_list != NULL)
 			    {
 			      int ac = pt_length_of_list (node->info.insert.attr_list);
 			      int cc = pt_length_of_select_list (pt_get_select_list (parser, subq),
-								 EXCLUDE_HIDDEN_COLUMNS);
+								 EXCLUDE_HIDDEN_COLUMNS) - odku_bind_cnt;
 			      if (ac != cc)
 				{
 				  PT_ERRORmf2 (parser, node, MSGCAT_SET_PARSER_SEMANTIC,
