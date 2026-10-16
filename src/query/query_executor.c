@@ -570,8 +570,7 @@ static int qexec_init_upddel_ehash_files (THREAD_ENTRY * thread_p, XASL_NODE * b
 static void qexec_destroy_upddel_ehash_files (THREAD_ENTRY * thread_p, XASL_NODE * buildlist);
 static int qexec_execute_update (THREAD_ENTRY * thread_p, XASL_NODE * xasl, bool has_delete, XASL_STATE * xasl_state);
 static int qexec_execute_delete (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state);
-static int qexec_collect_remote_insert_vals (SCAN_ID * s_id, XASL_STATE * xasl_state, INSERT_PROC_NODE * insert,
-					     int val_no);
+static int qexec_collect_remote_insert_vals (SCAN_ID * s_id, XASL_STATE * xasl_state, DB_VALUE ** vals, int val_no);
 static int qexec_collect_remote_delete_key (SCAN_ID * s_id, XASL_STATE * xasl_state, DB_VALUE ** bindv,
 					    bool * skip_row);
 static int qexec_execute_remote_dml_sink (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state,
@@ -12762,15 +12761,15 @@ qexec_get_attr_default (THREAD_ENTRY * thread_p, OR_ATTRIBUTE * attr, DB_VALUE *
 
 /*
  * qexec_collect_remote_insert_vals () - Collect the leading val_no (visible) column values for the
- *   scan's current row into insert->vals, for one row of the remote INSERT SELECT sink.
+ *   scan's current row into vals, for one row of the remote INSERT SELECT sink.
  *   return: NO_ERROR on success, ER_FAILED if the scan row is malformed (asserted, should not happen)
  *   s_id(in)       : scan id positioned at the current row
  *   xasl_state(in) : XASL state, for qexec_failure_line on error
- *   insert(in/out) : insert->vals[0..val_no) is filled in
- *   val_no(in)     : number of leading (visible) columns to collect
+ *   vals(out)      : vals[0..val_no) is filled in
+ *   val_no(in)     : number of leading columns to collect, the INSERT values and then the bound ODKU values
  */
 static int
-qexec_collect_remote_insert_vals (SCAN_ID * s_id, XASL_STATE * xasl_state, INSERT_PROC_NODE * insert, int val_no)
+qexec_collect_remote_insert_vals (SCAN_ID * s_id, XASL_STATE * xasl_state, DB_VALUE ** vals, int val_no)
 {
   QPROC_DB_VALUE_LIST vallist;
   int k;
@@ -12783,12 +12782,15 @@ qexec_collect_remote_insert_vals (SCAN_ID * s_id, XASL_STATE * xasl_state, INSER
 	  qexec_failure_line (__LINE__, xasl_state);
 	  return ER_FAILED;
 	}
-      insert->vals[k] = vallist->val;
+      vals[k] = vallist->val;
     }
 
-  /* verify we collected the leading val_no (visible) columns. Trailing hidden columns added for
-   * ORDER BY / GROUP BY keys not in the select list may remain in vallist and are intentionally
-   * ignored (they are not part of the remote INSERT), matching the canonical local INSERT path. */
+  /* Verify we collected the leading val_no columns. The row is laid out in three parts:
+   *   [0, num_vals)       the INSERT values, one per "?" in VALUES
+   *   [num_vals, val_no)  the bound ODKU values, one per NULL value in the clause, in clause order
+   *   after that          hidden sort keys, for ORDER BY or analytic functions, that are not in the select list
+   * A value node carries no hidden mark, so this relies on the plan putting the ODKU values before the
+   * hidden keys. The hidden keys are left unread, matching the canonical local INSERT path. */
   if (k != val_no)
     {
       assert (0);
@@ -12852,8 +12854,9 @@ qexec_collect_remote_delete_key (SCAN_ID * s_id, XASL_STATE * xasl_state, DB_VAL
  *       the local subquery there is not the generic local-DELETE aptr path). This function opens the
  *       remote connection, opens the local scan, streams rows to the remote table via CCI bind/execute,
  *       and accumulates affected rows in list_id->tuple_cnt. Only the per-row value collection differs
- *       by kind: INSERT collects the leading num_vals (visible) columns positionally; DELETE collects a
- *       single WHERE-key value and skips (no-op) a NULL key rather than binding it.
+ *       by kind: INSERT collects the leading num_vals columns positionally, then one more per bound ODKU
+ *       value (see qexec_collect_remote_insert_vals for the layout); DELETE collects a single WHERE-key
+ *       value and skips (no-op) a NULL key rather than binding it.
  */
 static int
 qexec_execute_remote_dml_sink (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state, DBLINK_DML_KIND kind)
@@ -12863,7 +12866,8 @@ qexec_execute_remote_dml_sink (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_S
   SCAN_CODE xb_scan, ls_scan;
   SCAN_ID *s_id = NULL;
   DB_VALUE *bindv[1];
-  int val_no = 0, row_affected;
+  DB_VALUE **ins_vals = NULL, **odku_vals = NULL;
+  int val_no = 0, bind_no = 0, row_affected, i;
   char **attr_names = NULL;
   int num_attrs = 0;
   const char *key_col = NULL, *op = NULL;
@@ -12892,6 +12896,29 @@ qexec_execute_remote_dml_sink (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_S
 	/* stx_build_insert_proc() (server-side XASL unpack) always allocates insert->vals when
 	 * num_vals > 0, so it is non-NULL on this path. */
 	assert (val_no == 0 || insert->vals != NULL);
+	ins_vals = insert->vals;
+
+	/* A NULL ODKU value is bound after the INSERT values. It comes from the next column of the same row.
+	 * insert->vals holds only num_vals, so such a row is collected into an array of its own. */
+	bind_no = val_no;
+	for (i = 0; odku.exprs != NULL && i < odku.num_assigns; i++)
+	  {
+	    if (odku.exprs[i] == NULL)
+	      {
+		bind_no++;
+	      }
+	  }
+	if (bind_no > val_no)
+	  {
+	    odku_vals = (DB_VALUE **) db_private_alloc (thread_p, sizeof (DB_VALUE *) * bind_no);
+	    if (odku_vals == NULL)
+	      {
+		er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, sizeof (DB_VALUE *) * bind_no);
+		qexec_failure_line (__LINE__, xasl_state);
+		goto exit_on_error;
+	      }
+	    ins_vals = odku_vals;
+	  }
 	break;
       }
     case DBLINK_DML_DELETE:
@@ -12940,9 +12967,7 @@ qexec_execute_remote_dml_sink (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_S
 	    case DBLINK_DML_INSERT:
 	    case DBLINK_DML_REPLACE:
 	      {
-		INSERT_PROC_NODE *insert = &xasl->proc.insert;
-
-		if (qexec_collect_remote_insert_vals (s_id, xasl_state, insert, val_no) != NO_ERROR)
+		if (qexec_collect_remote_insert_vals (s_id, xasl_state, ins_vals, bind_no) != NO_ERROR)
 		  {
 		    goto exit_on_error;
 		  }
@@ -12951,7 +12976,7 @@ qexec_execute_remote_dml_sink (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_S
 		 * REPLACE that replaces counts the row it removed as well as the one it inserted, so it
 		 * answers 2. This is the rule the text-push path already follows, and the DELETE sink
 		 * accumulates the remote's number the same way. */
-		if (dblink_dml_execute_row (thread_p, &dblink_state, insert->vals, val_no, &row_affected) != NO_ERROR)
+		if (dblink_dml_execute_row (thread_p, &dblink_state, ins_vals, bind_no, &row_affected) != NO_ERROR)
 		  {
 		    qexec_failure_line (__LINE__, xasl_state);
 		    goto exit_on_error;
@@ -13011,6 +13036,10 @@ qexec_execute_remote_dml_sink (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_S
 
   dblink_dml_close (&dblink_state);
   qexec_close_scan (thread_p, specp);
+  if (odku_vals != NULL)
+    {
+      db_private_free_and_init (thread_p, odku_vals);
+    }
 
   return NO_ERROR;
 
@@ -13020,6 +13049,10 @@ exit_on_error:
   dblink_dml_stmt_abort (thread_p, &dblink_state);
   qexec_end_scan (thread_p, specp);
   qexec_close_scan (thread_p, specp);
+  if (odku_vals != NULL)
+    {
+      db_private_free_and_init (thread_p, odku_vals);
+    }
 
   return ER_FAILED;
 }
