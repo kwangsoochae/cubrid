@@ -19687,11 +19687,13 @@ pt_finish_remote_dml_xasl (XASL_NODE * xasl)
 
 /*
  * pt_fill_remote_odku_assigns () - Fill the ON DUPLICATE KEY UPDATE text the remote INSERT carries.
- *   The left-hand side is the remote column name -- a remote target gets no name resolution, so what
- *   the user wrote is the column -- and the right-hand side is printed with the flags the other text
- *   push paths use, so the same value cannot come out two ways. A column qualified with the source's name
- *   is not printed. Its value is NULL, and the sink binds it from the source row. Which right-hand sides may
- *   arrive is the gate's decision, not this loop's: whatever it admitted is printed or bound as it stands.
+ *   - left: the remote column name. A remote target gets no name resolution, so the written name is the
+ *     column.
+ *   - right: a literal is printed with the flags the other text push paths use, so one value cannot come
+ *     out two ways. A qualified column (pt_dblink_odku_value_is_bound) is not printed. Its text is left
+ *     NULL in remote_odku_exprs, and the sink binds the value from the source row.
+ *   Which right-hand sides may arrive is the gate's decision, not this loop's. Whatever it admitted is
+ *   printed or bound as it stands.
  *   return: true on success. false after PT_ERROR; the caller returns NULL.
  *   parser(in): parser context. custom_print is saved across the printing and restored on every return.
  *   statement(in): PT_INSERT node
