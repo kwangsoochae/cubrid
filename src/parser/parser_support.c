@@ -11902,9 +11902,9 @@ pt_convert_dblink_merge_query (PARSER_CONTEXT * parser, PT_NODE * node, SERVER_N
 }
 
 /* true iff an ON DUPLICATE KEY UPDATE value is a qualified column, <qualifier>.<column>, by shape alone. It is
- * the one value bound per row rather than printed. Whether the qualifier names a table of the source SELECT is
- * for the gate to check. The gate, semantic check and XASL generation all ask this, so that they agree on which
- * values are bound.
+ * the only kind of value bound per row rather than printed. Whether the qualifier names a table of the source
+ * SELECT is for the gate to check. The gate, semantic check and XASL generation all ask this, so that they agree
+ * on which values are bound.
  *
  * Only the clause as written has this shape. Name resolution turns a qualified column into a PT_NAME, so the
  * clause itself must stay unresolved, and only copies of the values may be resolved. */
@@ -11981,7 +11981,7 @@ pt_dblink_odku_value_names_source (PT_NODE * node, PT_NODE * value)
 /* true iff every ON DUPLICATE KEY UPDATE assignment can go to the remote. A value goes out as statement text
  * or is bound per row:
  *   - a literal the remote reads the same way is printed into the statement
- *   - a column of the source SELECT, qualified with its name, is bound from the source row
+ *   - a column of the source SELECT, qualified with the name of a table in its FROM, is bound per row
  *
  * Anything else, an expression over source columns included, is refused. A computed value belongs in the
  * source SELECT, as a derived table column. Keeping a local table out of the clause is not this test's job:
