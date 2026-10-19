@@ -1530,7 +1530,7 @@ dblink_dml_build_insert_sql (THREAD_ENTRY * thread_p, const char *table_name, ch
 	}
 
       /* guard: a column with no name would go out as " = 'x'", and an empty value as "c = ". Either is a
-       * different statement, not an error. A NULL value is a bound one and goes out as "?". */
+       * different statement, not an error. A NULL exprs[i] is a bound value and goes out as "?". */
       if (odku->cols == NULL || odku->exprs == NULL)
 	{
 	  snprintf (errmsg, sizeof (errmsg), "%s: odku assignment array is NULL", errctx);

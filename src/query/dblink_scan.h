@@ -136,7 +136,7 @@ struct dblink_dml_state
 };
 
 /* Assignments a remote ON DUPLICATE KEY UPDATE clause carries. cols[i] is the remote column name. exprs[i] is
- * its new value, printed as remote SQL, or NULL for a value bound per row. A NULL value goes out as "?" and
+ * its new value, printed as remote SQL, or NULL for a value bound per row. A NULL exprs[i] goes out as "?" and
  * is bound after the INSERT values, in clause order. Both arrays are num_assigns long. */
 typedef struct dblink_odku_assigns DBLINK_ODKU_ASSIGNS;
 struct dblink_odku_assigns

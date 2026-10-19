@@ -12899,7 +12899,7 @@ qexec_collect_remote_insert_vals (SCAN_ID * s_id, XASL_STATE * xasl_state, DB_VA
 
   /* Verify we collected the leading val_no columns. The row is laid out in three parts:
    *   [0, num_vals)       the INSERT values, one per "?" in VALUES
-   *   [num_vals, val_no)  the bound ODKU values, one per NULL value in the clause, in clause order
+   *   [num_vals, val_no)  the bound ODKU values, one per NULL in remote_odku_exprs, in clause order
    *   after that          hidden sort keys, for ORDER BY or analytic functions, that are not in the select list
    * A value node carries no hidden mark, so this relies on the plan putting the ODKU values before the
    * hidden keys. The hidden keys are left unread, matching the canonical local INSERT path. */
@@ -13010,8 +13010,8 @@ qexec_execute_remote_dml_sink (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_S
 	assert (val_no == 0 || insert->vals != NULL);
 	ins_vals = insert->vals;
 
-	/* A NULL ODKU value is bound after the INSERT values. It comes from the next column of the same row.
-	 * insert->vals holds only num_vals, so such a row is collected into an array of its own. */
+	/* An ODKU value whose text is NULL is bound after the INSERT values, from the columns that follow them in the
+	 * same row. insert->vals holds only num_vals, so such a row is collected into an array of its own. */
 	bind_no = val_no;
 	for (i = 0; odku.exprs != NULL && i < odku.num_assigns; i++)
 	  {
