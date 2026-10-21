@@ -12873,6 +12873,27 @@ pt_check_with_info (PARSER_CONTEXT * parser, PT_NODE * node, SEMANTIC_CHK_INFO *
 					  max_position);
 			    }
 
+			  if (odku_bind_cnt > 0 && subq->node_type == PT_SELECT
+			      && subq->info.query.all_distinct == PT_DISTINCT)
+			    {
+			      /* An ORDER BY item that matches no column the user wrote would be a hidden column, which
+			       * SELECT DISTINCT refuses. One that matched a copy instead is refused the same way. */
+			      int user_cnt = pt_length_of_select_list (pt_get_select_list (parser, subq),
+								       EXCLUDE_HIDDEN_COLUMNS) - odku_bind_cnt;
+			      PT_NODE *order;
+
+			      for (order = subq->info.query.order_by; order != NULL; order = order->next)
+				{
+				  if (order->node_type == PT_SORT_SPEC
+				      && order->info.sort_spec.pos_descr.pos_no > user_cnt)
+				    {
+				      PT_ERRORm (parser, order, MSGCAT_SET_PARSER_SEMANTIC,
+						 MSGCAT_SEMANTIC_INVALID_ORDERBY_WITH_DISTINCT);
+				      break;
+				    }
+				}
+			    }
+
 			  /* The remote path also skips the INSERT-level attribute/value count check, so an
 			   * explicit column list whose size differs from the SELECT projection would reach
 			   * XASL generation and abort there. Validate it here with the same semantic error a
