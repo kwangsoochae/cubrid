@@ -12541,14 +12541,15 @@ pt_dblink_delete_corr_ref_post (PARSER_CONTEXT * parser, PT_NODE * node, void *a
  *   sc_info_ptr(in/out) : semantic check info; top_node is set to subq for the duration, then restored
  *   fail_msg(in)        : PT_INTERNAL_ERROR message if mq_translate returns NULL without setting an error
  *                         (its contract, like the canonical db_vdb.c caller, treats that as a failure too)
- *   num_odku_values(in) : how many ODKU value copies end the select list (pt_dblink_odku_append_bound_values),
- *                         0 for none
+ *   odku_stmt(in)       : the remote INSERT whose bound ODKU value copies end the select list
+ *                         (pt_dblink_odku_append_bound_values), or NULL for none
  */
 static PT_NODE *
 pt_bind_remote_dml_subq (PARSER_CONTEXT * parser, PT_NODE * subq, SEMANTIC_CHK_INFO * sc_info_ptr, const char *fail_msg,
-			 int num_odku_values)
+			 PT_NODE * odku_stmt)
 {
   PT_NODE *saved_top = sc_info_ptr->top_node;
+  int num_odku_values = (odku_stmt != NULL) ? odku_stmt->info.insert.remote_odku_bind_cnt : 0;
 
   pt_resolve_names (parser, subq, sc_info_ptr);
   if (pt_has_error (parser))
@@ -12560,16 +12561,36 @@ pt_bind_remote_dml_subq (PARSER_CONTEXT * parser, PT_NODE * subq, SEMANTIC_CHK_I
    * They are the last items. Hidden sort keys come later, from pt_check_order_by and view translation. */
   if (num_odku_values > 0 && subq->node_type == PT_SELECT)
     {
-      PT_NODE *item;
-      int count = pt_length_of_select_list (subq->info.query.q.select.list, INCLUDE_HIDDEN_COLUMNS);
-      int pos = 0;
+      PT_NODE *item = subq->info.query.q.select.list, *assign, *value;
+      int skip = pt_length_of_select_list (item, INCLUDE_HIDDEN_COLUMNS) - num_odku_values;
 
-      for (item = subq->info.query.q.select.list; item != NULL; item = item->next)
+      for (; item != NULL && skip > 0; item = item->next, skip--)
 	{
-	  if (pos++ >= count - num_odku_values)
+	  ;
+	}
+
+      /* Check that they are the bound values in clause order, qualifier and column. A column bound in the wrong
+       * place would go out without an error. A table without an alias is exposed as owner.table, which
+       * pt_user_specified_name_compare () matches against the table name alone. */
+      for (assign = odku_stmt->info.insert.odku_assignments; assign != NULL; assign = assign->next)
+	{
+	  if (assign->node_type != PT_EXPR || assign->info.expr.op != PT_ASSIGN
+	      || !pt_dblink_odku_value_is_bound (assign->info.expr.arg2))
 	    {
-	      item->flag.is_dblink_odku_value = 1;
+	      continue;
 	    }
+	  value = assign->info.expr.arg2;
+	  if (item == NULL || item->node_type != PT_NAME
+	      || pt_user_specified_name_compare (item->info.name.resolved,
+						 value->info.dot.arg1->info.name.original) != 0
+	      || intl_identifier_casecmp (item->info.name.original, value->info.dot.arg2->info.name.original) != 0)
+	    {
+	      PT_INTERNAL_ERROR (parser,
+				 "remote INSERT SELECT: the select list does not end with the bound ODKU values");
+	      return NULL;
+	    }
+	  item->flag.is_dblink_odku_value = 1;
+	  item = item->next;
 	}
     }
 
@@ -12860,7 +12881,7 @@ pt_check_with_info (PARSER_CONTEXT * parser, PT_NODE * node, SEMANTIC_CHK_INFO *
 		    {
 		      subq = pt_bind_remote_dml_subq (parser, subq, sc_info_ptr,
 						      "remote INSERT SELECT: failed to translate the SELECT subquery",
-						      odku_bind_cnt);
+						      node);
 		      if (subq != NULL)
 			{
 			  node->info.insert.value_clauses->info.node_list.list = subq;
@@ -12965,7 +12986,7 @@ pt_check_with_info (PARSER_CONTEXT * parser, PT_NODE * node, SEMANTIC_CHK_INFO *
 		  if (subq != NULL)
 		    {
 		      subq = pt_bind_remote_dml_subq (parser, subq, sc_info_ptr,
-						      "remote DELETE: failed to translate the WHERE subquery", 0);
+						      "remote DELETE: failed to translate the WHERE subquery", NULL);
 		      if (subq != NULL)
 			{
 			  cond->info.expr.arg2 = subq;
