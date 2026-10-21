@@ -3820,6 +3820,7 @@ struct parser_node
     unsigned print_in_value_for_dblink:1;	/* for select ... where in (...) to print (...) not {...} */
     unsigned do_not_use_subquery_cache:1;	/* for subquery cache re-execute */
     unsigned for_default_func:1;	/* for DEFAULT built-in function */
+    unsigned is_dblink_odku_value:1;	/* a copy of a bound ODKU value on a remote INSERT source SELECT */
     unsigned hv_pred_plan_unpeeked:1;	/* the plan this statement is about to execute was chosen with unbound
 					 * host-variable predicate markers (HV_PRED_PLAN_UNPEEKED in the XASL
 					 * header), so the first execution must replan under the real values.

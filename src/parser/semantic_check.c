@@ -10544,7 +10544,12 @@ pt_check_single_valued_node (PARSER_CONTEXT * parser, PT_NODE * node, void *arg,
 
   *continue_walk = PT_CONTINUE_WALK;
 
-  if (pt_is_aggregate_function (parser, node))
+  if (node->flag.is_dblink_odku_value)
+    {
+      /* Not a select list item of the user's. Local ODKU leaves its values out of this check too. */
+      *continue_walk = PT_LIST_WALK;
+    }
+  else if (pt_is_aggregate_function (parser, node))
     {
       *continue_walk = PT_LIST_WALK;
     }
@@ -12536,9 +12541,12 @@ pt_dblink_delete_corr_ref_post (PARSER_CONTEXT * parser, PT_NODE * node, void *a
  *   sc_info_ptr(in/out) : semantic check info; top_node is set to subq for the duration, then restored
  *   fail_msg(in)        : PT_INTERNAL_ERROR message if mq_translate returns NULL without setting an error
  *                         (its contract, like the canonical db_vdb.c caller, treats that as a failure too)
+ *   num_odku_values(in) : how many ODKU value copies end the select list (pt_dblink_odku_append_bound_values),
+ *                         0 for none
  */
 static PT_NODE *
-pt_bind_remote_dml_subq (PARSER_CONTEXT * parser, PT_NODE * subq, SEMANTIC_CHK_INFO * sc_info_ptr, const char *fail_msg)
+pt_bind_remote_dml_subq (PARSER_CONTEXT * parser, PT_NODE * subq, SEMANTIC_CHK_INFO * sc_info_ptr, const char *fail_msg,
+			 int num_odku_values)
 {
   PT_NODE *saved_top = sc_info_ptr->top_node;
 
@@ -12546,6 +12554,23 @@ pt_bind_remote_dml_subq (PARSER_CONTEXT * parser, PT_NODE * subq, SEMANTIC_CHK_I
   if (pt_has_error (parser))
     {
       return NULL;
+    }
+
+  /* Mark the copies only now. Name resolution replaces each copy with a new node, so a mark set earlier is lost.
+   * They are the last items. Hidden sort keys come later, from pt_check_order_by and view translation. */
+  if (num_odku_values > 0 && subq->node_type == PT_SELECT)
+    {
+      PT_NODE *item;
+      int count = pt_length_of_select_list (subq->info.query.q.select.list, INCLUDE_HIDDEN_COLUMNS);
+      int pos = 0;
+
+      for (item = subq->info.query.q.select.list; item != NULL; item = item->next)
+	{
+	  if (pos++ >= count - num_odku_values)
+	    {
+	      item->flag.is_dblink_odku_value = 1;
+	    }
+	}
     }
 
   sc_info_ptr->top_node = subq;
@@ -12611,13 +12636,13 @@ pt_dblink_odku_max_sort_position (PT_NODE * sort_list)
  *   return: the number of copies appended, or -1 with the parser error set
  *   parser(in): parser context
  *   stmt(in): the PT_INSERT
- *   subq(in/out): its source SELECT, not yet bound. The copies go after its select list, so the hidden sort
- *                 keys binding adds (for ORDER BY and analytic functions) come after them.
+ *   subq(in/out): its source SELECT, before name resolution. The copies go after its select list. Hidden sort
+ *                 keys come after them, added later by pt_check_order_by and view translation.
  */
 static int
 pt_dblink_odku_append_bound_values (PARSER_CONTEXT * parser, PT_NODE * stmt, PT_NODE * subq)
 {
-  PT_NODE *assign, *copy, *copies = NULL, *first = NULL;
+  PT_NODE *assign, *copy, *copies = NULL;
   int cnt = 0;
 
   for (assign = stmt->info.insert.odku_assignments; assign != NULL; assign = assign->next)
@@ -12635,10 +12660,6 @@ pt_dblink_odku_append_bound_values (PARSER_CONTEXT * parser, PT_NODE * stmt, PT_
 	  return -1;
 	}
       copies = parser_append_node (copy, copies);
-      if (first == NULL)
-	{
-	  first = assign->info.expr.arg2;
-	}
       cnt++;
     }
 
@@ -12651,17 +12672,6 @@ pt_dblink_odku_append_bound_values (PARSER_CONTEXT * parser, PT_NODE * stmt, PT_
   if (subq->node_type != PT_SELECT)
     {
       PT_INTERNAL_ERROR (parser, "remote INSERT SELECT: bound ODKU values need a single SELECT source");
-      return -1;
-    }
-
-  /* An aggregate without GROUP BY makes one row out of many. A source column has no single value in it.
-   * The copy would fail binding with a message about a column the user never selected, so say it here. */
-  if (subq->info.query.q.select.group_by == NULL && pt_has_aggregate (parser, subq))
-    {
-      PT_ERRORf2 (parser, first, "dblink: remote INSERT ... SELECT with a local source cannot bind %s.%s in ON "
-		  "DUPLICATE KEY UPDATE, as the source SELECT aggregates without GROUP BY and the column has no single "
-		  "value; aggregate it in the source SELECT", first->info.dot.arg1->info.name.original,
-		  first->info.dot.arg2->info.name.original);
       return -1;
     }
 
@@ -12819,7 +12829,8 @@ pt_check_with_info (PARSER_CONTEXT * parser, PT_NODE * node, SEMANTIC_CHK_INFO *
 		  if (subq != NULL)
 		    {
 		      subq = pt_bind_remote_dml_subq (parser, subq, sc_info_ptr,
-						      "remote INSERT SELECT: failed to translate the SELECT subquery");
+						      "remote INSERT SELECT: failed to translate the SELECT subquery",
+						      odku_bind_cnt);
 		      if (subq != NULL)
 			{
 			  node->info.insert.value_clauses->info.node_list.list = subq;
@@ -12903,7 +12914,7 @@ pt_check_with_info (PARSER_CONTEXT * parser, PT_NODE * node, SEMANTIC_CHK_INFO *
 		  if (subq != NULL)
 		    {
 		      subq = pt_bind_remote_dml_subq (parser, subq, sc_info_ptr,
-						      "remote DELETE: failed to translate the WHERE subquery");
+						      "remote DELETE: failed to translate the WHERE subquery", 0);
 		      if (subq != NULL)
 			{
 			  cond->info.expr.arg2 = subq;
