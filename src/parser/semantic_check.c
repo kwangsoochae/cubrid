@@ -12799,8 +12799,8 @@ pt_check_with_info (PARSER_CONTEXT * parser, PT_NODE * node, SEMANTIC_CHK_INFO *
 		  int odku_bind_cnt = 0, max_position = 0;
 
 		  /* A source column in the ON DUPLICATE KEY UPDATE clause is bound from the source row. A copy of
-		   * it joins the SELECT before binding, so it is resolved there. The count is recorded at once, so
-		   * a statement checked again does not get the copies twice, even when the first check failed. */
+		   * it joins the SELECT before name resolution, so it is resolved there. The count is recorded at once,
+		   * so a statement checked again does not get the copies twice, even when the first check failed. */
 		  if (subq != NULL && node->info.insert.remote_odku_bind_cnt == 0)
 		    {
 		      odku_bind_cnt = pt_dblink_odku_append_bound_values (parser, node, subq);
@@ -12818,8 +12818,8 @@ pt_check_with_info (PARSER_CONTEXT * parser, PT_NODE * node, SEMANTIC_CHK_INFO *
 		      odku_bind_cnt = node->info.insert.remote_odku_bind_cnt;
 		    }
 
-		  /* The copies are visible columns, so binding would let ORDER BY 2 or GROUP BY 2 name one. Keep
-		   * the largest position the user wrote, to be checked against the select list the user wrote. */
+		  /* The copies are visible columns, so the semantic check would let ORDER BY 2 or GROUP BY 2 name one.
+		   * Keep the largest position the user wrote, to be checked against the select list the user wrote. */
 		  if (subq != NULL && odku_bind_cnt > 0 && subq->node_type == PT_SELECT)
 		    {
 		      max_position = MAX (pt_dblink_odku_max_sort_position (subq->info.query.order_by),
