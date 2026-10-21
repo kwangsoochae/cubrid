@@ -11945,7 +11945,6 @@ pt_dblink_odku_value_names_source (PT_NODE * node, PT_NODE * value)
 {
   PT_NODE *subq, *spec;
   const char *qualifier, *name;
-  bool found = false;
 
   qualifier = value->info.dot.arg1->info.name.original;
   if (qualifier == NULL)
@@ -11971,11 +11970,11 @@ pt_dblink_odku_value_names_source (PT_NODE * node, PT_NODE * value)
       name = pt_dblink_odku_spec_name (spec);
       if (name != NULL && intl_identifier_casecmp (qualifier, name) == 0)
 	{
-	  found = true;
+	  return true;
 	}
     }
 
-  return found;
+  return false;
 }
 
 /* true iff every ON DUPLICATE KEY UPDATE assignment can go to the remote. A value goes out as statement text
