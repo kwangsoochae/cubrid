@@ -12629,6 +12629,33 @@ pt_dblink_odku_max_sort_position (PT_NODE * sort_list)
   return max_pos;
 }
 
+/* parser_walk_tree pre: raise *(int *) arg to the largest position an analytic function names in its PARTITION BY
+ * or ORDER BY. Those positions count the select list of the query the function sits in, so a subquery is not
+ * entered. */
+static PT_NODE *
+pt_dblink_odku_max_analytic_position (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int *continue_walk)
+{
+  int *max_pos = (int *) arg;
+
+  /* The walk carries the previous node's value into the next list item, so a subquery item would leave the
+   * expression after it unentered. */
+  *continue_walk = PT_CONTINUE_WALK;
+
+  if (PT_IS_QUERY (node))
+    {
+      *continue_walk = PT_LIST_WALK;
+      return node;
+    }
+
+  if (PT_IS_ANALYTIC_NODE (node))
+    {
+      *max_pos = MAX (*max_pos, pt_dblink_odku_max_sort_position (node->info.function.analytic.partition_by));
+      *max_pos = MAX (*max_pos, pt_dblink_odku_max_sort_position (node->info.function.analytic.order_by));
+    }
+
+  return node;
+}
+
 /*
  * pt_dblink_odku_append_bound_values () - Append a copy of each bound ODKU value to the source SELECT of a
  *   remote INSERT, so that it is resolved and evaluated with the source row. The clause keeps the values as
@@ -12818,12 +12845,15 @@ pt_check_with_info (PARSER_CONTEXT * parser, PT_NODE * node, SEMANTIC_CHK_INFO *
 		      odku_bind_cnt = node->info.insert.remote_odku_bind_cnt;
 		    }
 
-		  /* The copies are visible columns, so the semantic check would let ORDER BY 2 or GROUP BY 2 name one.
-		   * Keep the largest position the user wrote, to be checked against the select list the user wrote. */
+		  /* The copies are visible columns, so the semantic check would let ORDER BY 2 or GROUP BY 2 name one,
+		   * and so would OVER (ORDER BY 2) in the select list. Keep the largest position the user wrote, to be
+		   * checked against the select list the user wrote. */
 		  if (subq != NULL && odku_bind_cnt > 0 && subq->node_type == PT_SELECT)
 		    {
 		      max_position = MAX (pt_dblink_odku_max_sort_position (subq->info.query.order_by),
 					  pt_dblink_odku_max_sort_position (subq->info.query.q.select.group_by));
+		      (void) parser_walk_tree (parser, subq->info.query.q.select.list,
+					       pt_dblink_odku_max_analytic_position, &max_position, NULL, NULL);
 		    }
 
 		  if (subq != NULL)
