@@ -11532,10 +11532,24 @@ allocate_disk_structures (MOP classop, SM_CLASS * class_, DB_OBJLIST * subclasse
 	      att_count = 0;
 	      for (att = con->attributes; *att; att++)
 		{
-		  new_attributes[att_count++] = classobj_copy_attribute (*att, NULL);
+		  new_attributes[att_count] = classobj_copy_attribute (*att, NULL);
+		  if (new_attributes[att_count] == NULL)
+		    {
+		      while (att_count > 0)
+			{
+			  classobj_free_attribute (new_attributes[--att_count]);
+			}
+		      db_ws_free (new_attributes);
+		      assert (er_errid () != NO_ERROR);
+		      goto structure_error;
+		    }
+		  att_count++;
 		}
 
 	      new_attributes[att_count] = NULL;
+
+	      /* the old array holds the class attributes themselves, so free only the array */
+	      db_ws_free (con->attributes);
 	      con->attributes = new_attributes;
 	    }
 	}
@@ -11592,10 +11606,11 @@ allocate_disk_structures (MOP classop, SM_CLASS * class_, DB_OBJLIST * subclasse
 	{
 	  if (SM_IS_CONSTRAINT_INDEX_FAMILY (con->type))
 	    {
-	      /* free attributes to avoid memory leak */
+	      /* free the copies made above. Their cached domains are shared with the class and stay. */
 	      for (att = con->attributes; *att; att++)
 		{
-		  db_ws_free_and_init (*att);
+		  classobj_free_attribute (*att);
+		  *att = NULL;
 		}
 
 	      if (class_->recache_constraints == 0)
@@ -11606,7 +11621,7 @@ allocate_disk_structures (MOP classop, SM_CLASS * class_, DB_OBJLIST * subclasse
 	    }
 	}
 
-      /* recache class constraint for foreign key */
+      /* recache class constraints since index constraints held copied attributes */
       if (class_->recache_constraints)
 	{
 	  if (classobj_cache_class_constraints (class_) != NO_ERROR)
