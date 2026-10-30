@@ -6268,7 +6268,21 @@ static int check_merge_trigger (PT_DO_FUNC * do_func, PARSER_CONTEXT * parser, P
 static char **find_update_columns (int *count_ptr, PT_NODE * statement);
 static void get_activity_info (PARSER_CONTEXT * parser, DB_TRIGGER_ACTION * type, const char **source,
 			       PT_NODE * statement);
+static PARSER_VARCHAR *append_block_text (PARSER_CONTEXT * parser, PARSER_VARCHAR * text, const char *tail);
+static PARSER_VARCHAR *append_block_name (PARSER_CONTEXT * parser, PARSER_VARCHAR * text, const char *name);
+/* a character of a PL/CSQL identifier: a letter, a digit, an underscore, or a byte of a multibyte character */
+#define IS_BLOCK_ID_CHAR(c) (isalnum ((unsigned char) (c)) || (c) == '_' || ((unsigned char) (c)) >= 0x80)
+/* the opening delimiter of a delimited PL/CSQL identifier, and the closing one that goes with it */
+#define IS_BLOCK_ID_DELIMITER(c) ((c) == '[' || (c) == '"' || (c) == '`')
+#define IS_BLOCK_ID_DELIMITER_CLOSE(c) ((c) == '[' ? ']' : (c))
+static bool block_reads_column (const char *block, const char *name, const char *column);
+static const char *make_block_procedure_sql (PARSER_CONTEXT * parser, const char *quoted_name, const char *block,
+					     const char **names, int n_names, TR_BLOCK_COLUMN * columns,
+					     int n_columns, const bool * reads);
+static const char *make_block_call (PARSER_CONTEXT * parser, const char *quoted_name, const char **names,
+				    int n_names, TR_BLOCK_COLUMN * columns, int n_columns, const bool * reads);
 static int create_trigger_block_procedure (PARSER_CONTEXT * parser, const char *trigger_name, const char *block,
+					   DB_TRIGGER_EVENT event, DB_TRIGGER_TIME action_time, DB_OBJECT * class_,
 					   char *sp_name, int sp_name_size, const char **call_source);
 
 /*
@@ -7276,11 +7290,312 @@ get_activity_info (PARSER_CONTEXT * parser, DB_TRIGGER_ACTION * type, const char
 }
 
 /*
+ * append_block_text() - Appends to a text of a PL/CSQL block action.
+ *   return: the text, or NULL on an allocation failure
+ *   parser(in): Parse context the text is allocated in
+ *   text(in): text so far, NULL once an append has failed
+ *   tail(in): text to append
+ *
+ * Note:
+ *    A failed append returns NULL, and pt_append_nulstring () would start a new text from the next
+ *    tail. NULL stays NULL here, so a text is whole or missing.
+ */
+static PARSER_VARCHAR *
+append_block_text (PARSER_CONTEXT * parser, PARSER_VARCHAR * text, const char *tail)
+{
+  return text == NULL ? NULL : pt_append_nulstring (parser, text, tail);
+}
+
+/*
+ * append_block_name() - Appends an identifier to a text of a PL/CSQL block action, in brackets.
+ *   return: the text, or NULL on an allocation failure
+ *   parser(in): Parse context the text is allocated in
+ *   text(in): text so far, NULL once an append has failed
+ *   name(in): identifier to append
+ *
+ * Note:
+ *    Every name is delimited, so a reserved word is a name, and the text stays NULL when any of the
+ *    three appends fails.
+ */
+static PARSER_VARCHAR *
+append_block_name (PARSER_CONTEXT * parser, PARSER_VARCHAR * text, const char *name)
+{
+  text = append_block_text (parser, text, "[");
+  text = append_block_text (parser, text, name);
+  return append_block_text (parser, text, "]");
+}
+
+/*
+ * block_reads_column() - Tells whether a PL/CSQL block reads a column of a correlation name, as name.column.
+ *   return: true when the block has the dotted name
+ *   block(in): PL/CSQL block text
+ *   name(in): correlation name
+ *   column(in): column name, in lower case as the class keeps it, or NULL for any name.field
+ *
+ * Note:
+ *    The scan is lexical. PL/CSQL reads a field of a record only as name.field, so a column the scan does
+ *    not find is not read. A dotted name in a comment or a string is found too, which declares a column the
+ *    block does not read, and that is harmless. Letters are compared without case. The name and the field
+ *    may be delimited as PL/CSQL allows, [x], "x" or `x`, and are compared without the delimiters. A name
+ *    after a dot is part of a longer name, such as a table with an owner, and is not a record.
+ */
+static bool
+block_reads_column (const char *block, const char *name, const char *column)
+{
+  const char *p, *token;
+  size_t name_len = strlen (name);
+  size_t column_len = column == NULL ? 0 : strlen (column);
+  size_t token_len;
+  char delimiter;
+
+  for (p = block; *p != '\0'; p++)
+    {
+      if (strncasecmp (p, name, name_len) != 0)
+	{
+	  continue;
+	}
+      token = p + name_len;
+      if (p != block && IS_BLOCK_ID_DELIMITER (p[-1]))
+	{
+	  /* [name], "name" or `name` */
+	  if (*token != IS_BLOCK_ID_DELIMITER_CLOSE (p[-1])
+	      || (p - 1 != block && (IS_BLOCK_ID_CHAR (p[-2]) || p[-2] == '.')))
+	    {
+	      continue;
+	    }
+	  token++;
+	}
+      else if ((p != block && (IS_BLOCK_ID_CHAR (p[-1]) || p[-1] == '.')) || IS_BLOCK_ID_CHAR (*token))
+	{
+	  continue;
+	}
+
+      while (isspace ((unsigned char) *token))
+	{
+	  token++;
+	}
+      if (*token != '.')
+	{
+	  continue;
+	}
+      token++;
+      while (isspace ((unsigned char) *token))
+	{
+	  token++;
+	}
+
+      if (IS_BLOCK_ID_DELIMITER (*token))
+	{
+	  delimiter = IS_BLOCK_ID_DELIMITER_CLOSE (*token);
+	  token++;
+	  for (token_len = 0; token[token_len] != '\0' && token[token_len] != delimiter; token_len++)
+	    ;
+	}
+      else
+	{
+	  for (token_len = 0; IS_BLOCK_ID_CHAR (token[token_len]); token_len++)
+	    ;
+	}
+
+      if (token_len > 0
+	  && (column == NULL || (token_len == column_len && strncasecmp (token, column, column_len) == 0)))
+	{
+	  return true;
+	}
+    }
+
+  return false;
+}
+
+/*
+ * make_block_procedure_sql() - Makes the CREATE PROCEDURE statement of a PL/CSQL block action.
+ *   return: the statement, or NULL on an allocation failure
+ *   parser(in): Parse context the text is allocated in
+ *   quoted_name(in): name of the procedure, quoted
+ *   block(in): PL/CSQL block text
+ *   names(in): correlation names the block reads
+ *   n_names(in): number of the names, 0 when the block reads none
+ *   columns(in): columns of the class the names can carry
+ *   n_columns(in): number of the columns
+ *   reads(in): for each name and column, whether the block reads it, name by name
+ *
+ * Note:
+ *    The procedure takes the shape of its stored code: the header on the first line and the body from
+ *    the second line, starting at its first token. The stored code is what is compiled again when the
+ *    owner changes, so both compilations report errors at the same lines.
+ *    The block is nested as it is. A DECLARE stays valid there, and the block ends at its END,
+ *    so the statement terminator is added here.
+ *    Each correlation name is a record of the columns the block reads, filled from the parameters. The
+ *    record is declared from a cursor that selects a NULL of the type of each column, so the procedure
+ *    reads no table and needs no privilege on the class, and the record keeps the length and precision
+ *    of the columns. A name with no column has a field of no column, so that it is a record.
+ *    The declarations take one line each, so the block starts at the sixth line when the procedure
+ *    declares a correlation name and at the third line otherwise, whatever the columns are.
+ *    The parameters are listed by name and then by column, as make_block_call () lists the arguments.
+ *    The names of the parameters and the cursors carry the prefix of the procedure, so a column the
+ *    block names in its SQL is not taken for one of them.
+ */
+static const char *
+make_block_procedure_sql (PARSER_CONTEXT * parser, const char *quoted_name, const char *block, const char **names,
+			  int n_names, TR_BLOCK_COLUMN * columns, int n_columns, const bool * reads)
+{
+  PARSER_VARCHAR *sql = NULL;
+  bool first;
+  int i, j;
+
+  sql = pt_append_nulstring (parser, NULL, "CREATE PROCEDURE ");
+  sql = append_block_text (parser, sql, quoted_name);
+  sql = append_block_text (parser, sql, " (");
+
+  /* [__trsp_obj__c1] INT, [__trsp_obj__c2] VARCHAR, [__trsp_new__c1] INT, ... */
+  first = true;
+  for (i = 0; i < n_names; i++)
+    {
+      for (j = 0; j < n_columns; j++)
+	{
+	  if (!reads[i * n_columns + j])
+	    {
+	      continue;
+	    }
+	  sql = append_block_text (parser, sql, first ? "[" : ", [");
+	  first = false;
+	  sql = append_block_text (parser, sql, TRIGGER_BLOCK_SP_PREFIX);
+	  sql = append_block_text (parser, sql, names[i]);
+	  sql = append_block_text (parser, sql, "__");
+	  sql = append_block_text (parser, sql, columns[j].name);
+	  sql = append_block_text (parser, sql, "] ");
+	  sql = append_block_text (parser, sql, columns[j].type_name);
+	}
+    }
+  sql = append_block_text (parser, sql, ") AS\n");
+
+  if (n_names > 0)
+    {
+      /* CURSOR [__trsp_c_obj] IS SELECT CAST(NULL AS INT) AS [c1], CAST(NULL AS VARCHAR(10)) AS [c2]; CURSOR ... */
+      for (i = 0; i < n_names; i++)
+	{
+	  sql = append_block_text (parser, sql, "CURSOR [" TRIGGER_BLOCK_SP_PREFIX "c_");
+	  sql = append_block_text (parser, sql, names[i]);
+	  sql = append_block_text (parser, sql, "] IS SELECT ");
+	  first = true;
+	  for (j = 0; j < n_columns; j++)
+	    {
+	      if (!reads[i * n_columns + j])
+		{
+		  continue;
+		}
+	      sql = append_block_text (parser, sql, first ? "CAST(NULL AS " : ", CAST(NULL AS ");
+	      first = false;
+	      sql = append_block_text (parser, sql, columns[j].field_type);
+	      sql = append_block_text (parser, sql, ") AS ");
+	      sql = append_block_name (parser, sql, columns[j].name);
+	    }
+	  if (first)
+	    {
+	      /* the class has no column PL/CSQL can take, and a cursor selects something */
+	      sql = append_block_text (parser, sql, "CAST(NULL AS INT) AS [" TRIGGER_BLOCK_SP_PREFIX "none]");
+	    }
+	  sql = append_block_text (parser, sql, "; ");
+	}
+      sql = append_block_text (parser, sql, "\n");
+
+      /* obj [__trsp_c_obj]%ROWTYPE; new [__trsp_c_new]%ROWTYPE; */
+      for (i = 0; i < n_names; i++)
+	{
+	  sql = append_block_text (parser, sql, names[i]);
+	  sql = append_block_text (parser, sql, " [" TRIGGER_BLOCK_SP_PREFIX "c_");
+	  sql = append_block_text (parser, sql, names[i]);
+	  sql = append_block_text (parser, sql, "]%ROWTYPE; ");
+	}
+      sql = append_block_text (parser, sql, "\nBEGIN\n");
+
+      /* obj.c1 := [__trsp_obj__c1]; obj.c2 := [__trsp_obj__c2]; new.c1 := ... */
+      for (i = 0; i < n_names; i++)
+	{
+	  for (j = 0; j < n_columns; j++)
+	    {
+	      if (!reads[i * n_columns + j])
+		{
+		  continue;
+		}
+	      sql = append_block_text (parser, sql, names[i]);
+	      sql = append_block_text (parser, sql, ".");
+	      sql = append_block_name (parser, sql, columns[j].name);
+	      sql = append_block_text (parser, sql, " := [" TRIGGER_BLOCK_SP_PREFIX);
+	      sql = append_block_text (parser, sql, names[i]);
+	      sql = append_block_text (parser, sql, "__");
+	      sql = append_block_text (parser, sql, columns[j].name);
+	      sql = append_block_text (parser, sql, "]; ");
+	    }
+	}
+      sql = append_block_text (parser, sql, "\n");
+    }
+  else
+    {
+      sql = append_block_text (parser, sql, "BEGIN\n");
+    }
+
+  sql = append_block_text (parser, sql, block);
+  sql = append_block_text (parser, sql, ";\nEND");
+
+  return sql == NULL ? NULL : (const char *) sql->bytes;
+}
+
+/*
+ * make_block_call() - Makes the call of the procedure of a PL/CSQL block action, which is the action.
+ *   return: the call, or NULL on an allocation failure
+ *   parser(in): Parse context the text is allocated in
+ *   quoted_name(in): name of the procedure, quoted
+ *   names(in): correlation names the block reads
+ *   n_names(in): number of the names, 0 when the block reads none
+ *   columns(in): columns of the class the names can carry
+ *   n_columns(in): number of the columns
+ *   reads(in): for each name and column, whether the block reads it, name by name
+ *
+ * Note:
+ *    The arguments are the columns of the instances, written as an action writes them, obj.c1.
+ *    They are listed by name and then by column, as make_block_procedure_sql () lists the parameters.
+ */
+static const char *
+make_block_call (PARSER_CONTEXT * parser, const char *quoted_name, const char **names, int n_names,
+		 TR_BLOCK_COLUMN * columns, int n_columns, const bool * reads)
+{
+  PARSER_VARCHAR *call = NULL;
+  bool first = true;
+  int i, j;
+
+  call = pt_append_nulstring (parser, NULL, "CALL ");
+  call = append_block_text (parser, call, quoted_name);
+  call = append_block_text (parser, call, "(");
+  for (i = 0; i < n_names; i++)
+    {
+      for (j = 0; j < n_columns; j++)
+	{
+	  if (!reads[i * n_columns + j])
+	    {
+	      continue;
+	    }
+	  call = append_block_text (parser, call, first ? "" : ", ");
+	  first = false;
+	  call = append_block_text (parser, call, names[i]);
+	  call = append_block_text (parser, call, ".");
+	  call = append_block_name (parser, call, columns[j].name);
+	}
+    }
+  call = append_block_text (parser, call, ")");
+
+  return call == NULL ? NULL : (const char *) call->bytes;
+}
+
+/*
  * create_trigger_block_procedure() - Makes the internal procedure that runs a PL/CSQL block action of a trigger.
  *   return: Error code
  *   parser(in): Parse context of the create trigger statement
  *   trigger_name(in): name of the trigger being created
  *   block(in): PL/CSQL block text
+ *   event(in): trigger event
+ *   action_time(in): action time
+ *   class_(in): class the trigger is defined on, or NULL
  *   sp_name(out): unique name of the procedure
  *   sp_name_size(in): size of sp_name
  *   call_source(out): action source that calls the procedure
@@ -7290,21 +7605,33 @@ get_activity_info (PARSER_CONTEXT * parser, DB_TRIGGER_ACTION * type, const char
  *    so it does not depend on the trigger name. The call names the owner because
  *    it is compiled when the trigger is created, possibly by another user.
  *    The block is a statement of the procedure body, as the user wrote it.
+ *
+ *    The block reads a correlation name of the trigger, obj, new or old, as a record declared
+ *    in the body before it. The record has the columns of the class that the block reads and
+ *    PL/CSQL can take, and the call passes their values of the instance as the parameters of
+ *    the procedure. A name the block does not read is not declared.
  */
 static int
-create_trigger_block_procedure (PARSER_CONTEXT * parser, const char *trigger_name, const char *block, char *sp_name,
-				int sp_name_size, const char **call_source)
+create_trigger_block_procedure (PARSER_CONTEXT * parser, const char *trigger_name, const char *block,
+				DB_TRIGGER_EVENT event, DB_TRIGGER_TIME action_time, DB_OBJECT * class_,
+				char *sp_name, int sp_name_size, const char **call_source)
 {
   char owner_name[DB_MAX_USER_LENGTH] = { '\0' };
   char downcase_owner_name[DB_MAX_USER_LENGTH] = { '\0' };
   char *user_name;
   MOP owner;
   DB_VALUE uuid;
-  char *quoted_name;
-  char *create_sql;
-  char *call;
+  const char *names[2] = { NULL, NULL };
+  int n_names = 0;
+  TR_BLOCK_COLUMN *columns = NULL;
+  int n_columns = 0;
+  bool *reads = NULL;
+  int n_reads;
+  PARSER_VARCHAR *quoted_name;
+  const char *create_sql;
+  const char *call;
   char *compile_msg;
-  int i;
+  int i, j;
   int error = NO_ERROR;
 
   *call_source = NULL;
@@ -7352,31 +7679,90 @@ create_trigger_block_procedure (PARSER_CONTEXT * parser, const char *trigger_nam
       sp_name[i] = (char) tolower ((unsigned char) sp_name[i]);
     }
 
+  /* the correlation names the block can read, and the columns they carry */
+  if (class_ != NULL)
+    {
+      tr_get_reference_names (event, action_time, &names[0], &names[1]);
+      n_names = (names[0] != NULL) + (names[1] != NULL);
+      if (names[0] == NULL)
+	{
+	  names[0] = names[1];
+	}
+    }
+  if (n_names > 0)
+    {
+      error = tr_get_block_action_columns (class_, &columns, &n_columns);
+      if (error != NO_ERROR)
+	{
+	  return error;
+	}
+    }
+  if (n_names > 0 && n_columns > 0)
+    {
+      reads = (bool *) malloc (sizeof (bool) * n_names * n_columns);
+      if (reads == NULL)
+	{
+	  free_and_init (columns);
+	  ERROR_SET_ERROR_1ARG (error, ER_OUT_OF_VIRTUAL_MEMORY, sizeof (bool) * n_names * n_columns);
+	  return error;
+	}
+    }
+
   /*
-   * The procedure takes the shape of its stored code: the header on the first line and the body from
-   * the second line, starting at its first token. The stored code is what is compiled again when the
-   * owner changes, so both compilations report errors at the same lines.
-   * The block is nested as it is. A DECLARE stays valid there, and the block ends at its END,
-   * so the statement terminator is added here.
+   * A name the block does not read is not declared, and the call passes the columns the block reads.
+   * A name the block reads with no such column is still declared, with one column or with a field of
+   * no column when the class has none, so that the compiler reports the field, as it does for a
+   * column of a type it cannot take.
    */
+  for (i = 0; i < n_names;)
+    {
+      n_reads = 0;
+      for (j = 0; j < n_columns; j++)
+	{
+	  reads[i * n_columns + j] = block_reads_column (block, names[i], columns[j].name);
+	  n_reads += reads[i * n_columns + j];
+	}
+      if (n_reads == 0 && block_reads_column (block, names[i], NULL))
+	{
+	  if (n_columns > 0)
+	    {
+	      reads[i * n_columns] = true;
+	    }
+	  n_reads = 1;
+	}
+      if (n_reads > 0)
+	{
+	  i++;
+	  continue;
+	}
+      n_names--;
+      if (i < n_names)
+	{
+	  names[i] = names[i + 1];
+	}
+    }
+
   /* the owner name may need quoting, for example a reserved word */
-  quoted_name = pt_append_string (parser, NULL, "[");
-  quoted_name = pt_append_string (parser, quoted_name, downcase_owner_name);
-  quoted_name = pt_append_string (parser, quoted_name, "].[");
-  quoted_name = pt_append_string (parser, quoted_name, sp_name + strlen (downcase_owner_name) + 1);
-  quoted_name = pt_append_string (parser, quoted_name, "]");
+  quoted_name = pt_append_nulstring (parser, NULL, "[");
+  quoted_name = append_block_text (parser, quoted_name, downcase_owner_name);
+  quoted_name = append_block_text (parser, quoted_name, "].[");
+  quoted_name = append_block_text (parser, quoted_name, sp_name + strlen (downcase_owner_name) + 1);
+  quoted_name = append_block_text (parser, quoted_name, "]");
+  if (quoted_name == NULL)
+    {
+      free_and_init (columns);
+      free_and_init (reads);
+      ASSERT_ERROR_AND_SET (error);
+      return error;
+    }
 
-  create_sql = pt_append_string (parser, NULL, "CREATE PROCEDURE ");
-  create_sql = pt_append_string (parser, create_sql, quoted_name);
-  create_sql = pt_append_string (parser, create_sql, " () AS\nBEGIN\n");
-  create_sql = pt_append_string (parser, create_sql, block);
-  create_sql = pt_append_string (parser, create_sql, ";\nEND");
-
-  /* the call is made first, so nothing in this function fails after the procedure is made */
-  call = pt_append_string (parser, NULL, "CALL ");
-  call = pt_append_string (parser, call, quoted_name);
-  call = pt_append_string (parser, call, "()");
-  if (quoted_name == NULL || create_sql == NULL || call == NULL)
+  /* both texts are made before the procedure, so nothing in this function fails after it is made */
+  create_sql = make_block_procedure_sql (parser, (const char *) quoted_name->bytes, block, names, n_names, columns,
+					 n_columns, reads);
+  call = make_block_call (parser, (const char *) quoted_name->bytes, names, n_names, columns, n_columns, reads);
+  free_and_init (columns);
+  free_and_init (reads);
+  if (create_sql == NULL || call == NULL)
     {
       ASSERT_ERROR_AND_SET (error);
       return error;
@@ -7426,7 +7812,7 @@ do_create_trigger (PARSER_CONTEXT * parser, PT_NODE * statement)
   DB_OBJECT *class_;
   const char *attribute;
   DB_TRIGGER_ACTION cond_type, action_type;
-  DB_TRIGGER_TIME cond_time, action_time;
+  DB_TRIGGER_TIME cond_time, action_time, block_action_time;
   const char *cond_source, *action_source;
   const char *block_source = NULL;
   char block_sp_name[DB_MAX_IDENTIFIER_LENGTH] = { '\0' };
@@ -7509,9 +7895,16 @@ do_create_trigger (PARSER_CONTEXT * parser, PT_NODE * statement)
       assert (action->info.trigger_action.plcsql_block != NULL);
       block_source = (const char *) action->info.trigger_action.plcsql_block->info.value.data_value.str->bytes;
 
+      /* the action time is decided as tr_create_trigger does when EXECUTE names none */
+      block_action_time = action_time;
+      if (block_action_time == TR_TIME_NULL)
+	{
+	  block_action_time = (cond_time != TR_TIME_NULL) ? cond_time : TR_TIME_AFTER;
+	}
+
       error =
-	create_trigger_block_procedure (parser, name, block_source, block_sp_name, sizeof (block_sp_name),
-					&action_source);
+	create_trigger_block_procedure (parser, name, block_source, event, block_action_time, class_, block_sp_name,
+					sizeof (block_sp_name), &action_source);
       if (error != NO_ERROR)
 	{
 	  return error;

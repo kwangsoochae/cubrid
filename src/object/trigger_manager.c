@@ -204,6 +204,7 @@ static int object_to_trigger (DB_OBJECT * object, TR_TRIGGER * trigger);
 static void get_reference_names (TR_TRIGGER * trigger, TR_ACTIVITY * activity, const char **curname,
 				 const char **tempname);
 static const char *block_parameter_type_name (DB_TYPE type);
+static void block_field_type (TP_DOMAIN * domain, const char *type_name, char *buf, int size);
 static int compile_trigger_activity (TR_TRIGGER * trigger, TR_ACTIVITY * activity, int with_evaluate);
 static int free_stale_statement (TR_ACTIVITY * activity);
 static int validate_trigger (TR_TRIGGER * trigger);
@@ -1728,6 +1729,35 @@ block_parameter_type_name (DB_TYPE type)
 }
 
 /*
+ * block_field_type() - Writes the PL/CSQL type a record field of a block action is declared with for an attribute.
+ *    return: none
+ *    domain(in): domain of the attribute
+ *    type_name(in): type name of block_parameter_type_name () for the type of the domain
+ *    buf(out): the type, with the length of a string or the precision and scale of a numeric
+ *    size(in): size of buf
+ *
+ * Note:
+ *    The record keeps the length and the precision of the column, as a record declared on the class would.
+ */
+static void
+block_field_type (TP_DOMAIN * domain, const char *type_name, char *buf, int size)
+{
+  switch (TP_DOMAIN_TYPE (domain))
+    {
+    case DB_TYPE_NUMERIC:
+      snprintf (buf, size, "%s(%d,%d)", type_name, domain->precision, domain->scale);
+      break;
+    case DB_TYPE_CHAR:
+    case DB_TYPE_VARCHAR:
+      snprintf (buf, size, "%s(%d)", type_name, domain->precision);
+      break;
+    default:
+      snprintf (buf, size, "%s", type_name);
+      break;
+    }
+}
+
+/*
  * tr_get_block_action_columns() - Lists the columns of a class that a PL/CSQL block action can read
  *                                 through a correlation name.
  *    return: error code
@@ -1738,7 +1768,7 @@ block_parameter_type_name (DB_TYPE type)
  * Note:
  *    The columns are the instance and shared attributes whose type PL/CSQL accepts.
  *    The names point into the class, so they are to be used before the class can be decached.
- *    The type names are literals. The caller frees the array alone, with free_and_init ().
+ *    The parameter type names are literals. The caller frees the array alone, with free_and_init ().
  */
 int
 tr_get_block_action_columns (DB_OBJECT * class_mop, TR_BLOCK_COLUMN ** columns, int *count)
@@ -1790,6 +1820,7 @@ tr_get_block_action_columns (DB_OBJECT * class_mop, TR_BLOCK_COLUMN ** columns, 
 	{
 	  list[n].name = att->header.name;
 	  list[n].type_name = type_name;
+	  block_field_type (att->domain, type_name, list[n].field_type, sizeof (list[n].field_type));
 	  n++;
 	}
     }
@@ -2046,11 +2077,13 @@ validate_trigger (TR_TRIGGER * trigger)
  *    This happens when another transaction changed the owner after the trigger was cached,
  *    and when a running action changed the owner of its own trigger.
  *    The error of the failed call is kept here. The caller clears it when the procedure has moved.
+ *    The name is read from the trigger object first. The cache stays as it is when the name is the
+ *    same, so the activities the caller holds are not freed for a failure of the block itself.
  */
 static bool
 reload_moved_block_trigger (TR_TRIGGER * trigger)
 {
-  char *old_sp_name;
+  DB_VALUE sp_value;
   bool moved = false;
   int save;
 
@@ -2061,25 +2094,21 @@ reload_moved_block_trigger (TR_TRIGGER * trigger)
       return false;
     }
 
-  old_sp_name = strdup (trigger->block_sp_name);
-  if (old_sp_name == NULL)
-    {
-      return false;
-    }
+  db_make_null (&sp_value);
 
   er_stack_push ();
 
   AU_SAVE_AND_DISABLE (save);
-  if (validate_trigger (trigger) == NO_ERROR && trigger->block_sp_name != NULL
-      && strcmp (old_sp_name, trigger->block_sp_name) != 0)
+  if (db_get (trigger->object, TR_ATT_ACTION_BLOCK_SP, &sp_value) == NO_ERROR && !DB_IS_NULL (&sp_value)
+      && strcmp (db_get_string (&sp_value), trigger->block_sp_name) != 0)
     {
-      moved = true;
+      moved = (validate_trigger (trigger) == NO_ERROR);
     }
   AU_RESTORE (save);
 
   er_stack_pop ();
 
-  free_and_init (old_sp_name);
+  pr_clear_value (&sp_value);
 
   return moved;
 }
@@ -4770,6 +4799,26 @@ eval_action (TR_TRIGGER * trigger, DB_OBJECT * current, DB_OBJECT * temp, bool *
 	  error = free_stale_statement (act);
 	  if (error == NO_ERROR && act->parser == NULL)
 	    {
+	      /*
+	       * The procedure of a PL/CSQL block action is named after the trigger owner, so it moves when
+	       * the owner changes. A call with arguments to the old name compiles as a method call on the
+	       * first argument instead of failing, so the name is checked before the action is compiled.
+	       */
+	      if (!reloaded && trigger->block_sp_name != NULL && reload_moved_block_trigger (trigger))
+		{
+		  reloaded = true;
+		  if (trigger->status != TR_STATUS_ACTIVE)
+		    {
+		      break;
+		    }
+		  error = AU_SET_USER (trigger->owner);
+		  if (error != NO_ERROR)
+		    {
+		      break;
+		    }
+		  act = trigger->action;
+		}
+
 	      error = compile_trigger_activity (trigger, act, 0);
 	      used_cached_statement = false;
 	    }
@@ -6789,8 +6838,10 @@ tr_change_block_procedure_owner (DB_OBJECT * trigger_object, DB_OBJECT * owner)
   PARSER_CONTEXT *parser = NULL;
   MOP sp_mop;
   DB_VALUE old_sp_value;
+  DB_VALUE old_action_value;
   DB_VALUE value;
   const char *old_sp_name;
+  const char *arguments;
   char *owner_name = NULL;
   char downcase_owner_name[DB_MAX_USER_LENGTH] = { '\0' };
   char new_sp_name[DB_MAX_IDENTIFIER_LENGTH] = { '\0' };
@@ -6801,6 +6852,7 @@ tr_change_block_procedure_owner (DB_OBJECT * trigger_object, DB_OBJECT * owner)
   int error = NO_ERROR;
 
   db_make_null (&old_sp_value);
+  db_make_null (&old_action_value);
 
   AU_SAVE_AND_DISABLE (save);
 
@@ -6833,16 +6885,34 @@ tr_change_block_procedure_owner (DB_OBJECT * trigger_object, DB_OBJECT * owner)
   snprintf (new_sp_name, DB_MAX_IDENTIFIER_LENGTH, "%s.%s", downcase_owner_name,
 	    sm_remove_qualifier_name (old_sp_name));
 
+  /* the arguments stay as they are. The columns of the class may have changed since the trigger was made */
+  error = db_get (trigger_object, TR_ATT_ACTION, &old_action_value);
+  if (error != NO_ERROR)
+    {
+      goto end;
+    }
+  arguments = DB_IS_NULL (&old_action_value) ? NULL : strstr (db_get_string (&old_action_value),
+							      sm_remove_qualifier_name (old_sp_name));
+  if (arguments != NULL)
+    {
+      /* the arguments follow the name of the procedure, so a parenthesis before it is not theirs */
+      arguments = strchr (arguments, '(');
+    }
+  if (arguments == NULL)
+    {
+      arguments = "()";
+    }
+
   /* the owner name may need quoting, for example a reserved word */
-  new_source_len = strlen ("CALL [].[]()") + strlen (new_sp_name) + 1;
+  new_source_len = strlen ("CALL [].[]") + strlen (new_sp_name) + strlen (arguments) + 1;
   new_source = (char *) malloc (new_source_len);
   if (new_source == NULL)
     {
       ERROR_SET_ERROR_1ARG (error, ER_OUT_OF_VIRTUAL_MEMORY, new_source_len);
       goto end;
     }
-  snprintf (new_source, new_source_len, "CALL [%s].[%s]()", downcase_owner_name,
-	    sm_remove_qualifier_name (old_sp_name));
+  snprintf (new_source, new_source_len, "CALL [%s].[%s]%s", downcase_owner_name,
+	    sm_remove_qualifier_name (old_sp_name), arguments);
 
   /* au_change_sp_owner compiles the procedure again for the new owner and reports errors to a parser */
   parser = parser_create_parser ();
@@ -6921,6 +6991,7 @@ end:
     }
 
   pr_clear_value (&old_sp_value);
+  pr_clear_value (&old_action_value);
 
   AU_RESTORE (save);
 

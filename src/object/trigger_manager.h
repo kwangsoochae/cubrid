@@ -297,11 +297,14 @@ extern int tr_change_block_procedure_owner (DB_OBJECT * trigger_object, DB_OBJEC
 
 /* PL/CSQL block actions */
 
+#define TR_BLOCK_FIELD_TYPE_SIZE 32	/* holds VARCHAR(1073741823) and NUMERIC(40,40) */
+
 typedef struct tr_block_column TR_BLOCK_COLUMN;
 struct tr_block_column
 {
   const char *name;		/* attribute name, points into the class */
   const char *type_name;	/* PL/CSQL type the attribute is passed as, a literal */
+  char field_type[TR_BLOCK_FIELD_TYPE_SIZE];	/* PL/CSQL type of the record field, with the length or precision */
 };
 
 extern void tr_get_reference_names (DB_TRIGGER_EVENT event, DB_TRIGGER_TIME time, const char **curname,
