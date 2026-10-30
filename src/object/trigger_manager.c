@@ -203,6 +203,7 @@ static DB_OBJECT *trigger_to_object (TR_TRIGGER * trigger);
 static int object_to_trigger (DB_OBJECT * object, TR_TRIGGER * trigger);
 static void get_reference_names (TR_TRIGGER * trigger, TR_ACTIVITY * activity, const char **curname,
 				 const char **tempname);
+static const char *block_parameter_type_name (DB_TYPE type);
 static int compile_trigger_activity (TR_TRIGGER * trigger, TR_ACTIVITY * activity, int with_evaluate);
 static int free_stale_statement (TR_ACTIVITY * activity);
 static int validate_trigger (TR_TRIGGER * trigger);
@@ -1544,15 +1545,35 @@ error:
 static void
 get_reference_names (TR_TRIGGER * trigger, TR_ACTIVITY * activity, const char **curname, const char **tempname)
 {
+  tr_get_reference_names (trigger->event, activity->time, curname, tempname);
+}
+
+/*
+ * tr_get_reference_names() - Returns the correlation names an action of a trigger can refer to.
+ *    return: none
+ *    event(in): trigger event
+ *    time(in): action time
+ *    curname(out): name of the current instance, or NULL
+ *    tempname(out): name of the new or old instance, or NULL
+ *
+ * Note:
+ *    The names are "obj" and "new" or "old". When mysql_trigger_correlation_names is set,
+ *    they are "new" and "old" the way MySQL names them.
+ *    They depend on the event, the action time and that parameter only, so a trigger that is
+ *    being created can ask for them before it exists.
+ */
+void
+tr_get_reference_names (DB_TRIGGER_EVENT event, DB_TRIGGER_TIME time, const char **curname, const char **tempname)
+{
   *curname = NULL;
   *tempname = NULL;
 
   if (!prm_get_bool_value (PRM_ID_MYSQL_TRIGGER_CORRELATION_NAMES))
     {
-      switch (trigger->event)
+      switch (event)
 	{
 	case TR_EVENT_INSERT:
-	  switch (activity->time)
+	  switch (time)
 	    {
 	    case TR_TIME_BEFORE:
 	      *tempname = NEW_REFERENCE_NAME;
@@ -1567,7 +1588,7 @@ get_reference_names (TR_TRIGGER * trigger, TR_ACTIVITY * activity, const char **
 	  break;
 
 	case TR_EVENT_UPDATE:
-	  switch (activity->time)
+	  switch (time)
 	    {
 	    case TR_TIME_BEFORE:
 	      *curname = OBJ_REFERENCE_NAME;
@@ -1586,7 +1607,7 @@ get_reference_names (TR_TRIGGER * trigger, TR_ACTIVITY * activity, const char **
 	  break;
 
 	case TR_EVENT_DELETE:
-	  switch (activity->time)
+	  switch (time)
 	    {
 	    case TR_TIME_BEFORE:
 	      *curname = OBJ_REFERENCE_NAME;
@@ -1605,10 +1626,10 @@ get_reference_names (TR_TRIGGER * trigger, TR_ACTIVITY * activity, const char **
     }
   else
     {
-      switch (trigger->event)
+      switch (event)
 	{
 	case TR_EVENT_INSERT:
-	  switch (activity->time)
+	  switch (time)
 	    {
 	    case TR_TIME_BEFORE:
 	      *tempname = NEW_REFERENCE_NAME;
@@ -1623,7 +1644,7 @@ get_reference_names (TR_TRIGGER * trigger, TR_ACTIVITY * activity, const char **
 	  break;
 
 	case TR_EVENT_UPDATE:
-	  switch (activity->time)
+	  switch (time)
 	    {
 	    case TR_TIME_BEFORE:
 	      *curname = OLD_REFERENCE_NAME;
@@ -1642,7 +1663,7 @@ get_reference_names (TR_TRIGGER * trigger, TR_ACTIVITY * activity, const char **
 	  break;
 
 	case TR_EVENT_DELETE:
-	  switch (activity->time)
+	  switch (time)
 	    {
 	    case TR_TIME_BEFORE:
 	      *curname = OLD_REFERENCE_NAME;
@@ -1659,6 +1680,124 @@ get_reference_names (TR_TRIGGER * trigger, TR_ACTIVITY * activity, const char **
 	  break;
 	}
     }
+}
+
+/*
+ * block_parameter_type_name() - Returns the PL/CSQL type a parameter of the procedure of a block action
+ *                               is declared with for an attribute of the given type.
+ *    return: type name, or NULL when the type cannot be passed to PL/CSQL
+ *    type(in): attribute type
+ *
+ * Note:
+ *    The names are the ones PL/CSQL accepts without a length or a precision.
+ *    The list is the one of DBTypeAdapter.isSupported () in the PL server. A type that is
+ *    not in it cannot be a column of the cursor that declares a correlation name either.
+ */
+static const char *
+block_parameter_type_name (DB_TYPE type)
+{
+  switch (type)
+    {
+    case DB_TYPE_SHORT:
+      return "SMALLINT";
+    case DB_TYPE_INTEGER:
+      return "INT";
+    case DB_TYPE_BIGINT:
+      return "BIGINT";
+    case DB_TYPE_NUMERIC:
+      return "NUMERIC";
+    case DB_TYPE_FLOAT:
+      return "FLOAT";
+    case DB_TYPE_DOUBLE:
+      return "DOUBLE";
+    case DB_TYPE_CHAR:
+      return "CHAR";
+    case DB_TYPE_VARCHAR:
+      return "VARCHAR";
+    case DB_TYPE_DATE:
+      return "DATE";
+    case DB_TYPE_TIME:
+      return "TIME";
+    case DB_TYPE_TIMESTAMP:
+      return "TIMESTAMP";
+    case DB_TYPE_DATETIME:
+      return "DATETIME";
+    default:
+      return NULL;
+    }
+}
+
+/*
+ * tr_get_block_action_columns() - Lists the columns of a class that a PL/CSQL block action can read
+ *                                 through a correlation name.
+ *    return: error code
+ *    class_mop(in): class the trigger is defined on
+ *    columns(out): array of the columns, in the definition order, or NULL when there is none
+ *    count(out): number of the columns
+ *
+ * Note:
+ *    The columns are the instance and shared attributes whose type PL/CSQL accepts.
+ *    The names point into the class, so they are to be used before the class can be decached.
+ *    The type names are literals. The caller frees the array alone, with free_and_init ().
+ */
+int
+tr_get_block_action_columns (DB_OBJECT * class_mop, TR_BLOCK_COLUMN ** columns, int *count)
+{
+  SM_CLASS *class_;
+  SM_ATTRIBUTE *att;
+  TR_BLOCK_COLUMN *list;
+  const char *type_name;
+  int n;
+  int error;
+
+  assert (columns != NULL && count != NULL);
+
+  *columns = NULL;
+  *count = 0;
+
+  error = au_fetch_class (class_mop, &class_, AU_FETCH_READ, AU_SELECT);
+  if (error != NO_ERROR)
+    {
+      return error;
+    }
+
+  n = 0;
+  for (att = class_->ordered_attributes; att != NULL; att = att->order_link)
+    {
+      if (block_parameter_type_name (TP_DOMAIN_TYPE (att->domain)) != NULL)
+	{
+	  n++;
+	}
+    }
+
+  if (n == 0)
+    {
+      return NO_ERROR;
+    }
+
+  list = (TR_BLOCK_COLUMN *) malloc (sizeof (TR_BLOCK_COLUMN) * n);
+  if (list == NULL)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, sizeof (TR_BLOCK_COLUMN) * n);
+      return ER_OUT_OF_VIRTUAL_MEMORY;
+    }
+
+  n = 0;
+  for (att = class_->ordered_attributes; att != NULL; att = att->order_link)
+    {
+      type_name = block_parameter_type_name (TP_DOMAIN_TYPE (att->domain));
+      if (type_name != NULL)
+	{
+	  list[n].name = att->header.name;
+	  list[n].type_name = type_name;
+	  n++;
+	}
+    }
+
+  *columns = list;
+  *count = n;
+
+  return NO_ERROR;
 }
 
 /*

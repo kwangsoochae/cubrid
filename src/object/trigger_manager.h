@@ -295,6 +295,19 @@ extern int tr_drop_trigger (DB_OBJECT * obj, bool call_from_api);
 extern int tr_rename_trigger (DB_OBJECT * trigger_object, const char *name, bool call_from_api, bool deferred_flush);
 extern int tr_change_block_procedure_owner (DB_OBJECT * trigger_object, DB_OBJECT * owner);
 
+/* PL/CSQL block actions */
+
+typedef struct tr_block_column TR_BLOCK_COLUMN;
+struct tr_block_column
+{
+  const char *name;		/* attribute name, points into the class */
+  const char *type_name;	/* PL/CSQL type the attribute is passed as, a literal */
+};
+
+extern void tr_get_reference_names (DB_TRIGGER_EVENT event, DB_TRIGGER_TIME time, const char **curname,
+				    const char **tempname);
+extern int tr_get_block_action_columns (DB_OBJECT * class_mop, TR_BLOCK_COLUMN ** columns, int *count);
+
 extern int tr_set_status (DB_OBJECT * trigger_object, DB_TRIGGER_STATUS status, bool call_from_api);
 extern int tr_set_priority (DB_OBJECT * trigger_object, double priority, bool call_from_api);
 extern int tr_set_comment (DB_OBJECT * trigger_object, const char *comment, bool call_from_api);
