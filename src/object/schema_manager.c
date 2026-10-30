@@ -11507,11 +11507,13 @@ allocate_disk_structures (MOP classop, SM_CLASS * class_, DB_OBJLIST * subclasse
 	{
 	  goto structure_error;
 	}
-      /* be sure that constraints attributes are not decached. This may happen for foreign key, when
-       * allocate_disk_structures function may be called second time. */
+      /* be sure that constraints attributes are not decached. Allocating a foreign key may update
+       * the referenced superclass, and that update reinstalls this class and frees its attributes.
+       * Every index constraint, such as the inherited primary key, would then point to freed
+       * attributes, so each one keeps its own copy. */
       for (con = class_->constraints; con != NULL; con = con->next)
 	{
-	  if (con->type == SM_CONSTRAINT_FOREIGN_KEY && con->attributes[0] != NULL)
+	  if (SM_IS_CONSTRAINT_INDEX_FAMILY (con->type) && con->attributes[0] != NULL)
 	    {
 	      /* we are sure that con->attributes points to class attributes */
 	      att_count = 0;
@@ -11588,7 +11590,7 @@ allocate_disk_structures (MOP classop, SM_CLASS * class_, DB_OBJLIST * subclasse
 
       for (con = class_->constraints; con != NULL; con = con->next)
 	{
-	  if (con->type == SM_CONSTRAINT_FOREIGN_KEY)
+	  if (SM_IS_CONSTRAINT_INDEX_FAMILY (con->type))
 	    {
 	      /* free attributes to avoid memory leak */
 	      for (att = con->attributes; *att; att++)
