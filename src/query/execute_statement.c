@@ -6268,7 +6268,6 @@ static int check_merge_trigger (PT_DO_FUNC * do_func, PARSER_CONTEXT * parser, P
 static char **find_update_columns (int *count_ptr, PT_NODE * statement);
 static void get_activity_info (PARSER_CONTEXT * parser, DB_TRIGGER_ACTION * type, const char **source,
 			       PT_NODE * statement);
-static const char *skip_blanks_and_comments (const char *text);
 static int create_trigger_block_procedure (PARSER_CONTEXT * parser, const char *trigger_name, const char *block,
 					   char *sp_name, int sp_name_size, const char **call_source);
 
@@ -7277,40 +7276,6 @@ get_activity_info (PARSER_CONTEXT * parser, DB_TRIGGER_ACTION * type, const char
 }
 
 /*
- * skip_blanks_and_comments() - Skips the blanks and the comments of PL/CSQL at the start of a text.
- *   return: the first token of the text, or its end
- *   text(in): PL/CSQL text
- */
-static const char *
-skip_blanks_and_comments (const char *text)
-{
-  const char *end;
-
-  while (true)
-    {
-      while (char_isspace (*text))
-	{
-	  text++;
-	}
-
-      if ((text[0] == '-' && text[1] == '-') || (text[0] == '/' && text[1] == '/'))
-	{
-	  end = strchr (text, '\n');
-	  text = (end != NULL) ? end : text + strlen (text);
-	}
-      else if (text[0] == '/' && text[1] == '*')
-	{
-	  end = strstr (text + 2, "*/");
-	  text = (end != NULL) ? end + 2 : text + strlen (text);
-	}
-      else
-	{
-	  return text;
-	}
-    }
-}
-
-/*
  * create_trigger_block_procedure() - Makes the internal procedure that runs a PL/CSQL block action of a trigger.
  *   return: Error code
  *   parser(in): Parse context of the create trigger statement
@@ -7324,6 +7289,7 @@ skip_blanks_and_comments (const char *text)
  *    The procedure belongs to the trigger owner and its name has a random part,
  *    so it does not depend on the trigger name. The call names the owner because
  *    it is compiled when the trigger is created, possibly by another user.
+ *    The block is a statement of the procedure body, as the user wrote it.
  */
 static int
 create_trigger_block_procedure (PARSER_CONTEXT * parser, const char *trigger_name, const char *block, char *sp_name,
@@ -7387,16 +7353,12 @@ create_trigger_block_procedure (PARSER_CONTEXT * parser, const char *trigger_nam
     }
 
   /*
-   * The procedure takes the shape of its stored code: the header on the first line and the body,
-   * without a leading DECLARE and the blanks and comments after it, from the second line.
-   * The stored code is what is compiled again when the owner changes, and it starts the body at its first token,
-   * so both compilations report errors at the same lines.
+   * The procedure takes the shape of its stored code: the header on the first line and the body from
+   * the second line, starting at its first token. The stored code is what is compiled again when the
+   * owner changes, so both compilations report errors at the same lines.
+   * The block is nested as it is. A DECLARE stays valid there, and the block ends at its END,
+   * so the statement terminator is added here.
    */
-  if (strncasecmp (block, "declare", strlen ("declare")) == 0)
-    {
-      block = skip_blanks_and_comments (block + strlen ("declare"));
-    }
-
   /* the owner name may need quoting, for example a reserved word */
   quoted_name = pt_append_string (parser, NULL, "[");
   quoted_name = pt_append_string (parser, quoted_name, downcase_owner_name);
@@ -7406,8 +7368,9 @@ create_trigger_block_procedure (PARSER_CONTEXT * parser, const char *trigger_nam
 
   create_sql = pt_append_string (parser, NULL, "CREATE PROCEDURE ");
   create_sql = pt_append_string (parser, create_sql, quoted_name);
-  create_sql = pt_append_string (parser, create_sql, " AS\n");
+  create_sql = pt_append_string (parser, create_sql, " () AS\nBEGIN\n");
   create_sql = pt_append_string (parser, create_sql, block);
+  create_sql = pt_append_string (parser, create_sql, ";\nEND");
 
   /* the call is made first, so nothing in this function fails after the procedure is made */
   call = pt_append_string (parser, NULL, "CALL ");
