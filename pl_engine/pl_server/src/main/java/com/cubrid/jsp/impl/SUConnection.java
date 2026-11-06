@@ -176,7 +176,7 @@ public class SUConnection {
         CUBRIDPacker packer = new CUBRIDPacker(outputBuffer);
         packer.packInt(SUFunctionCode.EXECUTE.getCode());
         packer.packInt(handlerId);
-        packer.packInt(executeFlag);
+        packer.packInt(executeFlag & 0xFF); // no sign extension of a flag at 0x80
         packer.packInt(maxField < 0 ? 0 : maxField);
 
         if (isScrollable == false) {

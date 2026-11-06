@@ -33,6 +33,7 @@ package com.cubrid.plcsql.predefined.sp;
 import com.cubrid.jsp.Server;
 import com.cubrid.jsp.SysParam;
 import com.cubrid.jsp.context.Context;
+import com.cubrid.jsp.jdbc.CUBRIDServerSidePreparedStatement;
 import com.cubrid.jsp.jdbc.CUBRIDServerSideStatement;
 import com.cubrid.jsp.value.DateTimeParser;
 import com.cubrid.jsp.value.NumericValue;
@@ -437,6 +438,18 @@ public class SpLib {
 
     public static Object throwInvalidCursor(String msg) {
         throw new INVALID_CURSOR(msg);
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // dynamic SQL
+    //
+
+    // EXECUTE IMMEDIATE ... USING binds its values as IN only
+    public static PreparedStatement prepareDynamicSql(Connection conn, String sql)
+            throws SQLException {
+        PreparedStatement pstmt = conn.prepareStatement(sql);
+        ((CUBRIDServerSidePreparedStatement) pstmt).setInOnlyBind();
+        return pstmt;
     }
 
     // ---------------------------------------------------------------------------------------

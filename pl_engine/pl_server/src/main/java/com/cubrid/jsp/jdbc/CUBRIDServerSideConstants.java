@@ -51,7 +51,8 @@ public class CUBRIDServerSideConstants {
             EXEC_FLAG_QUERY_INFO = 0x04,
             EXEC_FLAG_ONLY_QUERY_PLAN = 0x08,
             EXEC_FLAG_HOLDABLE_RESULT = 0x20,
-            EXEC_FLAG_GET_GENERATED_KEYS = 0x40;
+            EXEC_FLAG_GET_GENERATED_KEYS = 0x40,
+            EXEC_FLAG_IN_ONLY_BIND = (byte) 0x80; // custom for PL/CSQL EXECUTE IMMEDIATE ... USING
     public static final int CURSOR_SET = 0, CURSOR_CUR = 1, CURSOR_END = 2;
 
     /* oid commands */
