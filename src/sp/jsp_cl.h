@@ -72,6 +72,9 @@ extern char *jsp_get_unique_name (MOP mop_p, char *buf, int buf_size);
 extern void jsp_set_prepare_call (void);
 extern void jsp_unset_prepare_call (void);
 extern bool jsp_is_prepare_call (void);
+extern void jsp_set_in_only_bind (void);
+extern void jsp_unset_in_only_bind (void);
+extern bool jsp_is_in_only_bind (void);
 
 extern PT_NODE *jsp_get_default_expr_node_list (PARSER_CONTEXT * parser, cubpl::pl_signature & sig,
 						bool * flag_si_datetime);

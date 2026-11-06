@@ -122,6 +122,7 @@
 static int server_port = -1;
 static int call_cnt = 0;
 static bool is_prepare_call[MAX_CALL_COUNT] = { false, };
+static bool is_in_only_bind[MAX_CALL_COUNT] = { false, };
 
 static SP_TYPE_ENUM jsp_map_pt_misc_to_sp_type (PT_MISC_TYPE pt_enum);
 static SP_MODE_ENUM jsp_map_pt_misc_to_sp_mode (PT_MISC_TYPE pt_enum);
@@ -339,8 +340,9 @@ jsp_check_out_param_in_query (PARSER_CONTEXT *parser, PT_NODE *node, int arg_mod
  *
  * Note: An argument for an OUT or IN OUT parameter must be a host variable, that is, a ? or a csql :name.
  *       A constant, an expression, a session variable or a correlation name of a trigger has no
- *       place to take the value. A ? is accepted on every path, even where the caller does not
- *       read the value back, as Oracle accepts any bind variable there.
+ *       place to take the value. A ? is accepted even where the caller does not read the value back,
+ *       as Oracle accepts any bind variable there. The exception is a ? bound as an IN value only,
+ *       as in PL/CSQL EXECUTE IMMEDIATE ... USING. Its value cannot go back either.
  */
 
 static int
@@ -354,6 +356,12 @@ jsp_check_out_arg (PT_NODE *node, PT_NODE *arg, int arg_mode, int arg_index)
 
   if (arg->node_type == PT_HOST_VAR)
     {
+      if (jsp_is_in_only_bind ())
+	{
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_SP_IN_BIND_TO_OUT_PARAM, 3, arg_index + 1,
+		  node->info.method_call.method_name->info.name.original, (arg_mode == SP_MODE_OUT) ? "OUT" : "IN OUT");
+	  return ER_SP_IN_BIND_TO_OUT_PARAM;
+	}
       return NO_ERROR;
     }
 
@@ -2043,6 +2051,44 @@ jsp_is_prepare_call ()
 {
   int depth = tran_get_libcas_depth ();
   return is_prepare_call[depth];
+}
+
+/*
+ * jsp_set_in_only_bind - mark that the binds of the statement being executed are IN values only
+ *   return: none
+ *
+ * Note: PL/CSQL EXECUTE IMMEDIATE ... USING binds its values as IN only.
+ */
+
+void
+jsp_set_in_only_bind (void)
+{
+  int depth = tran_get_libcas_depth ();
+  is_in_only_bind[depth] = true;
+}
+
+/*
+ * jsp_unset_in_only_bind -
+ *   return: none
+ */
+
+void
+jsp_unset_in_only_bind (void)
+{
+  int depth = tran_get_libcas_depth ();
+  is_in_only_bind[depth] = false;
+}
+
+/*
+ * jsp_is_in_only_bind -
+ *   return: bool
+ */
+
+bool
+jsp_is_in_only_bind (void)
+{
+  int depth = tran_get_libcas_depth ();
+  return is_in_only_bind[depth];
 }
 
 static int

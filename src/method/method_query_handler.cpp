@@ -32,6 +32,8 @@
 /* from jsp_cl.c */
 extern void jsp_set_prepare_call ();
 extern void jsp_unset_prepare_call ();
+extern void jsp_set_in_only_bind ();
+extern void jsp_unset_in_only_bind ();
 
 namespace cubmethod
 {
@@ -611,7 +613,15 @@ namespace cubmethod
     DB_QUERY_RESULT *result = NULL;
     int stmt_id = m_query_result.stmt_id;
     jsp_set_prepare_call ();
+    if (flag & EXEC_IN_ONLY_BIND)
+      {
+	jsp_set_in_only_bind ();
+      }
     int n = db_execute_and_keep_statement (m_session, stmt_id, &result);
+    if (flag & EXEC_IN_ONLY_BIND)
+      {
+	jsp_unset_in_only_bind ();
+      }
     jsp_unset_prepare_call ();
     if (n < 0)
       {
@@ -730,7 +740,15 @@ namespace cubmethod
       }
 
     DB_QUERY_RESULT *result = NULL;
+    if (flag & EXEC_IN_ONLY_BIND)
+      {
+	jsp_set_in_only_bind ();
+      }
     int n = db_execute_and_keep_statement (m_session, stmt_id, &result);
+    if (flag & EXEC_IN_ONLY_BIND)
+      {
+	jsp_unset_in_only_bind ();
+      }
     if (n < 0)
       {
 	return ER_FAILED;

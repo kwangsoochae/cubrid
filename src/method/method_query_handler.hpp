@@ -56,7 +56,8 @@ namespace cubmethod
     EXEC_QUERY_INFO = 0x04,
     EXEC_ONLY_QUERY_PLAN = 0x08,
     EXEC_THREAD = 0x10,
-    EXEC_RETURN_GENERATED_KEYS = 0x40
+    EXEC_RETURN_GENERATED_KEYS = 0x40,
+    EXEC_IN_ONLY_BIND = 0x80 /* custom for method_callback, used by PL/CSQL EXECUTE IMMEDIATE ... USING */
   };
 
 #define CLASS_NAME_PATTERN_MATCH 1

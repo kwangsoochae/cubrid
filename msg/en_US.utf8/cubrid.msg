@@ -1507,7 +1507,8 @@ Check the path of the key file (_keys) and make sure that it includes proper key
 
 1392 Argument %1$d of %2$s must be a host variable because it is passed to an %3$s parameter.
 
-1393 Last Error
+1393 Argument %1$d of %2$s is bound as an IN value of EXECUTE IMMEDIATE but is passed to an %3$s parameter.
+1394 Last Error
 
 
 $set 6 MSGCAT_SET_INTERNAL
