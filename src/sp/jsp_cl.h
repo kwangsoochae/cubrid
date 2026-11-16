@@ -41,8 +41,14 @@
 #include "sp_constants.hpp"
 #include "pl_signature.hpp"
 
+namespace cubpl
+{
+  struct plcsql_correlation_use;
+}
+
 extern int jsp_create_stored_procedure (PARSER_CONTEXT * parser, PT_NODE * statement);
-extern int jsp_create_system_generated_procedure (const char *create_sql);
+extern int jsp_create_system_generated_procedure (const char *create_sql,
+						  std::vector < cubpl::plcsql_correlation_use > *correlation_uses);
 extern int jsp_drop_system_generated_procedure (const char *name);
 extern int jsp_alter_stored_procedure (PARSER_CONTEXT * parser, PT_NODE * statement);
 extern int alter_stored_procedure_code (PARSER_CONTEXT * parser, MOP sp_mop, const char *name, const char *owner_str,

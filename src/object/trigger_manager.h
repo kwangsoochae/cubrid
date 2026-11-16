@@ -305,7 +305,6 @@ typedef struct tr_block_column TR_BLOCK_COLUMN;
 struct tr_block_column
 {
   const char *name;		/* attribute name, points into the class */
-  const char *type_name;	/* type the attribute is passed as, of pr_type_name () */
   /* PL/CSQL type of the record field. Only CHAR has its length */
   char field_type[TR_BLOCK_FIELD_TYPE_SIZE];
 };

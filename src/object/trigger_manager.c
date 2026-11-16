@@ -1762,7 +1762,6 @@ block_field_type (TP_DOMAIN * domain, const char *type_name, char *buf, int size
  * Note:
  *    The columns are the instance and shared attributes whose type PL/CSQL accepts.
  *    The names point into the class, so they are to be used before the class can be decached.
- *    The parameter type names are the ones of pr_type_name ().
  *    The caller frees the array alone, with free_and_init ().
  */
 int
@@ -1814,7 +1813,6 @@ tr_get_block_action_columns (DB_OBJECT * class_mop, TR_BLOCK_COLUMN ** columns, 
 	{
 	  type_name = pr_type_name (TP_DOMAIN_TYPE (att->domain));
 	  list[n].name = att->header.name;
-	  list[n].type_name = type_name;
 	  block_field_type (att->domain, type_name, list[n].field_type, sizeof (list[n].field_type));
 	  n++;
 	}

@@ -135,7 +135,7 @@ static int jsp_check_out_param_in_query (PARSER_CONTEXT *parser, PT_NODE *node, 
 static int jsp_check_param_type_supported  (DB_TYPE type, int mode);
 
 static int jsp_create_stored_procedure_internal (PARSER_CONTEXT *parser, PT_NODE *statement,
-    bool is_system_generated);
+    bool is_system_generated, std::vector<cubpl::plcsql_correlation_use> *correlation_uses);
 static int drop_stored_procedure (const char *name, SP_TYPE_ENUM expected_type, bool allow_system_generated);
 static int drop_stored_procedure_code (const char *name, bool allow_system_generated);
 
@@ -1026,19 +1026,21 @@ jsp_default_value_string (PARSER_CONTEXT *parser, PT_NODE *node, bool &is_null, 
 int
 jsp_create_stored_procedure (PARSER_CONTEXT *parser, PT_NODE *statement)
 {
-  return jsp_create_stored_procedure_internal (parser, statement, false);
+  return jsp_create_stored_procedure_internal (parser, statement, false, NULL);
 }
 
 /*
  * jsp_create_system_generated_procedure
  *   return: if failed return error code else NO_ERROR
  *   create_sql(in): a CREATE PROCEDURE statement
+ *   correlation_uses(out): the fields of the correlation names the procedure reads, or NULL
  *
  * Note: The procedure is marked as system generated, so users cannot see, alter or drop it.
  */
 
 int
-jsp_create_system_generated_procedure (const char *create_sql)
+jsp_create_system_generated_procedure (const char *create_sql,
+				       std::vector<cubpl::plcsql_correlation_use> *correlation_uses)
 {
   PARSER_CONTEXT *parser;
   PT_NODE **statements;
@@ -1083,7 +1085,7 @@ jsp_create_system_generated_procedure (const char *create_sql)
       goto end;
     }
 
-  err = jsp_create_stored_procedure_internal (parser, statement, true);
+  err = jsp_create_stored_procedure_internal (parser, statement, true, correlation_uses);
 
 end:
   parser_free_parser (parser);
@@ -1109,10 +1111,12 @@ jsp_drop_system_generated_procedure (const char *name)
  *   parser(in/out): parser environment
  *   statement(in): a statement node
  *   is_system_generated(in): mark the procedure as one the engine created
+ *   correlation_uses(out): the fields of the correlation names the procedure reads, or NULL
  */
 
 static int
-jsp_create_stored_procedure_internal (PARSER_CONTEXT *parser, PT_NODE *statement, bool is_system_generated)
+jsp_create_stored_procedure_internal (PARSER_CONTEXT *parser, PT_NODE *statement, bool is_system_generated,
+				      std::vector<cubpl::plcsql_correlation_use> *correlation_uses)
 {
   const char *decl = NULL, *comment = NULL;
   char owner_name[DB_MAX_USER_LENGTH];
@@ -1280,6 +1284,10 @@ jsp_create_stored_procedure_internal (PARSER_CONTEXT *parser, PT_NODE *statement
 	  pt_record_error (parser, parser->statement_number, compile_response.err_line, compile_response.err_column, er_msg (),
 			   NULL);
 	  goto error_exit;
+	}
+      if (correlation_uses != NULL)
+	{
+	  *correlation_uses = compile_response.correlation_uses;
 	}
       sp_info.sql_data_access = (SP_SQL_DATA_ACCESS_TYPE) compile_response.sql_data_access;
     }

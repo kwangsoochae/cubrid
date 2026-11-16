@@ -35,6 +35,7 @@
 #include "pl_query_cursor.hpp"
 #include "sp_code.hpp"
 #include "xserver_interface.h"
+#include "set_object.h"
 
 // XXX: SHOULD BE THE LAST INCLUDE HEADER
 #include "memory_wrapper.hpp"
@@ -237,15 +238,34 @@ namespace cubpl
       case DB_TYPE_TIME:
       case DB_TYPE_TIMESTAMP:
       case DB_TYPE_DATETIME:
-      case DB_TYPE_SET:
-      case DB_TYPE_MULTISET:
-      case DB_TYPE_SEQUENCE:
       case DB_TYPE_OID:
       case DB_TYPE_OBJECT:
       case DB_TYPE_RESULTSET:
       case DB_TYPE_NULL:
 	res = true;
 	break;
+      case DB_TYPE_SET:
+      case DB_TYPE_MULTISET:
+      case DB_TYPE_SEQUENCE:
+      {
+	/* the elements are packed one by one, so each has to be a supported type too */
+	DB_SET *set = db_get_set (&value);
+	int ncol = (set != NULL) ? set_size (set) : 0;
+	DB_VALUE elem_v;
+
+	res = true;
+	for (int i = 0; i < ncol && res; i++)
+	  {
+	    if (set_get_element (set, i, &elem_v) != NO_ERROR)
+	      {
+		res = false;
+		break;
+	      }
+	    res = is_supported_dbtype (elem_v);
+	    db_value_clear (&elem_v);
+	  }
+      }
+      break;
       // unsupported types
       case DB_TYPE_BIT:
       case DB_TYPE_VARBIT:
