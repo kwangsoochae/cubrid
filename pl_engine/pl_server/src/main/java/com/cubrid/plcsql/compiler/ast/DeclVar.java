@@ -31,6 +31,8 @@
 package com.cubrid.plcsql.compiler.ast;
 
 import com.cubrid.plcsql.compiler.visitor.AstVisitor;
+import java.util.ArrayList;
+import java.util.List;
 import org.antlr.v4.runtime.ParserRuleContext;
 
 public class DeclVar extends DeclIdTypeSpeced {
@@ -44,6 +46,11 @@ public class DeclVar extends DeclIdTypeSpeced {
     public final TypeSpec typeSpec;
     public final boolean notNull;
     public final Expr val;
+
+    // a correlation name of a trigger, such as OBJ, declared at the top of the procedure
+    public boolean isCorrelationName = false;
+    // for a correlation name, the fields the code reads, in the order they first appear
+    public final List<String> readFields = new ArrayList<>();
 
     public DeclVar(
             ParserRuleContext ctx, String name, TypeSpec typeSpec, boolean notNull, Expr val) {

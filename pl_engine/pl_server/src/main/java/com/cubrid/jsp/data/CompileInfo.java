@@ -33,6 +33,8 @@ package com.cubrid.jsp.data;
 
 import com.cubrid.jsp.protocol.PackableObject;
 import com.cubrid.plcsql.compiler.serverapi.ServerConstants;
+import java.util.Collections;
+import java.util.List;
 import java.util.Set;
 
 public class CompileInfo implements PackableObject {
@@ -51,6 +53,19 @@ public class CompileInfo implements PackableObject {
     public byte[] compiledCode = null;
 
     private Set<Dependency> dependencies = null;
+
+    // a field of a correlation name the code reads, such as QTY of OBJ.QTY
+    public static class CorrelationUse {
+        public final String name;
+        public final String field;
+
+        public CorrelationUse(String name, String field) {
+            this.name = name;
+            this.field = field;
+        }
+    }
+
+    private List<CorrelationUse> correlationUses = Collections.emptyList();
 
     public CompileInfo(int code, int line, int column, String msg) {
         assert code < 0;
@@ -77,6 +92,11 @@ public class CompileInfo implements PackableObject {
         this.dependencies = dependencies;
     }
 
+    // the fields of the correlation names that the code reads, in the order the code takes them
+    public void setCorrelationUses(List<CorrelationUse> correlationUses) {
+        this.correlationUses = correlationUses;
+    }
+
     @Override
     public void pack(CUBRIDPacker packer) {
         packer.packInt(errCode);
@@ -99,6 +119,12 @@ public class CompileInfo implements PackableObject {
             packer.packInt(dependencies.size());
             for (Dependency d : dependencies) {
                 d.pack(packer);
+            }
+
+            packer.packInt(correlationUses.size());
+            for (CorrelationUse u : correlationUses) {
+                packer.packString(u.name);
+                packer.packString(u.field);
             }
         }
     }

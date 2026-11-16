@@ -51,6 +51,7 @@ import com.cubrid.plcsql.compiler.serverapi.SqlSemantics;
 import com.cubrid.plcsql.compiler.type.Type;
 import com.cubrid.plcsql.compiler.type.TypeChar;
 import com.cubrid.plcsql.compiler.type.TypeRecord;
+import com.cubrid.plcsql.compiler.type.TypeRowSeq;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -188,6 +189,12 @@ public class TypeChecker extends AstVisitor<Type> {
                 throw new SemanticError(
                         Misc.getLineColumnOf(node.val.ctx), // s204
                         "NOT NULL variables may not have null as their initial value");
+            }
+
+            if (valType == TypeRowSeq.INSTANCE) {
+                // a record initialized from a row. The fields are converted one by one
+                assert node.typeSpec.type instanceof TypeRecord;
+                return null;
             }
 
             Coercion c = Coercion.getCoercion(iStore, valType, node.typeSpec.type);

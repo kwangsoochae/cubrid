@@ -331,6 +331,7 @@ public class PlcsqlCompilerMain {
                         javaSig,
                         converter.dataAccessLevel,
                         typeChecker.dependencies);
+        info.setCorrelationUses(converter.getCorrelationUses());
         return info;
     }
 

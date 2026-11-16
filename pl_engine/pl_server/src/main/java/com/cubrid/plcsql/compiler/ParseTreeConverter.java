@@ -34,6 +34,7 @@ import static com.cubrid.plcsql.compiler.antlrgen.PlcParser.*;
 import static com.cubrid.plcsql.compiler.antlrgen.StaticSqlWithRecordsParser.*;
 
 import com.cubrid.jsp.data.ColumnInfo;
+import com.cubrid.jsp.data.CompileInfo;
 import com.cubrid.jsp.data.DBType;
 import com.cubrid.jsp.data.Dependency;
 import com.cubrid.jsp.value.DateTimeParser;
@@ -83,6 +84,18 @@ public class ParseTreeConverter extends PlcParserBaseVisitor<AstNode> {
         this.compileSeqNo = compileSeqNo;
         this.systemGenerated = systemGenerated;
         this.sqlSerialNo = 1;
+    }
+
+    // The fields of the correlation names that the code reads, name by name. The row of a name
+    // carries the values of these fields in this order.
+    public List<CompileInfo.CorrelationUse> getCorrelationUses() {
+        List<CompileInfo.CorrelationUse> ret = new ArrayList<>();
+        for (DeclVar d : correlationNames) {
+            for (String f : d.readFields) {
+                ret.add(new CompileInfo.CorrelationUse(d.name(), f));
+            }
+        }
+        return ret;
     }
 
     public void askServerSemanticQuestions() {
@@ -286,6 +299,12 @@ public class ParseTreeConverter extends PlcParserBaseVisitor<AstNode> {
                 }
             }
 
+            if (!ofTopLevel && dp.typeSpec.type == TypeRowSeq.INSTANCE) {
+                throw new SemanticError(
+                        Misc.getLineColumnOf(pc), // s444
+                        "type SEQUENCE can be used only for a row parameter of a trigger block");
+            }
+
             if (ofTopLevel
                     && (dp.typeSpec.type == Type.BOOLEAN
                             || dp.typeSpec.type == Type.SYS_REFCURSOR)) {
@@ -326,6 +345,12 @@ public class ParseTreeConverter extends PlcParserBaseVisitor<AstNode> {
             typeSpec = (TypeSpec) visit(ctx.type_spec());
         } finally {
             typeVisitMode = TYPE_VISIT_NORMAL;
+        }
+
+        if (typeSpec.type == TypeRowSeq.INSTANCE) {
+            throw new SemanticError(
+                    Misc.getLineColumnOf(ctx), // s444
+                    "type SEQUENCE can be used only for a row parameter of a trigger block");
         }
 
         DeclParamIn ret = new DeclParamIn(ctx, name, typeSpec, null);
@@ -576,6 +601,15 @@ public class ParseTreeConverter extends PlcParserBaseVisitor<AstNode> {
     @Override
     public TypeSpec visitSimple_type(Simple_typeContext ctx) {
         String plcType = Misc.getNormalizedText(ctx);
+        if (plcType.equals("SEQUENCE")) {
+            // only a row parameter of a procedure the engine generates for a trigger block
+            if (!systemGenerated || typeVisitMode != TYPE_VISIT_PARAM_IN) {
+                throw new SemanticError(
+                        Misc.getLineColumnOf(ctx), // s444
+                        "type SEQUENCE can be used only for a row parameter of a trigger block");
+            }
+            return new TypeSpec(ctx, TypeRowSeq.INSTANCE);
+        }
         Type ty = nameToType.get(plcType);
         assert ty != null;
         return new TypeSpec(ctx, ty);
@@ -959,13 +993,14 @@ public class ParseTreeConverter extends PlcParserBaseVisitor<AstNode> {
         String fieldName = Misc.getNormalizedText(ctx.field);
 
         try {
-            ExprId record = visitNonFuncIdentifier(ctx.record);
+            ExprId record = visitRecordOfField(ctx.record);
             if (!isRecordId(record)) {
                 throw new SemanticError(
                         Misc.getLineColumnOf(ctx.record), // s008
                         "field lookup is only allowed for records");
             }
 
+            noteCorrelationField(record, fieldName);
             return new ExprField(ctx, record, fieldName);
 
         } catch (UndeclaredId e) {
@@ -1360,7 +1395,22 @@ public class ParseTreeConverter extends PlcParserBaseVisitor<AstNode> {
         String name = Misc.getNormalizedText(ctx.identifier());
 
         TypeSpec ty = (TypeSpec) visit(ctx.type_spec());
-        Expr val = visitDefault_value_part(ctx.default_value_part());
+
+        boolean topLevel = symbolStack.getCurrentScope().level == SymbolStack.LEVEL_MAIN + 1;
+        Expr val;
+        boolean saved = allowingRowParam;
+        allowingRowParam = systemGenerated && topLevel;
+        try {
+            val = visitDefault_value_part(ctx.default_value_part());
+        } finally {
+            allowingRowParam = saved;
+        }
+        boolean initializedFromRow = isRowParam(val);
+        if (initializedFromRow && !(ty.type instanceof TypeRecord)) {
+            throw new SemanticError(
+                    Misc.getLineColumnOf(ctx), // s445
+                    "a row parameter can initialize only a record");
+        }
 
         if (val != null
                 && ty.type instanceof TypeNumeric
@@ -1382,6 +1432,11 @@ public class ParseTreeConverter extends PlcParserBaseVisitor<AstNode> {
         }
 
         DeclVar ret = new DeclVar(ctx, name, ty, ctx.NOT() != null, val);
+        // a record the engine initializes from a row is a correlation name, such as OBJ
+        if (initializedFromRow) {
+            ret.isCorrelationName = true;
+            correlationNames.add(ret);
+        }
         symbolStack.putDecl(name, ret);
 
         checkRedefinitionOfUsedName(name, ctx);
@@ -1576,7 +1631,9 @@ public class ParseTreeConverter extends PlcParserBaseVisitor<AstNode> {
                 if (!field.isAssignableTo()) {
                     throw new SemanticError(
                             Misc.getLineColumnOf(ctx.record_field()), // s080
-                            field.name() + " is not updatable");
+                            isCorrelationField(field)
+                                    ? CORRELATION_NAME_READ_ONLY
+                                    : field.name() + " is not updatable");
                 }
 
                 return field;
@@ -1601,6 +1658,11 @@ public class ParseTreeConverter extends PlcParserBaseVisitor<AstNode> {
         }
 
         Decl decl = symbolStack.getDeclForIdExpr(name);
+        checkRowParamUse(decl, name, ctx);
+        boolean hidden = isHiddenCorrelationName(decl);
+        if (hidden) {
+            decl = null; // a correlation name is a record only before a field
+        }
         if (decl == null) {
 
             if (idUsedInCurrentDeclPart != null) {
@@ -1663,7 +1725,9 @@ public class ParseTreeConverter extends PlcParserBaseVisitor<AstNode> {
             if (ret == null) {
                 throw new SemanticError(
                         Misc.getLineColumnOf(ctx), // s094
-                        "undeclared identifier '" + name + "'");
+                        hidden
+                                ? correlationNameUseMessage(name)
+                                : "undeclared identifier '" + name + "'");
             }
 
             return ret;
@@ -2756,6 +2820,83 @@ public class ParseTreeConverter extends PlcParserBaseVisitor<AstNode> {
 
     // whether the procedure is one the engine generates, such as the one of a trigger block
     private final boolean systemGenerated;
+    // true while visiting the initial value of a top-level variable of such a procedure
+    private boolean allowingRowParam = false;
+    // true while resolving the record of a field, the only place a correlation name is a record
+    private boolean resolvingRecordOfField = false;
+    // correlation names in the order they are declared
+    private final List<DeclVar> correlationNames = new ArrayList<>();
+
+    private static boolean isCorrelationName(ExprId id) {
+        return id.decl instanceof DeclVar && ((DeclVar) id.decl).isCorrelationName;
+    }
+
+    // A correlation name is resolved as a record only before a field, such as OBJ of OBJ.QTY.
+    // Elsewhere it is resolved as if it were not declared, so it may be a table or a function.
+    private boolean isHiddenCorrelationName(Decl decl) {
+        return !resolvingRecordOfField
+                && decl instanceof DeclVar
+                && ((DeclVar) decl).isCorrelationName;
+    }
+
+    private static String correlationNameUseMessage(String name) {
+        return "correlation name "
+                + name
+                + " can be used only with a column, such as "
+                + name
+                + ".column";
+    }
+
+    private ExprId visitRecordOfField(IdentifierContext ctx) {
+        return visitRecordOfField(Misc.getNormalizedText(ctx), ctx);
+    }
+
+    private ExprId visitRecordOfField(String name, ParserRuleContext ctx) {
+        boolean saved = resolvingRecordOfField;
+        resolvingRecordOfField = true;
+        try {
+            return visitNonFuncIdentifier(name, ctx);
+        } finally {
+            resolvingRecordOfField = saved;
+        }
+    }
+
+    private static final String CORRELATION_NAME_READ_ONLY =
+            "A value cannot be assigned to a correlation name. Correlation names are read only.";
+
+    // a field of a correlation name, such as NEW.QTY, which cannot be assigned to
+    private static boolean isCorrelationField(Expr e) {
+        return e instanceof ExprField && isCorrelationName(((ExprField) e).record);
+    }
+
+    private static void noteCorrelationField(ExprId record, String field) {
+        if (isCorrelationName(record)) {
+            DeclVar decl = (DeclVar) record.decl;
+            String f = Misc.getNormalizedText(field);
+            if (!decl.readFields.contains(f)) {
+                decl.readFields.add(f);
+            }
+        }
+    }
+
+    private static boolean isRowParam(Expr e) {
+        return e instanceof ExprId
+                && ((ExprId) e).decl instanceof DeclParamIn
+                && ((DeclParamIn) ((ExprId) e).decl).typeSpec.type == TypeRowSeq.INSTANCE;
+    }
+
+    // A row parameter is allowed only as the initial value of a record at the top level.
+    private void checkRowParamUse(Decl decl, String name, ParserRuleContext ctx) {
+        if (!allowingRowParam
+                && decl instanceof DeclParamIn
+                && ((DeclParamIn) decl).typeSpec.type == TypeRowSeq.INSTANCE) {
+            throw new SemanticError(
+                    Misc.getLineColumnOf(ctx), // s445
+                    "a row parameter "
+                            + name
+                            + " can be used only as the initial value of a record");
+        }
+    }
 
     private StmtLoop.LoopOptimizables loopOptimizables = null;
 
@@ -2813,6 +2954,11 @@ public class ParseTreeConverter extends PlcParserBaseVisitor<AstNode> {
             String name, ParserRuleContext ctx, boolean throwIfNotFound) {
         ExprId ret;
         Decl decl = symbolStack.getDeclForIdExpr(name);
+        checkRowParamUse(decl, name, ctx);
+        boolean hidden = isHiddenCorrelationName(decl);
+        if (hidden) {
+            decl = null; // a correlation name is a record only before a field
+        }
         if (decl == null) {
             ret = null; // no such id at all
         } else if (decl instanceof DeclId) {
@@ -2830,7 +2976,9 @@ public class ParseTreeConverter extends PlcParserBaseVisitor<AstNode> {
         }
 
         if (ret == null && throwIfNotFound) {
-            throw new UndeclaredId(Misc.getLineColumnOf(ctx), "undeclared id " + name);
+            throw new UndeclaredId(
+                    Misc.getLineColumnOf(ctx),
+                    hidden ? correlationNameUseMessage(name) : "undeclared id " + name);
         } else {
             return ret;
         }
@@ -3062,13 +3210,14 @@ public class ParseTreeConverter extends PlcParserBaseVisitor<AstNode> {
 
         } else if (split.length == 2) {
 
-            ExprId record = visitNonFuncIdentifier(split[0], ctx); // s432: undeclared id ...
+            ExprId record = visitRecordOfField(split[0], ctx); // s432: undeclared id ...
             if (!isRecordId(record)) {
                 throw new SemanticError(
                         Misc.getLineColumnOf(ctx), // s433
                         split[0] + " is not a record");
             }
 
+            noteCorrelationField(record, split[1]);
             return new ExprField(ctx, record, split[1]);
 
         } else {
@@ -3252,8 +3401,10 @@ public class ParseTreeConverter extends PlcParserBaseVisitor<AstNode> {
                     if (!((AssignTarget) target).isAssignableTo()) {
                         throw new SemanticError(
                                 Misc.getLineColumnOf(ctx), // s056
-                                ((AssignTarget) target).name()
-                                        + " in the INTO clause is not updatable");
+                                isCorrelationField(target)
+                                        ? CORRELATION_NAME_READ_ONLY
+                                        : ((AssignTarget) target).name()
+                                                + " in the INTO clause is not updatable");
                     }
                     intoTargetList.add(target);
                 }
@@ -3310,6 +3461,9 @@ public class ParseTreeConverter extends PlcParserBaseVisitor<AstNode> {
                         || arg instanceof ExprField
                                 && (((ExprField) arg).record).isAssignableTo()) {
                     // OK
+                } else if (isCorrelationField(arg)) {
+                    throw new SemanticError(
+                            Misc.getLineColumnOf(arg.ctx), CORRELATION_NAME_READ_ONLY);
                 } else {
                     return (i + 1);
                 }

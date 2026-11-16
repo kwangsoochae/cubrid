@@ -390,6 +390,9 @@ public class JavaCodeWriter extends AstVisitor<JavaCodeWriter.CodeToResolve> {
 
         Type ty = node.typeSpec.type;
         String tyJava = getJavaCodeOfType(ty);
+        if (node.isCorrelationName) {
+            return getRecordFromRowCode(node, (TypeRecord) ty, tyJava);
+        }
         if (node.val == null) {
 
             String code;
@@ -3704,6 +3707,55 @@ public class JavaCodeWriter extends AstVisitor<JavaCodeWriter.CodeToResolve> {
 
             return null;
         }
+    }
+
+    // A record initialized from a row parameter. The row carries the values of the fields the code
+    // reads, in the order of readFields, and the compile result tells the engine that order.
+    // Those fields are set one by one, each converted from the Java object of its value.
+    // The other fields are never read, as a correlation name is used only with a field.
+    // Declarations are fields of a class, so the settings are in an instance initializer.
+    private CodeToResolve getRecordFromRowCode(DeclVar node, TypeRecord rec, String tyJava) {
+        List<String> lines = new LinkedList<>();
+        lines.add(String.format("%1$s[] %2$s = new %1$s[] { new %1$s() };", tyJava, node.name));
+        if (!node.readFields.isEmpty()) {
+            String row = ((ExprId) node.val).javaCode();
+            lines.add("{");
+            lines.add(
+                    String.format(
+                            "  if (%1$s == null || %1$s.length != %2$d) {",
+                            row, node.readFields.size()));
+            lines.add(
+                    String.format(
+                            "    throw new VALUE_ERROR(\"the row of %s does not match its columns\");",
+                            node.name));
+            lines.add("  }");
+            int i = 0;
+            for (String field : node.readFields) {
+                Type fieldType = null;
+                for (Misc.Pair<String, Type> f : rec.selectList) {
+                    if (f.e1.equals(field)) {
+                        fieldType = f.e2;
+                        break;
+                    }
+                }
+                if (fieldType == null) {
+                    throw new RuntimeException("unreachable: no field " + field);
+                }
+                Coercion c = Coercion.getCoercion(iStore, Type.OBJECT, fieldType);
+                if (c == null) {
+                    throw new RuntimeException(
+                            "unreachable: no conversion to " + fieldType.plcName);
+                }
+                lines.add(
+                        String.format(
+                                "  %s[0].%s[0] = %s;",
+                                node.name, field, c.javaCode(String.format("%s[%d]", row, i))));
+                i++;
+            }
+            lines.add("}");
+        }
+        return new CodeTemplate(
+                "DeclVar", Misc.UNKNOWN_LINE_COLUMN, lines.toArray(new String[lines.size()]));
     }
 
     private List<String> getRecordFieldsDeclCode(List<Misc.Pair<String, Type>> selectList) {

@@ -656,6 +656,7 @@ simple_type
     | TIMESTAMP
     | DATETIME
     | SYS_REFCURSOR
+    | SEQUENCE
     ;
 
 literal
