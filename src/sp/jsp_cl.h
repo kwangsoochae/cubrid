@@ -77,4 +77,11 @@ extern bool jsp_is_prepare_call (void);
 
 extern PT_NODE *jsp_get_default_expr_node_list (PARSER_CONTEXT * parser, cubpl::pl_signature & sig,
 						bool * flag_si_datetime);
+
+namespace cubpl
+{
+  struct plcsql_correlation_use;
+}
+extern int jsp_check_trigger_block (const char *check_sql, MOP owner, const char *owner_name, const char **names,
+				    int n_names, std::vector < cubpl::plcsql_correlation_use > &uses);
 #endif /* _JSP_CL_H_ */
