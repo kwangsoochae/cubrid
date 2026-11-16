@@ -1591,7 +1591,9 @@ public class ParseTreeConverter extends PlcParserBaseVisitor<AstNode> {
                 if (!field.isAssignableTo()) {
                     throw new SemanticError(
                             Misc.getLineColumnOf(ctx.record_field()), // s080
-                            field.name() + " is not updatable");
+                            isCorrelationField(field)
+                                    ? CORRELATION_NAME_READ_ONLY
+                                    : field.name() + " is not updatable");
                 }
 
                 return field;
@@ -2819,6 +2821,14 @@ public class ParseTreeConverter extends PlcParserBaseVisitor<AstNode> {
         }
     }
 
+    private static final String CORRELATION_NAME_READ_ONLY =
+            "A value cannot be assigned to a correlation name. Correlation names are read only.";
+
+    // a field of a correlation name, such as NEW.QTY, which cannot be assigned to
+    private static boolean isCorrelationField(Expr e) {
+        return e instanceof ExprField && isCorrelationName(((ExprField) e).record);
+    }
+
     private void noteCorrelationField(ExprId record, String field) {
         if (isCorrelationName(record)) {
             String f = Misc.getNormalizedText(field);
@@ -3330,8 +3340,10 @@ public class ParseTreeConverter extends PlcParserBaseVisitor<AstNode> {
                     if (!((AssignTarget) target).isAssignableTo()) {
                         throw new SemanticError(
                                 Misc.getLineColumnOf(ctx), // s056
-                                ((AssignTarget) target).name()
-                                        + " in the INTO clause is not updatable");
+                                isCorrelationField(target)
+                                        ? CORRELATION_NAME_READ_ONLY
+                                        : ((AssignTarget) target).name()
+                                                + " in the INTO clause is not updatable");
                     }
                     intoTargetList.add(target);
                 }
@@ -3388,6 +3400,9 @@ public class ParseTreeConverter extends PlcParserBaseVisitor<AstNode> {
                         || arg instanceof ExprField
                                 && (((ExprField) arg).record).isAssignableTo()) {
                     // OK
+                } else if (isCorrelationField(arg)) {
+                    throw new SemanticError(
+                            Misc.getLineColumnOf(arg.ctx), CORRELATION_NAME_READ_ONLY);
                 } else {
                     return (i + 1);
                 }
