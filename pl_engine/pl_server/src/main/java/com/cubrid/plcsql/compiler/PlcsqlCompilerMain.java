@@ -73,13 +73,21 @@ public class PlcsqlCompilerMain {
         return compileSeqNo++;
     }
 
-    public static CompileInfo compilePLCSQL(String in, String owner, boolean verbose) {
-        return compilePLCSQL(in, verbose, owner, Long.toString(getCompileSeqNo()));
+    public static CompileInfo compilePLCSQL(
+            String in, String owner, boolean verbose, List<String> correlationNames) {
+        return compilePLCSQL(
+                in, verbose, owner, Long.toString(getCompileSeqNo()), correlationNames);
     }
     // end of temporary code
 
+    // With correlation names, the code is checked up to the type checking and is not translated.
+    // The result has the fields of the names the code reads.
     public static CompileInfo compilePLCSQL(
-            String in, boolean verbose, String owner, String compileSeqNo) {
+            String in,
+            boolean verbose,
+            String owner,
+            String compileSeqNo,
+            List<String> correlationNames) {
 
         // System.out.println("[TEMP] text to the compiler");
         // System.out.println(in);
@@ -87,7 +95,8 @@ public class PlcsqlCompilerMain {
         int optionFlags = verbose ? OPT_VERBOSE : 0;
         CharStream input = CharStreams.fromString(in);
         try {
-            return compileInner(new InstanceStore(), input, optionFlags, owner, compileSeqNo);
+            return compileInner(
+                    new InstanceStore(), input, optionFlags, owner, compileSeqNo, correlationNames);
         } catch (SyntaxError e) {
             CompileInfo err = new CompileInfo(-1, e.line, e.column, e.getMessage());
             return err;
@@ -220,7 +229,8 @@ public class PlcsqlCompilerMain {
             CharStream input,
             int optionFlags,
             String owner,
-            String compileSeqNo) {
+            String compileSeqNo,
+            List<String> correlationNames) {
 
         boolean verbose = (optionFlags & OPT_VERBOSE) > 0;
 
@@ -262,7 +272,8 @@ public class PlcsqlCompilerMain {
         // ------------------------------------------
         // converting parse tree to AST
 
-        ParseTreeConverter converter = new ParseTreeConverter(iStore, owner, compileSeqNo);
+        ParseTreeConverter converter =
+                new ParseTreeConverter(iStore, owner, compileSeqNo, correlationNames);
         Unit unit = (Unit) converter.visit(tree);
 
         if (verbose) {
@@ -295,6 +306,14 @@ public class PlcsqlCompilerMain {
 
         if (verbose) {
             t0 = logElapsedTime(logStore, "typechecking", t0);
+        }
+
+        if (!correlationNames.isEmpty()) {
+            if (verbose) {
+                Server.log(unit.getClassName() + logStore.toString());
+            }
+
+            return new CompileInfo(converter.getCorrelationUses());
         }
 
         // ------------------------------------------

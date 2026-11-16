@@ -31,14 +31,27 @@
 
 package com.cubrid.jsp.data;
 
+import java.util.ArrayList;
+import java.util.List;
+
 public class CompileRequest {
     public String code = null;
     public String owner = null;
     public String mode = null;
 
+    // correlation names of a trigger declared at the top of the procedure, such as OBJ and NEW.
+    // When it is not empty, the code is only checked and the fields of the names it reads are
+    // reported.
+    public List<String> correlationNames = new ArrayList<>();
+
     public CompileRequest(CUBRIDUnpacker unpacker) {
         code = unpacker.unpackCString();
         owner = unpacker.unpackCString();
         mode = unpacker.unpackCString();
+
+        long n = unpacker.unpackBigint(); // the engine packs the size of a vector as a bigint
+        for (long i = 0; i < n; i++) {
+            correlationNames.add(unpacker.unpackCString());
+        }
     }
 }
