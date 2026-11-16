@@ -36,9 +36,13 @@ public class CompileRequest {
     public String owner = null;
     public String mode = null;
 
+    // whether the procedure is one the engine generates, such as the one of a trigger block
+    public boolean systemGenerated = false;
+
     public CompileRequest(CUBRIDUnpacker unpacker) {
         code = unpacker.unpackCString();
         owner = unpacker.unpackCString();
         mode = unpacker.unpackCString();
+        systemGenerated = unpacker.unpackInt() != 0;
     }
 }

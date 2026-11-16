@@ -76,10 +76,12 @@ public class ParseTreeConverter extends PlcParserBaseVisitor<AstNode> {
     public final Set<Dependency> dependenciesOfStaticSql = new HashSet<>();
     public int dataAccessLevel = ServerConstants.SP_SQL_TYPE_NO_SQL;
 
-    public ParseTreeConverter(InstanceStore iStore, String spOwner, String compileSeqNo) {
+    public ParseTreeConverter(
+            InstanceStore iStore, String spOwner, String compileSeqNo, boolean systemGenerated) {
         this.iStore = iStore;
         this.spOwner = Misc.getNormalizedText(spOwner);
         this.compileSeqNo = compileSeqNo;
+        this.systemGenerated = systemGenerated;
         this.sqlSerialNo = 1;
     }
 
@@ -2751,6 +2753,9 @@ public class ParseTreeConverter extends PlcParserBaseVisitor<AstNode> {
 
     private final String spOwner;
     private final String compileSeqNo;
+
+    // whether the procedure is one the engine generates, such as the one of a trigger block
+    private final boolean systemGenerated;
 
     private StmtLoop.LoopOptimizables loopOptimizables = null;
 

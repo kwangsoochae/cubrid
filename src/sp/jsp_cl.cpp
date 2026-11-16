@@ -1262,6 +1262,7 @@ jsp_create_stored_procedure_internal (PARSER_CONTEXT *parser, PT_NODE *statement
       assert (statement->sql_user_text && statement->sql_user_text_len);
       compile_request.code.assign (statement->sql_user_text, statement->sql_user_text_len);
       compile_request.owner.assign ((owner_name[0] == '\0') ? au_get_current_user_name () : owner_name);
+      compile_request.system_generated = sp_info.is_system_generated ? 1 : 0;
 
       // TODO: Only the owner's rights is supported for PL/CSQL
       au_perform_push_user (sp_info.owner);
@@ -1963,6 +1964,15 @@ alter_stored_procedure_code (PARSER_CONTEXT *parser, MOP sp_mop, const char *nam
   compile_request.code.assign (scode, scode_len);
   compile_request.owner.assign (owner_str);
   pr_clear_value (&scode_val);
+
+  /* a procedure the engine generated is compiled again as such, for its row parameters */
+  err = db_get (sp_mop, SP_ATTR_IS_SYSTEM_GENERATED, &value);
+  if (err != NO_ERROR)
+    {
+      goto error;
+    }
+  compile_request.system_generated = (!DB_IS_NULL (&value) && db_get_int (&value) == 1) ? 1 : 0;
+  pr_clear_value (&value);
 
   // TODO: Only the owner's rights is supported for PL/CSQL
   au_perform_push_user (sp_info.owner);

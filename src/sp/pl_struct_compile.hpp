@@ -46,6 +46,12 @@ namespace cubpl
     std::string owner;
     std::string mode; /* for debugging : compile configs such as verbose */
 
+    /*
+     * 1 for a procedure the engine generates, such as the one of a trigger block.
+     * The compiler then accepts its row parameters and the records they initialize.
+     */
+    int system_generated;
+
     void pack (cubpacking::packer &serializator) const override;
     void unpack (cubpacking::unpacker &deserializator) override;
     size_t get_packed_size (cubpacking::packer &serializator, std::size_t start_offset) const override;
