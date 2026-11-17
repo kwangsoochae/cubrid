@@ -424,6 +424,7 @@ public class ParseTreeConverter extends PlcParserBaseVisitor<AstNode> {
             // If it actually is, and is also a table name, then it is considered to be a cursor.
             // That is, a cursor definition overrides a table definition.
             ExprId id;
+            boolean hidden = isHiddenCorrelationName(symbolStack.getDeclForIdExpr(row));
             try {
                 id = visitNonFuncIdentifier(ctx.row_name().name);
                 if (id.decl instanceof DeclCursor) {
@@ -436,6 +437,9 @@ public class ParseTreeConverter extends PlcParserBaseVisitor<AstNode> {
                 }
             } catch (UndeclaredId e) {
                 // OK: 'row' is not a local variable
+                if (hidden) {
+                    noteHiddenCorrelationName(row, ctx);
+                }
             }
         } else {
             row = row.replaceAll(" ", ""); // it can have spaces
@@ -1681,6 +1685,10 @@ public class ParseTreeConverter extends PlcParserBaseVisitor<AstNode> {
                 }
             }
 
+            if (ret != null && hidden) {
+                noteHiddenCorrelationName(name, ctx);
+            }
+
             if (ret == null) {
                 throw new SemanticError(
                         Misc.getLineColumnOf(ctx), // s094
@@ -2781,6 +2789,9 @@ public class ParseTreeConverter extends PlcParserBaseVisitor<AstNode> {
     private final Set<String> correlationNames = new HashSet<>();
     // true while resolving the record of a field, the only place a correlation name is a record
     private boolean resolvingRecordOfField = false;
+    // correlation names resolved as a table or a function, with their first use
+    private final LinkedHashMap<String, ParserRuleContext> hiddenCorrelationNameUses =
+            new LinkedHashMap<>();
     // fields of the correlation names that are read, keyed by "NAME.FIELD"
     private final LinkedHashMap<String, CompileInfo.CorrelationUse> correlationUses =
             new LinkedHashMap<>();
@@ -2793,6 +2804,8 @@ public class ParseTreeConverter extends PlcParserBaseVisitor<AstNode> {
     // Elsewhere it is resolved as if it were not declared, so it may be a table or a function.
     // The procedure the engine stores declares only the names whose fields are read,
     // so the check resolves the other uses as that procedure will.
+    // A name whose fields are also read is a record in that procedure.
+    // checkCorrelationNameUses refuses such a name.
     private boolean isHiddenCorrelationName(Decl decl) {
         return !resolvingRecordOfField
                 && decl instanceof DeclVar
@@ -2818,6 +2831,37 @@ public class ParseTreeConverter extends PlcParserBaseVisitor<AstNode> {
             return visitNonFuncIdentifier(name, ctx);
         } finally {
             resolvingRecordOfField = saved;
+        }
+    }
+
+    private void noteHiddenCorrelationName(String name, ParserRuleContext ctx) {
+        hiddenCorrelationNameUses.putIfAbsent(name, ctx);
+    }
+
+    // Refuses a correlation name that is read with a field and also used as a table or a function.
+    // The procedure the engine stores declares that name as a record.
+    // So the other use would change its meaning there.
+    public void checkCorrelationNameUses() {
+        Set<String> readNames = new HashSet<>();
+        for (CompileInfo.CorrelationUse u : correlationUses.values()) {
+            readNames.add(u.name);
+        }
+
+        for (Map.Entry<String, ParserRuleContext> e : hiddenCorrelationNameUses.entrySet()) {
+            String name = e.getKey();
+            if (readNames.contains(name)) {
+                throw new SemanticError(
+                        Misc.getLineColumnOf(e.getValue()),
+                        "correlation name "
+                                + name
+                                + " is read as "
+                                + name
+                                + ".column, so "
+                                + name
+                                + " cannot also be used for a table or a function."
+                                + " Qualify it with its owner, such as dba."
+                                + name);
+            }
         }
     }
 
