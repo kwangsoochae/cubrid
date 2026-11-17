@@ -161,15 +161,32 @@ static int rv;
 #define LOG_ISUNSAFE_TO_SKIP_RCVINDEX(RCVI) \
    ((RCVI) == RVDK_LINK_PERM_VOLEXT)
 
-#define LOG_NEED_TO_SET_LSA(RCVI, PGPTR) \
-   (((RCVI) != RVBT_MVCC_INCREMENTS_UPD) \
-    && ((RCVI) != RVBT_LOG_GLOBAL_UNIQUE_STATS_COMMIT) \
-    && ((RCVI) != RVBT_NO_LOGGING_INDEX_DURABLE) \
-    && ((RCVI) != RVBT_NO_LOGGING_INDEX_COMMITTED) \
-    && ((RCVI) != RVBT_REMOVE_UNIQUE_STATS) \
-    && ((RCVI) != RVLOC_CLASSNAME_DUMMY) \
-    && ((RCVI) != RVLOG_SYSMETA_VERSION_UPDATE) \
-    && ((RCVI) != RVDK_LINK_PERM_VOLEXT || !pgbuf_is_lsa_temporary(PGPTR)))
+/*
+ * Log records that are written without a data page (the page pointer of the address is NULL).
+ * There is no page LSA to set for them. Add an rcvindex here when it is logged without a page.
+ */
+#define LOG_IS_PAGELESS_RCVINDEX(RCVI) \
+   (((RCVI) == RVBT_MVCC_INCREMENTS_UPD) \
+    || ((RCVI) == RVBT_LOG_GLOBAL_UNIQUE_STATS_COMMIT) \
+    || ((RCVI) == RVBT_NO_LOGGING_INDEX_DURABLE) \
+    || ((RCVI) == RVBT_NO_LOGGING_INDEX_COMMITTED) \
+    || ((RCVI) == RVBT_REMOVE_UNIQUE_STATS) \
+    || ((RCVI) == RVLOC_CLASSNAME_DUMMY) \
+    || ((RCVI) == RVLOG_SYSMETA_VERSION_UPDATE))
+
+/*
+ * The volume link is logged even on the header page of a permanent volume with temporary purpose
+ * (see LOG_ISUNSAFE_TO_SKIP_RCVINDEX), but that page keeps a temporary LSA, so its page LSA must not be set.
+ */
+#define LOG_IS_VOLUME_LINK_ON_TEMP_LSA_PAGE(RCVI, PGPTR) \
+   ((RCVI) == RVDK_LINK_PERM_VOLEXT && pgbuf_is_lsa_temporary (PGPTR))
+
+/*
+ * Whether the page LSA is set to the LSA of the log record.
+ * Use the same condition when the record is logged and when it is compensated.
+ */
+#define LOG_NEED_TO_SET_PAGE_LSA(RCVI, PGPTR) \
+   (!LOG_IS_PAGELESS_RCVINDEX (RCVI) && !LOG_IS_VOLUME_LINK_ON_TEMP_LSA_PAGE (RCVI, PGPTR))
 
 #define CDC_IS_IGNORE_LOGINFO_ERROR(ERROR) \
    (((ERROR) == ER_CDC_IGNORE_LOG_INFO) \
@@ -624,10 +641,10 @@ log_get_append_lsa (void)
  *
  * NOTE:
  */
-LOG_LSA *
+LOG_LSA
 log_get_eof_lsa (void)
 {
-  return (&log_Gl.hdr.eof_lsa);
+  return log_Gl.hdr.eof_lsa.load ();
 }
 
 /*
@@ -1196,7 +1213,7 @@ log_initialize_internal (THREAD_ENTRY * thread_p, const char *db_fullname, const
 	  log_Gl.hdr.append_lsa.store (LOG_LSA (LOGPAGEID_MAX, 0));
 
 	  /* sync append_lsa to prior_lsa */
-	  log_Gl.prior_info.prior_lsa = log_Gl.hdr.append_lsa;
+	  log_Gl.prior_info.prior_lsa.store (log_Gl.hdr.append_lsa.load ());
 
 	  LSA_SET_NULL (&log_Gl.hdr.chkpt_lsa);
 	  log_Gl.hdr.nxarv_pageid = LOGPAGEID_MAX;
@@ -1240,7 +1257,7 @@ log_initialize_internal (THREAD_ENTRY * thread_p, const char *db_fullname, const
       r_args->restart_committed_lsa = log_Gl.hdr.append_lsa;
     }
 
-  LSA_COPY (&log_Gl.chkpt_redo_lsa, &log_Gl.hdr.chkpt_lsa);
+  log_Gl.chkpt_redo_lsa.store (log_Gl.hdr.chkpt_lsa);
 
   /* Make sure that this is the desired log */
   if (strcmp (log_Gl.hdr.prefix_name, prefix_logname) != 0)
@@ -1435,11 +1452,13 @@ log_initialize_internal (THREAD_ENTRY * thread_p, const char *db_fullname, const
     {
       if (init_emergency == true && log_Gl.hdr.is_shutdown == false)
 	{
-	  if (!LSA_ISNULL (&log_Gl.hdr.eof_lsa) && log_Gl.hdr.append_lsa.load () > log_Gl.hdr.eof_lsa)
+	  const LOG_LSA eof_lsa = log_Gl.hdr.eof_lsa;
+
+	  if (!LSA_ISNULL (&eof_lsa) && log_Gl.hdr.append_lsa.load () > eof_lsa)
 	    {
 	      /* We cannot believe in append_lsa for this case. It points to an unflushed log page. Since we are
 	       * going to skip recovery for emergency startup, just replace it with eof_lsa. */
-	      LOG_RESET_APPEND_LSA (&log_Gl.hdr.eof_lsa);
+	      LOG_RESET_APPEND_LSA (&eof_lsa);
 	    }
 	}
 
@@ -1479,17 +1498,17 @@ log_initialize_internal (THREAD_ENTRY * thread_p, const char *db_fullname, const
   LSA_COPY (&log_Gl.rcv_phase_lsa, &log_Gl.hdr.chkpt_lsa);
   log_Gl.chkpt_every_npages = prm_get_integer_value (PRM_ID_LOG_CHECKPOINT_NPAGES);
 
-  if (log_Gl.append.prev_lsa.load () != log_Gl.prior_info.prev_lsa)
+  if (log_Gl.append.prev_lsa.load () != log_Gl.prior_info.prev_lsa.load ())
     {
       assert (0);
       /* defense code */
-      log_Gl.prior_info.prev_lsa = log_Gl.append.prev_lsa;
+      log_Gl.prior_info.prev_lsa.store (log_Gl.append.prev_lsa.load ());
     }
-  if (log_Gl.hdr.append_lsa.load () != log_Gl.prior_info.prior_lsa)
+  if (log_Gl.hdr.append_lsa.load () != log_Gl.prior_info.prior_lsa.load ())
     {
       assert (0);
       /* defense code */
-      log_Gl.prior_info.prior_lsa = log_Gl.hdr.append_lsa;
+      log_Gl.prior_info.prior_lsa.store (log_Gl.hdr.append_lsa.load ());
     }
 
   /*
@@ -2260,7 +2279,7 @@ log_append_undoredo_crumbs (THREAD_ENTRY * thread_p, LOG_RCVINDEX rcvindex, LOG_
 
   start_lsa = prior_lsa_next_record (thread_p, node, tdes);
 
-  if (LOG_NEED_TO_SET_LSA (rcvindex, addr->pgptr))
+  if (LOG_NEED_TO_SET_PAGE_LSA (rcvindex, addr->pgptr))
     {
       if (pgbuf_set_lsa (thread_p, addr->pgptr, &start_lsa) == NULL)
 	{
@@ -2374,13 +2393,25 @@ log_append_undo_crumbs (THREAD_ENTRY * thread_p, LOG_RCVINDEX rcvindex, LOG_DATA
       return;
     }
 
-  /* 
-   * if pgptr is NULL, the user data can be spilled as un-encrypted. 
-   * Now it seems that there is no case, but can be in the future.
-   */
-  if (addr->pgptr != NULL && LOG_MAY_CONTAIN_USER_DATA (rcvindex))
+  if (LOG_MAY_CONTAIN_USER_DATA (rcvindex))
     {
-      if (pgbuf_get_tde_algorithm (addr->pgptr) != TDE_ALGORITHM_NONE)
+      TDE_ALGORITHM tde_algo = TDE_ALGORITHM_NONE;
+
+      if (addr->pgptr != NULL)
+	{
+	  tde_algo = pgbuf_get_tde_algorithm (addr->pgptr);
+	}
+      else if (addr->vfid != NULL && !VFID_ISNULL (addr->vfid))
+	{
+	  /* a logical undo without a page, such as RVBT_MVCC_NOTIFY_VACUUM: take the algorithm of the file, as the
+	   * logical undo of a system operation does */
+	  if (file_get_tde_algorithm (thread_p, addr->vfid, PGBUF_CONDITIONAL_LATCH, &tde_algo) != NO_ERROR)
+	    {
+	      tde_algo = TDE_ALGORITHM_NONE;
+	    }
+	}
+
+      if (tde_algo != TDE_ALGORITHM_NONE)
 	{
 	  if (prior_set_tde_encrypted (node, rcvindex) != NO_ERROR)
 	    {
@@ -2392,7 +2423,7 @@ log_append_undo_crumbs (THREAD_ENTRY * thread_p, LOG_RCVINDEX rcvindex, LOG_DATA
 
   start_lsa = prior_lsa_next_record (thread_p, node, tdes);
 
-  if (addr->pgptr != NULL && LOG_NEED_TO_SET_LSA (rcvindex, addr->pgptr))
+  if (addr->pgptr != NULL && LOG_NEED_TO_SET_PAGE_LSA (rcvindex, addr->pgptr))
     {
       if (pgbuf_set_lsa (thread_p, addr->pgptr, &start_lsa) == NULL)
 	{
@@ -2529,7 +2560,7 @@ log_append_redo_crumbs (THREAD_ENTRY * thread_p, LOG_RCVINDEX rcvindex, LOG_DATA
    * Make sure that I should log. Page operational logging is not done for
    * temporary data of temporary files and volumes
    */
-  if (LOG_NEED_TO_SET_LSA (rcvindex, addr->pgptr))
+  if (LOG_NEED_TO_SET_PAGE_LSA (rcvindex, addr->pgptr))
     {
       if (pgbuf_set_lsa (thread_p, addr->pgptr, &start_lsa) == NULL)
 	{
@@ -3026,7 +3057,7 @@ log_append_run_postpone (THREAD_ENTRY * thread_p, LOG_RCVINDEX rcvindex, LOG_DAT
        * Set the LSA on the data page of the corresponding log record for page operation logging.
        * Make sure that I should log. Page operational logging is not done for temporary data of temporary files/volumes
        */
-      if (addr->pgptr != NULL && LOG_NEED_TO_SET_LSA (rcvindex, addr->pgptr))
+      if (addr->pgptr != NULL && LOG_NEED_TO_SET_PAGE_LSA (rcvindex, addr->pgptr))
 	{
 	  if (pgbuf_set_lsa (thread_p, addr->pgptr, &start_lsa) == NULL)
 	    {
@@ -3195,9 +3226,10 @@ log_append_compensate_internal (THREAD_ENTRY * thread_p, LOG_RCVINDEX rcvindex, 
    * Set the LSA on the data page of the corresponding log record for page
    * operation logging.
    * Make sure that I should log. Page operational logging is not done for
-   * temporary data of temporary files and volumes
+   * temporary data of temporary files and volumes. Use the same condition as when the record was logged.
    */
-  if (pgptr != NULL && pgbuf_set_lsa (thread_p, pgptr, &start_lsa) == NULL)
+  if (pgptr != NULL && LOG_NEED_TO_SET_PAGE_LSA (rcvindex, pgptr)
+      && pgbuf_set_lsa (thread_p, pgptr, &start_lsa) == NULL)
     {
       assert (false);
       return;
@@ -3318,7 +3350,8 @@ log_skip_logging_set_lsa (THREAD_ENTRY * thread_p, LOG_DATA_ADDR * addr)
 
   log_Gl.prior_info.prior_lsa_mutex.lock ();
 
-  (void) pgbuf_set_lsa (thread_p, addr->pgptr, &log_Gl.prior_info.prior_lsa);
+  const LOG_LSA prior_lsa = log_Gl.prior_info.prior_lsa.load ();
+  (void) pgbuf_set_lsa (thread_p, addr->pgptr, &prior_lsa);
 
   log_Gl.prior_info.prior_lsa_mutex.unlock ();
 
@@ -4463,7 +4496,6 @@ log_append_commit_postpone (THREAD_ENTRY * thread_p, LOG_TDES * tdes, LOG_LSA * 
 {
   LOG_REC_START_POSTPONE *start_posp;	/* Start postpone actions */
   LOG_PRIOR_NODE *node;
-  LOG_LSA start_lsa;
 
   node = prior_lsa_alloc_and_copy_data (thread_p, LOG_COMMIT_WITH_POSTPONE, RV_NOT_DEFINED, NULL, 0, NULL, 0, NULL);
   if (node == NULL)
@@ -4475,11 +4507,9 @@ log_append_commit_postpone (THREAD_ENTRY * thread_p, LOG_TDES * tdes, LOG_LSA * 
   LSA_COPY (&start_posp->posp_lsa, start_postpone_lsa);
   start_posp->at_time = time (NULL);
 
-  start_lsa = prior_lsa_next_record (thread_p, node, tdes);
+  (void) prior_lsa_next_record (thread_p, node, tdes);
 
   tdes->state = TRAN_UNACTIVE_COMMITTED_WITH_POSTPONE;
-
-  logpb_flush_pages (thread_p, &start_lsa);
 }
 
 /*
@@ -7542,9 +7572,9 @@ log_rollback_record (THREAD_ENTRY * thread_p, LOG_LSA * log_lsa, LOG_PAGE * log_
 	  rv_err = (*RV_fun[rcvindex].undofun) (thread_p, rcv);
 	  assert (rv_err == NO_ERROR);
 	}
-      else if (rcvindex == RVBT_MVCC_NOTIFY_VACUUM || rcvindex == RVES_NOTIFY_VACUUM)
+      else if (RCV_IS_NOTHING_TO_UNDO (rcvindex))
 	{
-	  /* do nothing */
+	  /* no undo and no compensation */
 	}
       else if (rcvindex == RVBT_LOG_GLOBAL_UNIQUE_STATS_COMMIT)
 	{
@@ -8667,6 +8697,17 @@ log_execute_run_postpone (THREAD_ENTRY * thread_p, LOG_LSA * log_lsa, LOG_REC_RE
 	}
     }
 
+  if (RCV_IS_POSTPONE_NOT_UNDOABLE (rcvindex))
+    {
+      LOG_TDES *tdes = LOG_FIND_CURRENT_TDES (thread_p);
+
+      /* The log does not cover this postpone's effect, so the commit that postponed it must be on disk first. */
+      if (tdes != NULL && !LSA_ISNULL (&tdes->rcv.tran_start_postpone_lsa))
+	{
+	  logpb_flush_log_for_wal (thread_p, &tdes->rcv.tran_start_postpone_lsa);
+	}
+    }
+
   /* Now call the REDO recovery function */
 
   if (RCV_IS_LOGICAL_RUN_POSTPONE_MANUAL (rcvindex))
@@ -9345,7 +9386,7 @@ log_active_log_header_start_scan (THREAD_ENTRY * thread_p, int show_type, DB_VAL
   if (DB_VALUE_TYPE (arg_values[0]) == DB_TYPE_NULL)
     {
       LOG_CS_ENTER_READ_MODE (thread_p);
-      memcpy (&ctx->header, &log_Gl.hdr, sizeof (LOG_HEADER));
+      memcpy ((void *) &ctx->header, &log_Gl.hdr, sizeof (LOG_HEADER));
       LOG_CS_EXIT (thread_p);
     }
   else
@@ -9372,7 +9413,7 @@ log_active_log_header_start_scan (THREAD_ENTRY * thread_p, int show_type, DB_VAL
 	  goto exit_on_error;
 	}
 
-      memcpy (&ctx->header, page_hdr->area, sizeof (LOG_HEADER));
+      memcpy ((void *) &ctx->header, page_hdr->area, sizeof (LOG_HEADER));
 
       ctx->header.magic[sizeof (ctx->header.magic) - 1] = 0;
       ctx->header.db_release[sizeof (ctx->header.db_release) - 1] = 0;
@@ -9429,6 +9470,7 @@ log_active_log_header_next_scan (THREAD_ENTRY * thread_p, int cursor, DB_VALUE *
   ACTIVE_LOG_HEADER_SCAN_CTX *ctx = (ACTIVE_LOG_HEADER_SCAN_CTX *) ptr;
   LOG_HEADER *header = &ctx->header;
   LOG_LSA append_lsa = header->append_lsa;
+  LOG_LSA eof_lsa = header->eof_lsa;
 
   if (cursor >= 1)
     {
@@ -9597,7 +9639,7 @@ log_active_log_header_next_scan (THREAD_ENTRY * thread_p, int cursor, DB_VALUE *
   db_make_string (out_values[idx], str);
   idx++;
 
-  lsa_to_string (buf, sizeof (buf), &header->eof_lsa);
+  lsa_to_string (buf, sizeof (buf), &eof_lsa);
   error = db_make_string_copy (out_values[idx], buf);
   idx++;
   if (error != NO_ERROR)
