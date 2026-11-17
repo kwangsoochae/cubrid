@@ -1114,7 +1114,7 @@ jsp_drop_system_generated_procedure (const char *name)
  *   uses(out): the fields of the names that the block reads
  *
  * Note: The statement is only compiled up to the type check. No procedure is created.
- *       A compile error is set as ER_SP_COMPILE_ERROR,
+ *       A failure, even to reach the PL server, is set as ER_SP_COMPILE_ERROR,
  *       as jsp_create_system_generated_procedure sets it.
  */
 
@@ -1141,12 +1141,7 @@ jsp_check_trigger_block (const char *check_sql, MOP owner, const char *owner_nam
   err = plcsql_transfer_file (compile_request, compile_response);
   au_perform_pop_user ();
 
-  if (err != NO_ERROR)
-    {
-      return err;
-    }
-
-  if (compile_response.err_code != NO_ERROR)
+  if (err != NO_ERROR || compile_response.err_code != NO_ERROR)
     {
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_SP_COMPILE_ERROR, 1, compile_response.err_msg.c_str ());
       return ER_SP_COMPILE_ERROR;
