@@ -544,8 +544,9 @@ struct merge_proc_node
   char **remote_bind_cast;	/* per column: CUBRID remote cast type, NULL for a bare "?" */
   int *remote_bind_char_len;	/* per column: a CHAR source's length, 0 otherwise. Gateway only */
   int remote_num_keys;		/* number of ON keys */
-  int *remote_key_pos;		/* per key: 0-based position of its source value in the row and
-				 * the bound values. The USING column is c<pos + 1>. */
+  int *remote_key_pos;		/* per key: 0-based column of the source row the duplicate check
+				 * reads. A hidden column after the bound ones when the remote
+				 * compares the key in another type. */
 };
 
 typedef struct cte_proc_node CTE_PROC_NODE;

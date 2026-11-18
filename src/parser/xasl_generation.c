@@ -32399,7 +32399,7 @@ pt_to_merge_xasl_remote_source (PARSER_CONTEXT * parser, PT_NODE * statement)
   PT_DBLINK_MERGE_TARGET_QUAL qual;
   const char *target_alias, *source_alias;
   unsigned int save_custom_print;
-  int num_cols, i;
+  int num_cols, num_hidden, i;
 
   assert (parser != NULL && statement != NULL);
 
@@ -32542,6 +32542,22 @@ pt_to_merge_xasl_remote_source (PARSER_CONTEXT * parser, PT_NODE * statement)
     {
       parser_free_tree (parser, copy);
       PT_ERRORm (parser, statement, MSGCAT_SET_PARSER_SEMANTIC, MSGCAT_SEMANTIC_OUT_OF_MEMORY);
+      return NULL;
+    }
+
+  /* the duplicate key check reads the hidden key columns, if any (pt_dblink_merge_add_key_cols ()) */
+  num_hidden = pt_length_of_select_list (pt_get_select_list (parser, src_query), INCLUDE_HIDDEN_COLUMNS) - num_cols;
+  if (num_hidden == merge->remote_num_keys)
+    {
+      for (i = 0; i < merge->remote_num_keys; i++)
+	{
+	  merge->remote_key_pos[i] = num_cols + i;
+	}
+    }
+  else if (num_hidden != 0)
+    {
+      parser_free_tree (parser, copy);
+      PT_INTERNAL_ERROR (parser, "remote MERGE: the source query has hidden columns that are not its keys");
       return NULL;
     }
 

@@ -19024,7 +19024,8 @@ qexec_remote_merge_key_text (THREAD_ENTRY * thread_p, const MERGE_PROC_NODE * me
  *   sent. It also rejects two rows on a key the target does not have, which a local MERGE inserts
  *   twice. The sink cannot tell the two cases apart without asking the remote. A copy of the
  *   source is sorted on the keys, so rows with the same key are adjacent. The source itself keeps
- *   its order. A key with a NULL in it matches no target row, so it is skipped.
+ *   its order. A key with a NULL in it matches no target row, so it is skipped. A key the remote
+ *   compares in another type is read from a hidden column in that type (remote_key_pos).
  */
 static int
 qexec_check_remote_merge_duplicate_keys (THREAD_ENTRY * thread_p, XASL_NODE * xasl, XASL_STATE * xasl_state)

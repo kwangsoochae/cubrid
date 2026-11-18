@@ -13329,6 +13329,84 @@ pt_dblink_merge_check_key_types (PARSER_CONTEXT * parser, PT_NODE * merge)
   return NO_ERROR;
 }
 
+/* what pt_dblink_merge_key_compare_types carries over the walk */
+typedef struct pt_dblink_merge_key_compare PT_DBLINK_MERGE_KEY_COMPARE;
+struct pt_dblink_merge_key_compare
+{
+  PT_TYPE_ENUM *types;
+  int max_keys;
+  int num_keys;
+  bool any;
+};
+
+/* pt_dblink_merge_walk_on callback: the type a key's values are compared in, when it is not the
+ * source column's */
+static bool
+pt_dblink_merge_key_compare_type (PARSER_CONTEXT * parser, PT_NODE * term, PT_NODE * target_col,
+				  PT_NODE * source_col, void *arg)
+{
+  PT_DBLINK_MERGE_KEY_COMPARE *cmp = (PT_DBLINK_MERGE_KEY_COMPARE *) arg;
+  PT_TYPE_ENUM type = PT_TYPE_NONE;
+
+  if (source_col == NULL)
+    {
+      return true;
+    }
+  if (PT_IS_NUMERIC_TYPE (source_col->type_enum) && source_col->type_enum != PT_TYPE_FLOAT
+      && source_col->type_enum != PT_TYPE_DOUBLE && source_col->type_enum != PT_TYPE_MONETARY)
+    {
+      if (target_col->type_enum == PT_TYPE_DOUBLE || target_col->type_enum == PT_TYPE_MONETARY)
+	{
+	  type = PT_TYPE_DOUBLE;
+	}
+      else if (target_col->type_enum == PT_TYPE_FLOAT)
+	{
+	  type = PT_TYPE_FLOAT;
+	}
+    }
+
+  if (cmp->types != NULL)
+    {
+      if (cmp->num_keys >= cmp->max_keys)
+	{
+	  return false;
+	}
+      cmp->types[cmp->num_keys] = type;
+    }
+  cmp->num_keys++;
+  cmp->any |= (type != PT_TYPE_NONE);
+  return true;
+}
+
+/*
+ * pt_dblink_merge_key_compare_types () - The type the remote compares each ON key in, when it is not
+ *   the source column's. A number meets a number of another type in the more approximate of the two,
+ *   where 9007199254740992 and 9007199254740993 are one DOUBLE.
+ *   return: the number of keys, or -1 when there are more than max_keys
+ *   parser(in): parser context
+ *   merge(in): a type-checked PT_MERGE whose target is in the derived dblink table shape
+ *   types(out): per key, in ON order, PT_TYPE_DOUBLE or PT_TYPE_FLOAT, or PT_TYPE_NONE for the source
+ *               column's own type. NULL only counts the keys.
+ *   max_keys(in): the size of types
+ *   any(out): whether any key has a type of its own
+ */
+int
+pt_dblink_merge_key_compare_types (PARSER_CONTEXT * parser, PT_NODE * merge, PT_TYPE_ENUM * types, int max_keys,
+				   bool * any)
+{
+  PT_DBLINK_MERGE_REFS refs;
+  PT_DBLINK_MERGE_KEY_COMPARE cmp = { types, max_keys, 0, false };
+
+  pt_dblink_merge_init_refs (merge, &refs);
+  if (!pt_dblink_merge_walk_on (parser, merge->info.merge.search_cond, &refs, pt_dblink_merge_key_compare_type, &cmp))
+    {
+      return -1;
+    }
+
+  *any = cmp.any;
+  return cmp.num_keys;
+}
+
 /* The shape gate. A value may only be columns of either side, literals and + - * / over them
  * (pt_dblink_dml_classify_value). Anything else is computed in the USING subquery. */
 
