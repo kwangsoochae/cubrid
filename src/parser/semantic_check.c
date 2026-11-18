@@ -12975,8 +12975,8 @@ pt_dblink_odku_carry_values_and_translate (PARSER_CONTEXT * parser, PT_NODE * no
  *   spec(in/out): the target spec, its connection info resolved
  *
  * Note: The PT_DBLINK_TABLE_DML node stays in remote_server_name. db_vdb.c skips mq_translate for a remote DML
- *   and the sink dispatch finds the statement by it. All the visible columns are fetched, with
- *   "SELECT * FROM <table>", so an invisible column is not found.
+ *   and the sink dispatch finds the statement by it. The star fetches the visible columns. An invisible
+ *   one is found only by a name added to the list (pt_gather_dblink_cols_in_merge_target ()).
  */
 static int
 pt_dblink_dml_target_as_derived (PARSER_CONTEXT * parser, PT_NODE * spec)
@@ -13561,6 +13561,7 @@ pt_check_with_info (PARSER_CONTEXT * parser, PT_NODE * node, SEMANTIC_CHK_INFO *
 			  PT_INTERNAL_ERROR (parser, "remote MERGE: failed to take the target's columns");
 			  break;
 			}
+		      pt_gather_dblink_cols_in_merge_target (parser, node);
 
 		      merge_src_from = parser_copy_tree (parser, node->info.merge.using_clause);
 		      if (merge_src_from == NULL)
