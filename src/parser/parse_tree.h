@@ -4360,6 +4360,14 @@ typedef enum cdc_ddl_object_type CDC_DDL_OBJECT_TYPE;
  * replaces, the type itself rules out an (INSERT_SELECT, DELETE_LOCAL_SUBQ) state that could never
  * happen, and pt_convert_dblink_dml_query's "no sink" guard becomes a single ==NONE check instead of
  * accumulating a !flag per sink kind as more are added. */
+/* how a remote DML sink sends a value of the statement */
+typedef enum pt_dblink_value_class
+{
+  PT_DBLINK_VALUE_REJECT = 0,
+  PT_DBLINK_VALUE_REMOTE_TEXT,	/* a literal, a target column, and + - * / and unary - over those */
+  PT_DBLINK_VALUE_LOCAL_BIND	/* a value computed here: a bare subquery, a column of the source */
+} PT_DBLINK_VALUE_CLASS;
+
 typedef enum dblink_remote_sink_kind
 {
   DBLINK_REMOTE_SINK_NONE = 0,
