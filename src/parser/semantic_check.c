@@ -13333,6 +13333,17 @@ pt_dblink_dml_check_sink (PARSER_CONTEXT * parser, PT_NODE * node, PT_NODE * tar
 	  PT_ERRORc (parser, target, errmsg);
 	  return false;
 	}
+
+      /* The remote compares the column with each local value. DBLink does not read a value of
+       * this type, so nothing tells how to send a local value for the comparison to come out as it
+       * would here. */
+      if (pt_dblink_type_is_unreadable (key->type_enum))
+	{
+	  snprintf (errmsg, sizeof (errmsg), "dblink: remote %s with a local subquery supports only a column of a "
+		    "type DBLink can read on the left of the WHERE subquery predicate", dml);
+	  PT_ERRORc (parser, target, errmsg);
+	  return false;
+	}
     }
 
   if (node->node_type == PT_DELETE)
