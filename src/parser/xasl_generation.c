@@ -320,6 +320,7 @@ static int pt_fix_buildlist_aggregate_cume_dist_percent_rank (PARSER_CONTEXT * p
 
 static PT_NODE *pt_check_dblink_trigger_pre (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int *continue_walk);
 static void pt_check_dblink_trigger (PARSER_CONTEXT * parser, PT_NODE * statement);
+static void pt_check_dblink_dml_sink_in_trigger (PARSER_CONTEXT * parser, PT_NODE * statement, PT_NODE * target);
 
 #define APPEND_TO_XASL(xasl_head, list, xasl_tail) \
   do \
@@ -24537,6 +24538,32 @@ pt_to_update_xasl_remote_subquery (PARSER_CONTEXT * parser, PT_NODE * statement)
 }
 
 /*
+ * pt_check_dblink_dml_sink_in_trigger () - Check a remote DML sink that passed the gate here.
+ *   return: none. On failure the parser error is set.
+ *   parser(in): parser context
+ *   statement(in/out): the INSERT, the DELETE or the UPDATE
+ *   target(in): its target spec
+ *
+ * Note: A trigger action is checked when the trigger is compiled, ahead of the gate. Its target had
+ *   no columns then, so every name passed as a column of it. The gate runs when the action runs.
+ *   A sink is then checked again here, as a statement of its own is. The target takes its columns,
+ *   the names are resolved to them and the local subqueries are translated.
+ */
+static void
+pt_check_dblink_dml_sink_in_trigger (PARSER_CONTEXT * parser, PT_NODE * statement, PT_NODE * target)
+{
+  if (pt_has_error (parser) || !PT_DBLINK_DML_IS_SINK (target->info.spec.remote_server_name))
+    {
+      return;
+    }
+
+  if (pt_semantic_check (parser, statement) != statement && !pt_has_error (parser))
+    {
+      PT_INTERNAL_ERROR (parser, "remote DML sink: the check replaced the statement");
+    }
+}
+
+/*
  * pt_to_insert_xasl () - Converts an insert parse tree to an XASL tree for insert server execution.
  *
  * return	  : Xasl node.
@@ -24580,6 +24607,7 @@ pt_to_insert_xasl (PARSER_CONTEXT * parser, PT_NODE * statement)
 	   * info.spec.remote_server_name node is changed to PT_DBLINK_DML_TABLE
 	   */
 	  pt_rewrite_for_dblink (parser, statement);
+	  pt_check_dblink_dml_sink_in_trigger (parser, statement, statement->info.insert.spec);
 	}
 
       if (pt_has_error (parser))
@@ -26483,6 +26511,7 @@ pt_to_delete_xasl (PARSER_CONTEXT * parser, PT_NODE * statement)
 	   * info.spec.remote_server_name node is changed to PT_DBLINK_DML_TABLE
 	   */
 	  pt_rewrite_for_dblink (parser, statement);
+	  pt_check_dblink_dml_sink_in_trigger (parser, statement, from);
 	}
 
       if (pt_has_error (parser))
@@ -27212,6 +27241,7 @@ pt_to_update_xasl (PARSER_CONTEXT * parser, PT_NODE * statement, PT_NODE ** non_
 	   * info.spec.remote_server_name node is changed to PT_DBLINK_DML_TABLE
 	   */
 	  pt_rewrite_for_dblink (parser, statement);
+	  pt_check_dblink_dml_sink_in_trigger (parser, statement, from);
 	}
 
       if (pt_has_error (parser))
