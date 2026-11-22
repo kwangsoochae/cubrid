@@ -12821,15 +12821,17 @@ pt_dblink_odku_carry_values_and_translate (PARSER_CONTEXT * parser, PT_NODE * no
 }
 
 /*
- * pt_dblink_dml_target_as_derived () - Give a remote DML target the derived dblink table shape a remote SELECT
- *   spec has, so that name resolution fetches its columns from the remote and binds names to them.
+ * pt_dblink_dml_target_as_derived () - Give a remote DML target the derived dblink table shape a
+ *   remote SELECT spec has. Name resolution then fetches its columns from the remote and binds names
+ *   to them.
  *   return: NO_ERROR, or ER_FAILED with no parser error set
  *   parser(in): parser context
  *   spec(in/out): the target spec, its connection info resolved
  *
- * Note: The PT_DBLINK_TABLE_DML node stays in remote_server_name. db_vdb.c skips mq_translate for a remote DML
- *   and the sink dispatch finds the statement by it. All the visible columns are fetched, with
- *   "SELECT * FROM <table>", so an invisible column is not found.
+ * Note: The PT_DBLINK_TABLE_DML node stays in remote_server_name. db_vdb.c skips mq_translate for a
+ *   remote DML and the sink dispatch finds the statement by it. The select list starts with a star,
+ *   which fetches the visible columns. pt_gather_dblink_cols_in_dml_target () adds the columns the
+ *   statement names, so an invisible one is found too.
  */
 static int
 pt_dblink_dml_target_as_derived (PARSER_CONTEXT * parser, PT_NODE * spec)
@@ -13208,11 +13210,14 @@ pt_check_with_info (PARSER_CONTEXT * parser, PT_NODE * node, SEMANTIC_CHK_INFO *
 	      /* A sink resolves its names with the rest of the statement, so its target takes its
 	       * columns first. The statement then goes on to the steps below. A target already in
 	       * that shape is a statement checked again. */
-	      if (!PT_SPEC_IS_DERIVED (sink_target)
-		  && pt_dblink_dml_target_as_derived (parser, sink_target) != NO_ERROR)
+	      if (!PT_SPEC_IS_DERIVED (sink_target))
 		{
-		  PT_INTERNAL_ERROR (parser, "remote DML sink: failed to take the target's columns");
-		  break;
+		  if (pt_dblink_dml_target_as_derived (parser, sink_target) != NO_ERROR)
+		    {
+		      PT_INTERNAL_ERROR (parser, "remote DML sink: failed to take the target's columns");
+		      break;
+		    }
+		  pt_gather_dblink_cols_in_dml_target (parser, node, sink_target);
 		}
 	    }
 	}
