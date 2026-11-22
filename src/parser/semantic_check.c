@@ -12779,6 +12779,34 @@ pt_dblink_dml_corr_ref_post (PARSER_CONTEXT * parser, PT_NODE * node, void *arg,
 }
 
 /*
+ * pt_dblink_dml_translate_subq () - Translate a local subquery that a remote DML sink evaluates
+ *   stand-alone.
+ *   return: the translated subquery, or NULL with the parser error set
+ *   parser(in)   : parser context
+ *   subq(in)     : the local subquery, already resolved and checked
+ *   fail_msg(in) : PT_INTERNAL_ERROR message if mq_translate returns NULL without setting an error
+ *
+ * Note: The remote DML path skips the statement-level mq_translate (db_vdb.c, the whole statement
+ *   is sent to the remote server). The local subquery runs stand-alone, so it is translated here.
+ *   This applies view expansion, dblink derived-table rewrite and set-operator operand marking
+ *   (PT_IS_UNION_SUBQUERY) from the canonical code. So the operand/derived XASLs are gathered into
+ *   aptr_list and executed.
+ *   A NULL result is a failure even when no error was recorded. That matches the canonical
+ *   mq_translate contract (db_vdb.c). Without this the stale subquery would reach XASL generation.
+ */
+static PT_NODE *
+pt_dblink_dml_translate_subq (PARSER_CONTEXT * parser, PT_NODE * subq, const char *fail_msg)
+{
+  subq = mq_translate (parser, subq);
+  if (subq == NULL && !pt_has_error (parser))
+    {
+      PT_INTERNAL_ERROR (parser, fail_msg);
+    }
+
+  return subq;
+}
+
+/*
  * pt_bind_remote_dml_subq () - Bind a local subquery that a remote DML sink (INSERT SELECT / DELETE
  *   local-subquery) evaluates stand-alone: run the same steps a top-level SELECT receives
  *   (pt_resolve_names -> pt_check_where -> pt_mark_union_leaf_nodes -> pt_semantic_check_local ->
@@ -12816,19 +12844,9 @@ pt_bind_remote_dml_subq (PARSER_CONTEXT * parser, PT_NODE * subq, SEMANTIC_CHK_I
     }
   if (subq != NULL && !pt_has_error (parser))
     {
-      /* The remote DML path skips the statement-level mq_translate (db_vdb.c, the whole statement is
-       * sent to the remote server). The local subquery runs stand-alone here, so translate it: this
-       * applies view expansion, dblink derived-table rewrite and set-operator operand marking
-       * (PT_IS_UNION_SUBQUERY) from the canonical code, so the operand/derived XASLs are gathered into
-       * aptr_list and executed. Runs after the local semantic check above, matching the normal
-       * semantic-check -> mq_translate order. */
-      subq = mq_translate (parser, subq);
-      if (subq == NULL && !pt_has_error (parser))
-	{
-	  /* Match the canonical mq_translate contract (db_vdb.c): a NULL result is a failure even when
-	   * no error was recorded. Without this the stale subquery would reach XASL generation. */
-	  PT_INTERNAL_ERROR (parser, fail_msg);
-	}
+      /* Runs after the local semantic check above.
+       * That matches the normal semantic-check -> mq_translate order. */
+      subq = pt_dblink_dml_translate_subq (parser, subq, fail_msg);
     }
 
   sc_info_ptr->top_node = saved_top;
@@ -12941,13 +12959,9 @@ pt_dblink_odku_carry_values_and_translate (PARSER_CONTEXT * parser, PT_NODE * no
       num_visible = pt_length_of_select_list (subq->info.query.q.select.list, EXCLUDE_HIDDEN_COLUMNS);
     }
 
-  subq = mq_translate (parser, subq);
+  subq = pt_dblink_dml_translate_subq (parser, subq, "remote INSERT SELECT: failed to translate the SELECT subquery");
   if (subq == NULL)
     {
-      if (!pt_has_error (parser))
-	{
-	  PT_INTERNAL_ERROR (parser, "remote INSERT SELECT: failed to translate the SELECT subquery");
-	}
       return;
     }
 
