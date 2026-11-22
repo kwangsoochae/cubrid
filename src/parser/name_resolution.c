@@ -6469,7 +6469,9 @@ pt_resolve_correlation (PARSER_CONTEXT * parser, PT_NODE * in_node, PT_NODE * sc
       if (col_name && (PT_SPEC_IS_DERIVED (exposed_spec) || PT_SPEC_IS_CTE (exposed_spec))
 	  && exposed_spec->info.spec.range_var != in_node)
 	{
-	  if (PT_NAME_INFO_IS_FLAGED (in_node, PT_NAME_FOR_UPDATE))
+	  /* The target of a remote sink has the derived shape, to take its columns. DELETE names it alone. */
+	  if (PT_NAME_INFO_IS_FLAGED (in_node, PT_NAME_FOR_UPDATE)
+	      || PT_DBLINK_DML_IS_SINK (exposed_spec->info.spec.remote_server_name))
 	    {
 	      in_node->info.name.spec_id = exposed_spec->info.spec.id;
 	      return in_node;
