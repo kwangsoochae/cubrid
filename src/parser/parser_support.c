@@ -13469,13 +13469,14 @@ pt_dblink_dml_check_qualifier (PT_NODE * cond, PT_NODE * spec, const char **bad_
   return false;
 }
 
-/* true iff the DML WHERE is a single pushable predicate (see pt_dblink_dml_is_pushable_pred). This is
- * DELETE's shape gate; an UPDATE reaches it from the decline step and the mixed-reference rejection, while
- * its own gate is pt_dblink_update_where_is_inscope.
- * A row value or an expression on the left is refused here, by pt_dblink_dml_pred_lhs_is_column;
+/* true iff the DML WHERE is a single pushable predicate (see pt_dblink_dml_is_pushable_pred).
+ * This is DELETE's shape gate. An UPDATE reaches it from the decline step and the mixed-reference
+ * rejection. Its own gate is pt_dblink_update_where_is_inscope.
+ * A row value or an expression on the left is refused here, by pt_dblink_dml_pred_lhs_is_column.
  * pt_dblink_dml_xasl_where () (xasl_generation.c) keeps the same check as a backstop.
- * Correlation is not decided here (correlation_level is 0 on a DELETE WHERE subquery), but downstream on
- * both paths: the pt_dblink_dml_corr_ref_pre/_post walk (semantic_check.c) rejects correlated ones. */
+ * Correlation is not decided here (correlation_level is 0 on a DELETE WHERE subquery).
+ * The end of the semantic check refuses a correlated one, in pt_dblink_dml_sink_subq ()
+ * (semantic_check.c). */
 static bool
 pt_dblink_dml_where_is_inscope (PT_NODE * cond)
 {

@@ -24287,8 +24287,8 @@ pt_to_delete_xasl_remote_subquery (PARSER_CONTEXT * parser, PT_NODE * statement)
       return NULL;
     }
 
-  /* note: a correlated subquery is rejected earlier, in pt_check_with_info's DELETE branch
-   * (pt_dblink_dml_corr_ref), before the stand-alone bind -- so it never reaches this XASL builder. */
+  /* A correlated subquery never reaches this builder. The semantic check refused it
+   * (pt_dblink_dml_sink_subq). */
 
   /* build XASL skeleton: aptr (local subquery) + val_list + list scan spec */
   xasl = pt_make_aptr_parent_node (parser, aptr_statement, DELETE_PROC);
