@@ -32210,7 +32210,7 @@ pt_dblink_merge_append_part (PARSER_CONTEXT * parser, PARSER_VARCHAR * q, PARSER
 /*
  * pt_dblink_merge_print_clauses () - Print what follows the USING in the remote statement, the ON
  *   and the WHEN clauses. It prints them in the order pt_print_merge () does, and differs in three
- *   ways. The ON is in parentheses, as Oracle requires them. A column in a value or a condition is
+ *   ways. The ON is in parentheses, as Oracle requires them. A column in a value is
  *   qualified, so a target column and a USING column of one name do not meet on the remote, and a
  *   column SET assigns or INSERT names is not, as it can only be the target's. An INSERT column
  *   list that name resolution filled in is left out.
@@ -32225,6 +32225,9 @@ pt_dblink_merge_print_clauses (PARSER_CONTEXT * parser, PT_NODE * merge)
   PARSER_VARCHAR *q = NULL;
   PT_NODE *assign;
   bool failed = false;
+
+  /* the gate refuses a WHERE and a DELETE in the clauses (pt_dblink_merge_is_inscope) */
+  assert (info->update.search_cond == NULL && !info->update.has_delete && info->insert.search_cond == NULL);
 
   q = pt_append_nulstring (parser, q, "on (");
   q = pt_dblink_merge_append_part (parser, q, pt_print_and_list (parser, info->search_cond), &failed);
@@ -32252,19 +32255,6 @@ pt_dblink_merge_print_clauses (PARSER_CONTEXT * parser, PT_NODE * merge)
 	  q = pt_append_nulstring (parser, q, "=");
 	  q = pt_dblink_merge_append_part (parser, q, pt_print_bytes (parser, assign->info.expr.arg2), &failed);
 	}
-      if (info->update.search_cond != NULL)
-	{
-	  q = pt_append_nulstring (parser, q, " where ");
-	  q = pt_dblink_merge_append_part (parser, q, pt_print_and_list (parser, info->update.search_cond), &failed);
-	}
-      if (info->update.has_delete)
-	{
-	  /* the grammar sets has_delete only with a DELETE WHERE condition */
-	  assert (info->update.del_search_cond != NULL);
-	  q = pt_append_nulstring (parser, q, " delete where ");
-	  q = pt_dblink_merge_append_part (parser, q, pt_print_and_list (parser, info->update.del_search_cond),
-					   &failed);
-	}
     }
 
   if (info->insert.value_clauses != NULL)
@@ -32287,11 +32277,6 @@ pt_dblink_merge_print_clauses (PARSER_CONTEXT * parser, PT_NODE * merge)
       q = pt_append_nulstring (parser, q, "values (");
       q = pt_dblink_merge_append_part (parser, q, pt_print_bytes_l (parser, list_info->list), &failed);
       q = pt_append_nulstring (parser, q, ")");
-      if (info->insert.search_cond != NULL)
-	{
-	  q = pt_append_nulstring (parser, q, " where ");
-	  q = pt_dblink_merge_append_part (parser, q, pt_print_and_list (parser, info->insert.search_cond), &failed);
-	}
     }
 
   if (q != NULL && !failed)
@@ -32530,15 +32515,8 @@ pt_to_merge_xasl_remote_source (PARSER_CONTEXT * parser, PT_NODE * statement)
     parser_walk_tree (parser, copy->info.merge.search_cond, pt_dblink_merge_qualify_target, &qual, NULL, NULL);
   copy->info.merge.update.assignment =
     parser_walk_tree (parser, copy->info.merge.update.assignment, pt_dblink_merge_qualify_target, &qual, NULL, NULL);
-  copy->info.merge.update.search_cond =
-    parser_walk_tree (parser, copy->info.merge.update.search_cond, pt_dblink_merge_qualify_target, &qual, NULL, NULL);
-  copy->info.merge.update.del_search_cond =
-    parser_walk_tree (parser, copy->info.merge.update.del_search_cond, pt_dblink_merge_qualify_target, &qual, NULL,
-		      NULL);
   copy->info.merge.insert.value_clauses =
     parser_walk_tree (parser, copy->info.merge.insert.value_clauses, pt_dblink_merge_qualify_target, &qual, NULL, NULL);
-  copy->info.merge.insert.search_cond =
-    parser_walk_tree (parser, copy->info.merge.insert.search_cond, pt_dblink_merge_qualify_target, &qual, NULL, NULL);
 
   memset (&layout, 0, sizeof (layout));
   layout.key_pos = merge->remote_key_pos;
