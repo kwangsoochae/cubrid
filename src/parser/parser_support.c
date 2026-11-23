@@ -13301,9 +13301,9 @@ pt_dblink_dml_reject_declined (PARSER_CONTEXT * parser, PT_NODE * node, PT_NODE 
 }
 
 /* The mixed local/remote rejection, in the voice of the declines above. A DELETE or an UPDATE gets
- * here when no decline above names its cause, and the bare sentence is all there is to say. The
- * shape of a sink statement is not judged here. pt_dblink_dml_check_sink () refuses it after name
- * resolution. */
+ * here when no decline above names its cause. A DBLINK () it reads is named here, and otherwise the
+ * bare sentence is all there is to say. The shape of a sink statement is not judged here.
+ * pt_dblink_dml_check_sink () refuses it after name resolution. */
 static void
 pt_dblink_dml_reject_mixed_ref (PARSER_CONTEXT * parser, PT_NODE * node, SERVER_NAME_LIST * snl, int odku_local_cnt,
 				PT_NODE * loc)

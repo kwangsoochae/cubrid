@@ -13269,8 +13269,8 @@ pt_dblink_dml_check_odku (PT_NODE * node, PT_NODE * target)
 	    }
 	}
 
-      /* A braced container and a parenthesized list are value nodes too, and their elements are
-       * ordinary expressions. So the types that may go are named. */
+      /* A braced container of literals is a value node too, and so is a parenthesized list. So the
+       * types that may go are named. */
       if (rhs->node_type != PT_VALUE
 	  || !(PT_IS_NUMERIC_TYPE (rhs->type_enum) || PT_IS_SIMPLE_CHAR_STRING_TYPE (rhs->type_enum)
 	       || PT_IS_DATE_TIME_TYPE (rhs->type_enum) || rhs->type_enum == PT_TYPE_NULL))
