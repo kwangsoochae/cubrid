@@ -12822,8 +12822,8 @@ pt_dblink_odku_carry_values_and_translate (PARSER_CONTEXT * parser, PT_NODE * no
 
 /*
  * pt_dblink_dml_target_as_derived () - Give a remote DML target the derived dblink table shape a
- *   remote SELECT spec has. Name resolution then fetches its columns from the remote and binds names
- *   to them.
+ *   remote SELECT spec has. Name resolution then fetches its columns from the remote and binds
+ *   names to them.
  *   return: NO_ERROR, or ER_FAILED with no parser error set
  *   parser(in): parser context
  *   spec(in/out): the target spec, its connection info resolved
