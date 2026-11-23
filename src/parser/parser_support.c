@@ -13216,9 +13216,20 @@ pt_dblink_dml_is_local_subq_sink (const SERVER_NAME_LIST * snl)
 static const char *
 pt_dblink_dml_stmt_name (const PT_NODE * node, bool lower)
 {
-  if (node->node_type == PT_UPDATE)
+  switch (node->node_type)
     {
+    case PT_UPDATE:
       return lower ? "update" : "UPDATE";
+    case PT_MERGE:
+      return lower ? "merge" : "MERGE";
+    case PT_INSERT:
+      if (node->info.insert.do_replace)
+	{
+	  return lower ? "replace" : "REPLACE";
+	}
+      return lower ? "insert" : "INSERT";
+    default:
+      break;
     }
 
   return lower ? "delete" : "DELETE";
@@ -13297,6 +13308,9 @@ static void
 pt_dblink_dml_reject_mixed_ref (PARSER_CONTEXT * parser, PT_NODE * node, SERVER_NAME_LIST * snl, int odku_local_cnt,
 				PT_NODE * loc)
 {
+  const char *stmt = pt_dblink_dml_stmt_name (node, false);
+  char errmsg[256];
+
   switch (node->node_type)
     {
     case PT_INSERT:
@@ -13310,7 +13324,9 @@ pt_dblink_dml_reject_mixed_ref (PARSER_CONTEXT * parser, PT_NODE * node, SERVER_
        * and the name that sentence composes covers UPDATE and DELETE only. */
       if (pt_get_subquery_of_insert_select (node) == NULL)
 	{
-	  PT_ERROR (parser, loc, "dblink: remote INSERT with local data supports only INSERT ... SELECT");
+	  snprintf (errmsg, sizeof (errmsg), "dblink: remote %s with local data supports only %s ... SELECT", stmt,
+		    stmt);
+	  PT_ERRORc (parser, loc, errmsg);
 	  return;
 	}
       /* Blamed only when the clause is what refuses the statement, which is a local table in it.
@@ -13319,6 +13335,23 @@ pt_dblink_dml_reject_mixed_ref (PARSER_CONTEXT * parser, PT_NODE * node, SERVER_
 	{
 	  PT_ERROR (parser, loc, "dblink: remote INSERT with local data supports only constants and qualified "
 		    "source columns in ON DUPLICATE KEY UPDATE");
+	  return;
+	}
+      /* What is left is a source that reads another server too. The sink reads a remote table only
+       * through the server of the target. */
+      snprintf (errmsg, sizeof (errmsg), "dblink: remote %s with local data supports only a source that mixes "
+		"local tables with a remote table on the %s target's own server", stmt,
+		pt_dblink_dml_stmt_name (node, true));
+      PT_ERRORc (parser, loc, errmsg);
+      return;
+
+    case PT_DELETE:
+    case PT_UPDATE:
+      if (snl->has_dblink_query)
+	{
+	  snprintf (errmsg, sizeof (errmsg), "dblink: remote %s with a local subquery does not support a DBLINK () "
+		    "source", stmt);
+	  PT_ERRORc (parser, loc, errmsg);
 	  return;
 	}
       break;
@@ -13772,7 +13805,11 @@ pt_convert_dblink_dml_query (PARSER_CONTEXT * parser, PT_NODE * node,
 
   if (snl->has_dblink_query && snl->sink_kind != DBLINK_REMOTE_SINK_INSERT_SELECT)
     {
-      PT_ERROR (parser, upd_spec ? upd_spec : into_spec, "dblink: remote DML has DBLINK query is not allowed");
+      char errmsg[128];
+
+      snprintf (errmsg, sizeof (errmsg), "dblink: remote %s does not support a DBLINK () source",
+		pt_dblink_dml_stmt_name (node, false));
+      PT_ERRORc (parser, upd_spec ? upd_spec : into_spec, errmsg);
       return;
     }
 
