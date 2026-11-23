@@ -139,7 +139,7 @@ struct dblink_dml_state
 				 * back and tear down the whole remote transaction; the local transaction's
 				 * commit is then refused only when that rollback discards work of earlier
 				 * statements (the connection's has_uncommitted_dml mark). */
-  bool rows_sent;		/* this statement has executed at least one row on the remote */
+  bool rows_sent;		/* this statement has changed at least one row on the remote */
 };
 
 /* Assignments a remote ON DUPLICATE KEY UPDATE clause carries. cols[i] is the remote column name. exprs[i] is

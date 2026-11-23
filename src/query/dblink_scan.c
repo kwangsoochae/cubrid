@@ -2663,8 +2663,12 @@ dblink_dml_execute_row (THREAD_ENTRY * thread_p, DBLINK_DML_STATE * state, DB_VA
 
   /* This statement's rows are recorded on the connection only once the whole statement succeeds
    * (dblink_dml_stmt_done); a statement that fails is undone by dblink_dml_stmt_abort(), so its own
-   * rows must not count as work the transaction expects to commit. */
-  state->rows_sent = true;
+   * rows must not count as work the transaction expects to commit.
+   * Only an execute that changed a row counts, as in the text pushdown. */
+  if (result > 0)
+    {
+      state->rows_sent = true;
+    }
 
   return NO_ERROR;
 }
