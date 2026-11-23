@@ -7342,6 +7342,7 @@ append_block_name (PARSER_CONTEXT * parser, char *text, const char *name)
  *    It has no parameter and no assignment.
  *    The declarations, BEGIN and the assignments are on the second line.
  *    So the block starts at the third in both statements.
+ *    JSP_TRIGGER_BLOCK_LINE_OFFSET counts the two lines before the block. Change it with this layout.
  *    A correlation name is a record declared from a cursor that selects a NULL of each column type.
  *    So the procedure reads no table and needs no privilege on the class.
  *    The names made here carry the prefix of the procedure.

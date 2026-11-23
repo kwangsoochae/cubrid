@@ -74,9 +74,13 @@ public class PlcsqlCompilerMain {
     }
 
     public static CompileInfo compilePLCSQL(
-            String in, String owner, boolean verbose, List<String> correlationNames) {
+            String in,
+            String owner,
+            boolean verbose,
+            List<String> correlationNames,
+            int lineOffset) {
         return compilePLCSQL(
-                in, verbose, owner, Long.toString(getCompileSeqNo()), correlationNames);
+                in, verbose, owner, Long.toString(getCompileSeqNo()), correlationNames, lineOffset);
     }
     // end of temporary code
 
@@ -87,7 +91,8 @@ public class PlcsqlCompilerMain {
             boolean verbose,
             String owner,
             String compileSeqNo,
-            List<String> correlationNames) {
+            List<String> correlationNames,
+            int lineOffset) {
 
         // System.out.println("[TEMP] text to the compiler");
         // System.out.println(in);
@@ -96,18 +101,30 @@ public class PlcsqlCompilerMain {
         CharStream input = CharStreams.fromString(in);
         try {
             return compileInner(
-                    new InstanceStore(), input, optionFlags, owner, compileSeqNo, correlationNames);
+                    new InstanceStore(),
+                    input,
+                    optionFlags,
+                    owner,
+                    compileSeqNo,
+                    correlationNames,
+                    lineOffset);
         } catch (SyntaxError e) {
-            CompileInfo err = new CompileInfo(-1, e.line, e.column, e.getMessage());
-            return err;
+            return compileError(e.line - lineOffset, e.column, e.getMessage());
         } catch (SemanticError e) {
-            CompileInfo err = new CompileInfo(-1, e.line, e.column, e.getMessage());
-            return err;
+            return compileError(e.line - lineOffset, e.column, e.getMessage());
         } catch (Throwable e) {
             Server.log(e);
             CompileInfo err = new CompileInfo(-1, 0, 0, "internal error");
             return err;
         }
+    }
+
+    // A line before the code of the user is reported as 0, which means no position.
+    private static CompileInfo compileError(int line, int column, String msg) {
+        if (line <= 0) {
+            return new CompileInfo(-1, 0, 0, msg);
+        }
+        return new CompileInfo(-1, line, column, msg);
     }
 
     public static List<CodeAndPosition> checkSyntaxAndGetStaticSqls(String code) {
@@ -230,7 +247,8 @@ public class PlcsqlCompilerMain {
             int optionFlags,
             String owner,
             String compileSeqNo,
-            List<String> correlationNames) {
+            List<String> correlationNames,
+            int lineOffset) {
 
         boolean verbose = (optionFlags & OPT_VERBOSE) > 0;
 
@@ -273,7 +291,7 @@ public class PlcsqlCompilerMain {
         // converting parse tree to AST
 
         ParseTreeConverter converter =
-                new ParseTreeConverter(iStore, owner, compileSeqNo, correlationNames);
+                new ParseTreeConverter(iStore, owner, compileSeqNo, correlationNames, lineOffset);
         Unit unit = (Unit) converter.visit(tree);
         if (!correlationNames.isEmpty()) {
             converter.checkCorrelationNameUses();
@@ -322,7 +340,9 @@ public class PlcsqlCompilerMain {
         // ------------------------------------------
         // Java code generation
 
-        String javaCode = new JavaCodeWriter(iStore, sqlUsesInRecursiveCalls).buildCodeLines(unit);
+        String javaCode =
+                new JavaCodeWriter(iStore, sqlUsesInRecursiveCalls, lineOffset)
+                        .buildCodeLines(unit);
 
         if (verbose) {
             logElapsedTime(logStore, "Java code generation", t0);

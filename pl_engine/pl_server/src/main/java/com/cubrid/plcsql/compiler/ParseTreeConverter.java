@@ -81,8 +81,10 @@ public class ParseTreeConverter extends PlcParserBaseVisitor<AstNode> {
             InstanceStore iStore,
             String spOwner,
             String compileSeqNo,
-            List<String> correlationNames) {
+            List<String> correlationNames,
+            int lineOffset) {
         this.iStore = iStore;
+        this.lineOffset = lineOffset;
         this.spOwner = Misc.getNormalizedText(spOwner);
         this.compileSeqNo = compileSeqNo;
         this.sqlSerialNo = 1;
@@ -2779,6 +2781,9 @@ public class ParseTreeConverter extends PlcParserBaseVisitor<AstNode> {
 
     private Map<String, UseAndDeclLevel> idUsedInCurrentDeclPart;
 
+    // lines before the code of the user, subtracted from a line written in a message
+    private final int lineOffset;
+
     private final LinkedHashMap<AstNode, ServerAPI.Question> semanticQuestions =
             new LinkedHashMap<>();
 
@@ -2922,7 +2927,7 @@ public class ParseTreeConverter extends PlcParserBaseVisitor<AstNode> {
                     Misc.getLineColumnOf(declCtx), // s068
                     String.format(
                             "name %s has already been used at line %d and column %d in the same declaration block",
-                            name, pos[0], pos[1]));
+                            name, pos[0] - lineOffset, pos[1]));
         }
     }
 

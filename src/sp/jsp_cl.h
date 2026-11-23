@@ -80,6 +80,12 @@ extern bool jsp_is_prepare_call (void);
 extern PT_NODE *jsp_get_default_expr_node_list (PARSER_CONTEXT * parser, cubpl::pl_signature & sig,
 						bool * flag_si_datetime);
 
+/*
+ * Lines before a PL/CSQL block in the procedure of a block trigger.
+ * The compiler subtracts it, so a line of an error is a line of the block.
+ */
+#define JSP_TRIGGER_BLOCK_LINE_OFFSET 2
+
 namespace cubpl
 {
   struct plcsql_correlation_use;

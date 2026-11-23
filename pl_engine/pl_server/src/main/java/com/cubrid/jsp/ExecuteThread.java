@@ -439,7 +439,7 @@ public class ExecuteThread extends Thread {
         try {
             info =
                     PlcsqlCompilerMain.compilePLCSQL(
-                            inSource, owner, verbose, request.correlationNames);
+                            inSource, owner, verbose, request.correlationNames, request.lineOffset);
             if (info.errCode == 0 && !checkOnly) {
                 MemoryJavaCompiler compiler = new MemoryJavaCompiler();
                 SourceCode sCode = new SourceCode(info.className, info.translated);

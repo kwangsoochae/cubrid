@@ -44,6 +44,9 @@ public class CompileRequest {
     // reported.
     public List<String> correlationNames = new ArrayList<>();
 
+    // lines before the code of the user, which the compiler subtracts from the lines it reports
+    public int lineOffset = 0;
+
     public CompileRequest(CUBRIDUnpacker unpacker) {
         code = unpacker.unpackCString();
         owner = unpacker.unpackCString();
@@ -53,5 +56,6 @@ public class CompileRequest {
         for (long i = 0; i < n; i++) {
             correlationNames.add(unpacker.unpackCString());
         }
+        lineOffset = unpacker.unpackInt();
     }
 }

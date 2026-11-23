@@ -54,6 +54,9 @@ namespace cubpl
      */
     std::vector <std::string> correlation_names;
 
+    /* lines before the code of the user, which the compiler subtracts from the lines it reports */
+    int line_offset;
+
     void pack (cubpacking::packer &serializator) const override;
     void unpack (cubpacking::unpacker &deserializator) override;
     size_t get_packed_size (cubpacking::packer &serializator, std::size_t start_offset) const override;

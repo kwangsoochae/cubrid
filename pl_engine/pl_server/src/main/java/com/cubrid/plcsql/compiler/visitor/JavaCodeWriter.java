@@ -65,10 +65,15 @@ public class JavaCodeWriter extends AstVisitor<JavaCodeWriter.CodeToResolve> {
         return type.javaCode;
     }
 
-    public JavaCodeWriter(InstanceStore iStore, Set<SqlUse> sqlUsesInRecursiveCalls) {
+    public JavaCodeWriter(
+            InstanceStore iStore, Set<SqlUse> sqlUsesInRecursiveCalls, int lineOffset) {
         this.iStore = iStore;
         this.sqlUsesReachableFromLoop = sqlUsesInRecursiveCalls;
+        this.lineOffset = lineOffset;
     }
+
+    // lines before the code of the user. The markers are moved up by it when the class is loaded.
+    private final int lineOffset;
 
     public List<String> codeLines = new ArrayList<>(); // no LinkedList : frequent access by indexes
     public StringBuilder codeRangeMarkers = new StringBuilder();
@@ -83,10 +88,15 @@ public class JavaCodeWriter extends AstVisitor<JavaCodeWriter.CodeToResolve> {
         CodeToResolve ctr = visitUnit(unit);
         ctr.resolve(0, codeLines, codeRangeMarkers);
 
+        // Without an offset, the class calls the method with one argument.
+        // So a PL server older than the offset can also load it.
+        String offsetArg = (lineOffset == 0) ? "" : ", " + lineOffset;
         codeLines.add(
                 "  private static List<CodeRangeMarker> codeRangeMarkerList = buildCodeRangeMarkerList(\""
                         + codeRangeMarkers
-                        + "\");");
+                        + "\""
+                        + offsetArg
+                        + ");");
         codeLines.add("}");
 
         return String.join("\n", codeLines);
