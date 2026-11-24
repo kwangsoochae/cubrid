@@ -1480,6 +1480,56 @@ pt_is_method_call_node (PARSER_CONTEXT * parser, PT_NODE * tree, void *arg, int 
 }
 
 /*
+ * pt_is_ddl_node_type () - test whether a statement type is DDL
+ *   return:
+ *   node_type(in):
+ */
+bool
+pt_is_ddl_node_type (PT_NODE_TYPE node_type)
+{
+  switch (node_type)
+    {
+    case PT_ALTER:
+    case PT_ALTER_INDEX:
+    case PT_ALTER_SERIAL:
+    case PT_ALTER_STORED_PROCEDURE:
+    case PT_ALTER_TRIGGER:
+    case PT_ALTER_USER:
+    case PT_CREATE_ENTITY:
+    case PT_CREATE_INDEX:
+    case PT_CREATE_SERIAL:
+    case PT_CREATE_STORED_PROCEDURE:
+    case PT_CREATE_TRIGGER:
+    case PT_CREATE_USER:
+    case PT_DROP:
+    case PT_DROP_INDEX:
+    case PT_DROP_SERIAL:
+    case PT_DROP_STORED_PROCEDURE:
+    case PT_DROP_TRIGGER:
+    case PT_DROP_USER:
+    case PT_GRANT:
+    case PT_RENAME:
+    case PT_REVOKE:
+    case PT_REMOVE_TRIGGER:
+    case PT_RENAME_TRIGGER:
+    case PT_UPDATE_STATS:
+      /* TODO: check it  */
+    case PT_CREATE_SERVER:
+    case PT_DROP_SERVER:
+    case PT_RENAME_SERVER:
+    case PT_ALTER_SERVER:
+    case PT_TRUNCATE:
+    case PT_ALTER_SYNONYM:
+    case PT_CREATE_SYNONYM:
+    case PT_DROP_SYNONYM:
+    case PT_RENAME_SYNONYM:
+      return true;
+    default:
+      return false;
+    }
+}
+
+/*
  * pt_is_ddl_statement () - test PT_NODE statement types,
  * 			    without exposing internals
  *   return:
@@ -1488,50 +1538,7 @@ pt_is_method_call_node (PARSER_CONTEXT * parser, PT_NODE * tree, void *arg, int 
 int
 pt_is_ddl_statement (const PT_NODE * node)
 {
-  if (node)
-    {
-      switch (node->node_type)
-	{
-	case PT_ALTER:
-	case PT_ALTER_INDEX:
-	case PT_ALTER_SERIAL:
-	case PT_ALTER_STORED_PROCEDURE:
-	case PT_ALTER_TRIGGER:
-	case PT_ALTER_USER:
-	case PT_CREATE_ENTITY:
-	case PT_CREATE_INDEX:
-	case PT_CREATE_SERIAL:
-	case PT_CREATE_STORED_PROCEDURE:
-	case PT_CREATE_TRIGGER:
-	case PT_CREATE_USER:
-	case PT_DROP:
-	case PT_DROP_INDEX:
-	case PT_DROP_SERIAL:
-	case PT_DROP_STORED_PROCEDURE:
-	case PT_DROP_TRIGGER:
-	case PT_DROP_USER:
-	case PT_GRANT:
-	case PT_RENAME:
-	case PT_REVOKE:
-	case PT_REMOVE_TRIGGER:
-	case PT_RENAME_TRIGGER:
-	case PT_UPDATE_STATS:
-	  /* TODO: check it  */
-	case PT_CREATE_SERVER:
-	case PT_DROP_SERVER:
-	case PT_RENAME_SERVER:
-	case PT_ALTER_SERVER:
-	case PT_TRUNCATE:
-	case PT_ALTER_SYNONYM:
-	case PT_CREATE_SYNONYM:
-	case PT_DROP_SYNONYM:
-	case PT_RENAME_SYNONYM:
-	  return true;
-	default:
-	  break;
-	}
-    }
-  return false;
+  return node != NULL && pt_is_ddl_node_type (node->node_type);
 }
 
 /*
@@ -2897,6 +2904,55 @@ pt_is_filtering_expression (PARSER_CONTEXT * parser, PT_NODE * expression)
 }
 
 /*
+ * pt_join_part_of_factor () - the join predicates a disjunction of conjunctions kept whole implies
+ *   return: a new predicate built from copies of the join predicates of the factor, or NULL if one of its
+ *           disjuncts has none
+ *   parser(in):
+ *   factor(in): the factor or a subtree of it
+ *
+ * Note: Each disjunct keeps its join predicates and drops its filtering ones, so the result holds whenever
+ *       the factor does.  It is the conjunction of the CNF clauses made only of join predicates that the
+ *       distribution of the factor would give, the part pt_split_join_preds () runs before the
+ *       hierarchical query when the factor is distributed.
+ */
+static PT_NODE *
+pt_join_part_of_factor (PARSER_CONTEXT * parser, PT_NODE * factor)
+{
+  PT_NODE *left, *right, *result;
+  PT_OP_TYPE op;
+
+  if (!PT_IS_EXPR_NODE_WITH_OPERATOR (factor, PT_AND) && !PT_IS_EXPR_NODE_WITH_OPERATOR (factor, PT_OR))
+    {
+      return pt_is_filtering_expression (parser, factor) ? NULL : parser_copy_tree (parser, factor);
+    }
+
+  op = factor->info.expr.op;
+  left = pt_join_part_of_factor (parser, factor->info.expr.arg1);
+  right = pt_join_part_of_factor (parser, factor->info.expr.arg2);
+  if (left == NULL || right == NULL)
+    {
+      if (op == PT_OR)
+	{
+	  parser_free_tree (parser, left);
+	  parser_free_tree (parser, right);
+	  return NULL;
+	}
+      return (left != NULL) ? left : right;
+    }
+
+  result = parser_make_expression (parser, op, left, right, NULL);
+  if (result == NULL)
+    {
+      parser_free_tree (parser, left);
+      parser_free_tree (parser, right);
+      return NULL;
+    }
+  result->type_enum = PT_TYPE_LOGICAL;
+  result->info.expr.location = factor->info.expr.location;
+  return result;
+}
+
+/*
  * pt_is_filtering_expression ()
  *   return: Splits the given predicate list into two: a part to be executed
  *           before the hierarchical query as it defines the join conditions and
@@ -2936,6 +2992,16 @@ pt_split_join_preds (PARSER_CONTEXT * parser, PT_NODE * predicates, PT_NODE ** j
 
       if (has_filter_pred)
 	{
+	  if (PT_IS_EXPR_NODE_WITH_OPERATOR (current_conj, PT_OR) && current_conj->or_next == NULL)
+	    {
+	      /* a factor kept whole: its join predicates still join the tables before the hierarchical query */
+	      PT_NODE *join_pred = pt_join_part_of_factor (parser, current_conj);
+
+	      if (join_pred != NULL)
+		{
+		  *join_part = parser_append_node (pt_cnf (parser, join_pred), *join_part);
+		}
+	    }
 	  *after_cb_filter = parser_append_node (current_conj, *after_cb_filter);
 	}
       else
