@@ -13662,6 +13662,11 @@ pt_check_with_info (PARSER_CONTEXT * parser, PT_NODE * node, SEMANTIC_CHK_INFO *
 		      PT_INTERNAL_ERROR (parser, "remote DML sink: failed to take the target's columns");
 		      break;
 		    }
+		  /* Asked now. Name resolution fills an empty column list with the target's columns. */
+		  if (node->node_type == PT_INSERT && node->info.insert.attr_list == NULL)
+		    {
+		      sink_target->info.spec.remote_server_name->info.dblink_table.dml_no_col_list = true;
+		    }
 		  pt_gather_dblink_cols_in_dml_target (parser, node, sink_target);
 		}
 	    }

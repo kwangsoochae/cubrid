@@ -24041,8 +24041,12 @@ pt_to_insert_xasl_remote_select (PARSER_CONTEXT * parser, PT_NODE * statement)
    *                         → remote_attr_names[i] = attr_list column names
    *   attr_list absent   → positional mapping (INSERT INTO remote SELECT ...)
    *                         → remote_attr_names = NULL; dblink_dml_open uses INSERT INTO t VALUES (?,?)
+   * Name resolution fills an absent list with the target's columns, so the statement is asked what
+   * it wrote (dml_no_col_list). The names go out unquoted. A list the statement did not write would
+   * fail a target whose column name is a reserved word.
    */
-  if (statement->info.insert.attr_list != NULL)
+  if (statement->info.insert.attr_list != NULL
+      && !statement->info.insert.spec->info.spec.remote_server_name->info.dblink_table.dml_no_col_list)
     {
       PT_NODE *col;
       int n, i;
