@@ -12444,7 +12444,9 @@ do_insert_at_server (PARSER_CONTEXT * parser, PT_NODE * statement)
   if (list_id)
     {
       count = list_id->tuple_cnt;
-      if (count > 0 && (statement->info.insert.odku_assignments != NULL || statement->info.insert.do_replace))
+      /* A remote target has no local class, so there is no instance to decache. */
+      if (count > 0 && (statement->info.insert.odku_assignments != NULL || statement->info.insert.do_replace)
+	  && statement->info.insert.spec->info.spec.flat_entity_list != NULL)
 	{
 	  MOP class_obj = statement->info.insert.spec->info.spec.flat_entity_list->info.name.db_object;
 
