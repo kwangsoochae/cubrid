@@ -13356,6 +13356,13 @@ pt_dblink_dml_check_sink (PARSER_CONTEXT * parser, PT_NODE * node, PT_NODE * tar
   dml = (node->node_type == PT_DELETE) ? "DELETE" : "UPDATE";
   cond = (node->node_type == PT_DELETE) ? node->info.delete_.search_cond : node->info.update.search_cond;
 
+  /* A statement checked again. Its driving subquery had a constant false WHERE, and
+   * pt_dblink_dml_sink_finish () left a false WHERE in its place. */
+  if (cond != NULL && cond->next == NULL && cond->node_type == PT_VALUE && pt_false_search_condition (parser, cond))
+    {
+      return true;
+    }
+
   /* The sink runs each subquery on its own. It builds nothing for a WITH clause of the statement,
    * so a subquery that reads one has no producer. A WITH clause inside the subquery is run with
    * it. A WITH clause of the statement that nothing reads does no harm. */
@@ -13502,6 +13509,37 @@ pt_dblink_dml_sink_finish (PARSER_CONTEXT * parser, PT_NODE * node)
 
   target = (node->node_type == PT_DELETE) ? node->info.delete_.spec : node->info.update.spec;
   cond = (node->node_type == PT_DELETE) ? node->info.delete_.search_cond : node->info.update.search_cond;
+
+  /* The type check folds a subquery whose WHERE is constant false into a null value. The driving
+   * subquery then has no value to send, so the statement changes no row. Its WHERE becomes a
+   * false value, which is what a local statement gets, and no statement goes to the remote. */
+  if (cond != NULL && cond->next == NULL && cond->node_type == PT_EXPR && cond->info.expr.arg2 != NULL
+      && cond->info.expr.arg2->node_type == PT_VALUE && cond->info.expr.arg2->info.value.is_false_where)
+    {
+      PT_NODE *false_where = parser_new_node (parser, PT_VALUE);
+
+      if (false_where == NULL)
+	{
+	  PT_INTERNAL_ERROR (parser, "allocate new node");
+	  return;
+	}
+      false_where->line_number = cond->line_number;
+      false_where->column_number = cond->column_number;
+      false_where->type_enum = PT_TYPE_LOGICAL;
+      false_where->info.value.data_value.i = 0;
+      (void) pt_value_to_db (parser, false_where);
+
+      parser_free_tree (parser, cond);
+      if (node->node_type == PT_DELETE)
+	{
+	  node->info.delete_.search_cond = false_where;
+	}
+      else
+	{
+	  node->info.update.search_cond = false_where;
+	}
+      return;
+    }
 
   if (cond != NULL && cond->next == NULL && cond->node_type == PT_EXPR && cond->info.expr.arg2 != NULL
       && PT_IS_QUERY (cond->info.expr.arg2))
