@@ -12750,7 +12750,7 @@ pt_dblink_odku_carry_values_and_translate (PARSER_CONTEXT * parser, PT_NODE * no
 	      continue;
 	    }
 
-	  /* The gate let a column in only when its qualifier names a table of the source SELECT. Any other
+	  /* The check let a column in only when it was resolved to a table of the source SELECT. Any other
 	   * column would be printed into the remote statement as the user wrote it. */
 	  for (spec = subq->info.query.q.select.from; spec != NULL; spec = spec->next)
 	    {
@@ -12900,6 +12900,8 @@ pt_dblink_dml_target_as_derived (PARSER_CONTEXT * parser, PT_NODE * spec)
  * values, so the values are de-duplicated. A scalar comparison is left as written. DISTINCT would
  * hide its "more than a single tuple" error. DELETE does not need this, because a second statement
  * finds the row gone.
+ * Distinct values match disjoint rows only when they are of the column's type family.
+ * pt_dblink_update_driving_types_agree () asks that first.
  *
  * This runs at the end of the statement's semantic check (pt_dblink_dml_sink_finish). That is ahead
  * of the subquery cache prepare in do_prepare_statement (). When pt_try_set_subquery_distinct ()
@@ -13554,7 +13556,10 @@ pt_dblink_update_driving_types_agree (PARSER_CONTEXT * parser, PT_NODE * key, PT
  *
  * Note: The local subqueries are translated, since nothing else translates them. The driving
  *   subquery is the right side of the single WHERE predicate. An UPDATE holds one more per SET
- *   assignment. The values of an UPDATE's IN / = ANY driving subquery are made distinct.
+ *   assignment. The values of an UPDATE's IN / = ANY driving subquery are made distinct. They must
+ *   be of the column's type family for that.
+ *   A driving subquery the type check folded away has no value to send, and the statement gets a
+ *   false WHERE.
  */
 static void
 pt_dblink_dml_sink_finish (PARSER_CONTEXT * parser, PT_NODE * node)
