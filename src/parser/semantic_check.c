@@ -13485,6 +13485,67 @@ pt_dblink_dml_check_sink (PARSER_CONTEXT * parser, PT_NODE * node, PT_NODE * tar
 }
 
 /*
+ * pt_dblink_dml_type_family () - Tell the family of a type, for the driving values of a remote UPDATE.
+ *   return: 0 for a type of no family, or a number that two types of one family share
+ *   type(in): a type
+ */
+static int
+pt_dblink_dml_type_family (PT_TYPE_ENUM type)
+{
+  if (PT_IS_NUMERIC_TYPE (type))
+    {
+      return 1;
+    }
+  if (PT_IS_CHAR_STRING_TYPE (type))
+    {
+      return 2;
+    }
+  if (PT_IS_BIT_STRING_TYPE (type))
+    {
+      return 3;
+    }
+  if (PT_IS_DATE_TIME_TYPE (type))
+    {
+      return 4;
+    }
+  if (type == PT_TYPE_JSON)
+    {
+      return 5;
+    }
+  return 0;
+}
+
+/*
+ * pt_dblink_update_driving_types_agree () - Tell whether the values of a remote UPDATE's IN / = ANY
+ *   driving subquery are of the type family of the column they are compared with.
+ *   return: true if so
+ *   parser(in): parser context
+ *   key(in): the target column
+ *   subq(in): the driving subquery, type checked
+ *
+ * Note: The values are made distinct here, in their own type, and the remote compares each with the
+ *   column in the column's type. '1' and '01' are two values here and one INT there, so the row
+ *   would be updated twice. Within a family, values that differ here differ there too. A value with
+ *   no type yet, as a host variable has, cannot be told and is refused. A null changes no row.
+ */
+static bool
+pt_dblink_update_driving_types_agree (PARSER_CONTEXT * parser, PT_NODE * key, PT_NODE * subq)
+{
+  PT_NODE *value = pt_get_select_list (parser, subq);
+  int key_family, value_family;
+
+  if (value == NULL || value->type_enum == PT_TYPE_NULL || value->type_enum == PT_TYPE_NA)
+    {
+      return true;
+    }
+
+  key_family = pt_dblink_dml_type_family (key->type_enum);
+  value_family = pt_dblink_dml_type_family (value->type_enum);
+
+  return key_family != 0 && key_family == value_family;
+}
+
+/*
  * pt_dblink_dml_sink_finish () - Finish the semantic check of a remote DML sink resolved with its
  *   target's columns.
  *   return: none. On failure the parser error is set.
@@ -13544,6 +13605,15 @@ pt_dblink_dml_sink_finish (PARSER_CONTEXT * parser, PT_NODE * node)
   if (cond != NULL && cond->next == NULL && cond->node_type == PT_EXPR && cond->info.expr.arg2 != NULL
       && PT_IS_QUERY (cond->info.expr.arg2))
     {
+      if (node->node_type == PT_UPDATE && (cond->info.expr.op == PT_IS_IN || cond->info.expr.op == PT_EQ_SOME)
+	  && cond->info.expr.arg1 != NULL && cond->info.expr.arg1->node_type == PT_NAME
+	  && !pt_dblink_update_driving_types_agree (parser, cond->info.expr.arg1, cond->info.expr.arg2))
+	{
+	  PT_ERROR (parser, target, "dblink: remote UPDATE with a local subquery supports only IN or = ANY values of "
+		    "the type family of the column; a value of another family could update a row twice");
+	  return;
+	}
+
       subq = pt_dblink_dml_sink_subq (parser, node, target, cond->info.expr.arg2, "WHERE");
       if (subq != NULL && node->node_type == PT_UPDATE
 	  && (cond->info.expr.op == PT_IS_IN || cond->info.expr.op == PT_EQ_SOME))
