@@ -1174,6 +1174,17 @@ pt_check_cast_op (PARSER_CONTEXT * parser, PT_NODE * node)
   if (arg1->node_type == PT_EXPR && arg1->info.expr.op == PT_CAST)
     {
       /* arg1 is a cast, so arg1.type_enum is not yet set; pull type from expression's cast type */
+      if (arg1->info.expr.cast_type == NULL)
+	{
+	  /* arg1 is a COLLATE modifier whose type could not be resolved (e.g. COLLATE on a non-string value).
+	   * Type checking does not stop at that error inside a collection constructor or an IN list, so the outer
+	   * CAST still comes here; the error is already set. */
+	  if (!pt_has_error (parser))
+	    {
+	      PT_INTERNAL_ERROR (parser, "null cast type");
+	    }
+	  return false;
+	}
       arg_type = arg1->info.expr.cast_type->type_enum;
     }
   else
@@ -11616,6 +11627,12 @@ pt_semantic_check_local (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int
       if (node->info.method_call.call_or_expr == PT_IS_MTHD_EXPR)
 	{
 	  pt_check_method (parser, node);
+	  if (top_node != NULL)
+	    {
+	      /* a statement that calls a procedure in an expression; a view whose query does carries this up to the
+	       * statements that read it */
+	      top_node->flag.has_sp_call = 1;
+	    }
 	}
       else if (node->info.method_call.call_or_expr == PT_IS_CALL_STMT)
 	{
@@ -12676,6 +12693,7 @@ pt_check_with_clause (PARSER_CONTEXT * parser, PT_NODE * node)
  *   stand-alone.
  *   return: the translated subquery, or NULL with the parser error set
  *   parser(in)   : parser context
+ *   stmt(in/out) : the remote DML, marked when the subquery calls a stored procedure
  *   subq(in)     : the local subquery, already resolved and checked
  *   fail_msg(in) : PT_INTERNAL_ERROR message if mq_translate returns NULL without setting an error
  *
@@ -12688,12 +12706,18 @@ pt_check_with_clause (PARSER_CONTEXT * parser, PT_NODE * node)
  *   mq_translate contract (db_vdb.c). Without this the stale subquery would reach XASL generation.
  */
 static PT_NODE *
-pt_dblink_dml_translate_subq (PARSER_CONTEXT * parser, PT_NODE * subq, const char *fail_msg)
+pt_dblink_dml_translate_subq (PARSER_CONTEXT * parser, PT_NODE * stmt, PT_NODE * subq, const char *fail_msg)
 {
   subq = mq_translate (parser, subq);
   if (subq == NULL && !pt_has_error (parser))
     {
       PT_INTERNAL_ERROR (parser, fail_msg);
+    }
+
+  if (subq != NULL && subq->flag.has_sp_call)
+    {
+      /* mq_translate marks the subquery when a view in it calls a stored procedure */
+      stmt->flag.has_sp_call = 1;
     }
 
   return subq;
@@ -12781,7 +12805,8 @@ pt_dblink_odku_carry_values_and_translate (PARSER_CONTEXT * parser, PT_NODE * no
       num_visible = pt_length_of_select_list (subq->info.query.q.select.list, EXCLUDE_HIDDEN_COLUMNS);
     }
 
-  subq = pt_dblink_dml_translate_subq (parser, subq, "remote INSERT SELECT: failed to translate the SELECT subquery");
+  subq = pt_dblink_dml_translate_subq (parser, node, subq,
+				       "remote INSERT SELECT: failed to translate the SELECT subquery");
   if (subq == NULL)
     {
       return;
@@ -13031,7 +13056,7 @@ pt_dblink_dml_sink_subq (PARSER_CONTEXT * parser, PT_NODE * stmt, PT_NODE * targ
 
   snprintf (msg, sizeof (msg), "remote %s: failed to translate the %s subquery", dml, clause);
 
-  return pt_dblink_dml_translate_subq (parser, subq, msg);
+  return pt_dblink_dml_translate_subq (parser, stmt, subq, msg);
 }
 
 /*
