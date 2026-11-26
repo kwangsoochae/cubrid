@@ -13552,8 +13552,10 @@ pt_dblink_dml_type_family (PT_TYPE_ENUM type)
  *
  * Note: The values are made distinct here, in their own type, and the remote compares each with the
  *   column in the column's type. '1' and '01' are two values here and one INT there, so the row
- *   would be updated twice. Within a family, values that differ here differ there too. A value with
- *   no type yet, as a host variable has, cannot be told and is refused. A null changes no row.
+ *   would be updated twice. Within a family, values that differ here differ there too, as long as
+ *   a remote string column has a binary collation. DBLink does not support any other collation there.
+ *   A value with no type yet, as a host variable has, cannot be told and is refused. A null changes
+ *   no row.
  */
 static bool
 pt_dblink_update_driving_types_agree (PARSER_CONTEXT * parser, PT_NODE * key, PT_NODE * subq)
